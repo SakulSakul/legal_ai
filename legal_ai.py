@@ -48,7 +48,8 @@ SUPABASE_KEY = get_secret("SUPABASE_KEY")
 genai.configure(api_key=GEMINI_KEY)
 SUPA = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-CONTRACT_TYPES = ["특약매입", "직매입", "임대차", "위탁"]
+CONTRACT_TYPES  = ["특약매입", "직매입"]
+YAKJEONG_TYPES  = ["협력사원", "인테리어설치", "매장이동", "공동판촉", "기타"]
 DOC_CATS = {
     "saryu":    {"label": "사규",   "icon": "🏛"},
     "contract": {"label": "계약서", "icon": "📄"},
@@ -224,6 +225,10 @@ def main():
         if doc_cat == "contract":
             contract_type = st.selectbox("거래 유형", CONTRACT_TYPES, key="upload_type")
 
+        yakjeong_type = None
+        if doc_cat == "yakjeong":
+            yakjeong_type = st.selectbox("약정서 유형", YAKJEONG_TYPES, key="upload_yak_type")
+
         uploaded_files = st.file_uploader(
             "Word 파일 선택 (.docx)",
             type=["docx"],
@@ -242,13 +247,15 @@ def main():
                         text = extract_text(f.read())
                         if contract_type:
                             label = "계약서(" + contract_type + "): " + f.name
+                        elif yakjeong_type:
+                            label = "약정서(" + yakjeong_type + "): " + f.name
                         else:
                             label = DOC_CATS[doc_cat]["label"] + ": " + f.name
                         new_doc = {
                             "id":            f.name + "_" + doc_cat + "_" + str(datetime.now().timestamp()),
                             "name":          f.name,
                             "cat":           doc_cat,
-                            "contract_type": contract_type,
+                            "contract_type": contract_type or yakjeong_type,
                             "label":         label,
                             "text":          text,
                             "size":          f.size,
