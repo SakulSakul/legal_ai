@@ -162,7 +162,7 @@ def build_system(docs):
 # ── AI 호출 (Gemini + Google 검색) ──────────────────────────
 def call_ai(system_prompt, messages):
     # gemini-2.0-flash 시도 → 할당량 초과 시 gemini-1.5-flash 로 자동 전환
-    for model_name in ["gemini-2.0-flash", "gemini-1.5-flash"]:
+    for model_name in ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash-latest"]:
         try:
             model = genai.GenerativeModel(
                 model_name=model_name,
@@ -181,7 +181,7 @@ def call_ai(system_prompt, messages):
         except Exception as e:
             err = str(e)
             if "ResourceExhausted" in err or "429" in err or "quota" in err.lower():
-                if model_name == "gemini-1.5-flash":
+                if model_name == "gemini-1.5-flash-latest":
                     # 두 모델 모두 할당량 초과
                     return (
                         "⚠️ **Gemini API 무료 할당량을 초과했습니다.**\n\n"
