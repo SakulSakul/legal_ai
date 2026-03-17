@@ -145,7 +145,7 @@ def build_system(docs):
         "- 독점규제 및 공정거래에 관한 법률(공정거래법)\n"
         "- 하도급거래 공정화에 관한 법률\n\n"
         "[답변 방식]\n"
-        "1. 대규모유통업법, 보세판매장 고시, 공정거래법 등 관련 법령 지식을 최대한 활용하세요.\n"
+        "1. Google 검색을 통해 대규모유통업법, 보세판매장 고시 등 관련 법령 최신 조항을 먼저 확인하세요.\n"
         "2. 사규 → 계약서 조항 → 약정서 → 법령 순서로 교차 분석하세요.\n"
         "3. 계약 조항과 법령이 충돌하는 경우 리스크 수준(高/中/低)을 명시하세요.\n"
         "4. 출처 표기 형식 (반드시 준수):\n"
@@ -156,10 +156,10 @@ def build_system(docs):
         "   - 고시: [고시: 보세판매장 운영에 관한 고시 제N조]\n"
         "5. 체크리스트 요청 시 체크/경고/엑스 형식으로 항목별 판단을 제시하세요.\n"
         "6. 답변 끝에 [법적 근거 요약] 섹션으로 정리하세요.\n\n"
-        "[주의] 중요 의사결정은 법무팀 최종 검토를 권장하며, 본 답변은 내부 참고용입니다."
+        "[주의] 중요 의사결정은 CSR팀 법무 사내변호사 최종 검토를 권장하며, 본 답변은 내부 참고용입니다."
     )
 
-# ── AI 호출 (Gemini) ─────────────────────────────────────────
+# ── AI 호출 (Gemini + Google 검색 grounding) ─────────────────
 def call_ai(system_prompt, messages):
     from google.genai import types
 
@@ -175,7 +175,10 @@ def call_ai(system_prompt, messages):
             response = GEMINI.models.generate_content(
                 model=model_name,
                 contents=history + [types.Content(role="user", parts=[types.Part(text=last_msg)])],
-                config=types.GenerateContentConfig(system_instruction=system_prompt),
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                ),
             )
             return response.text
 
@@ -343,7 +346,7 @@ def main():
             cnt = sum(1 for d in st.session_state.docs if d["cat"] == cat_id)
             if cnt:
                 badge_parts.append(cat_info["icon"] + " " + cat_info["label"] + " " + str(cnt))
-        st.caption("  |  ".join(badge_parts) + "  |  ⚖ 대규모유통업법 · 보세판매장 고시 기반 분석")
+        st.caption("  |  ".join(badge_parts) + "  |  🔍 대규모유통업법 · 보세판매장 고시 실시간 검색")
         st.divider()
     else:
         st.info("👆 사이드바에서 사규, 계약서, 약정서를 업로드하면 자문이 시작됩니다.")
@@ -373,16 +376,42 @@ def main():
     if not st.session_state.docs:
         st.chat_input("문서를 먼저 업로드해 주세요", disabled=True)
     else:
-        user_input = st.chat_input("사규 계약서 약정서 및 관련 법령에 대해 질문하세요...")
+        # ── 채팅용 임시 파일 업로드 ──────────────────────────
+        chat_files = st.file_uploader(
+            "📎 비교할 파일 첨부 (선택, 여러 개 가능)",
+            type=["docx"],
+            accept_multiple_files=True,
+            key="chat_uploader",
+            help="계약서 비교 등 일회성 분석용 파일을 첨부하세요. 사이드바 등록 없이 이 대화에서만 사용됩니다.",
+        )
+
+        user_input = st.chat_input("질문을 입력하세요... (파일 첨부 후 비교 요청 가능)")
         query = user_input or st.session_state.pop("pending_input", None)
 
         if query:
-            st.session_state.messages.append({"role": "user", "content": query})
+            # 첨부 파일 텍스트 추출
+            attached_texts = []
+            if chat_files:
+                for f in chat_files:
+                    text = extract_text(f.read())
+                    attached_texts.append("=== 첨부 파일: " + f.name + " ===\n" + text)
+
+            # 첨부 파일이 있으면 질문에 파일 내용 합산
+            if attached_texts:
+                full_query = (
+                    query + "\n\n[첨부된 파일 내용]\n" + "\n\n".join(attached_texts)
+                )
+                display_query = query + "\n\n📎 " + ", ".join(f.name for f in chat_files)
+            else:
+                full_query = query
+                display_query = query
+
+            st.session_state.messages.append({"role": "user", "content": full_query})
             with st.chat_message("user", avatar="👤"):
-                st.markdown(query)
+                st.markdown(display_query)
 
             with st.chat_message("assistant", avatar="⚖"):
-                with st.spinner("사규 계약서 검토 중... 관련 법령 검색 중..."):
+                with st.spinner("문서 분석 중... 관련 법령 검색 중..."):
                     system = build_system(st.session_state.docs)
                     reply = call_ai(system, st.session_state.messages)
                 st.markdown(reply)
@@ -413,7 +442,7 @@ def main():
             st.rerun()
 
     if st.session_state.messages:
-        st.caption("⚠ 본 AI 자문은 내부 참고용이며, 중요 의사결정은 법무팀 최종 검토를 권장합니다.")
+        st.caption("⚠ 본 AI 자문은 내부 참고용이며, 중요 의사결정은 CSR팀 법무 사내변호사 최종 검토를 권장합니다.")
 
 
 if __name__ == "__main__":
