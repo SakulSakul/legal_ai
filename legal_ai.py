@@ -161,24 +161,41 @@ def build_system(docs):
 
 # ── AI 호출 (Gemini + Google 검색) ──────────────────────────
 def call_ai(system_prompt, messages):
-    model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
-        system_instruction=system_prompt,
-        tools="google_search_retrieval",
-    )
+    # gemini-2.0-flash 시도 → 할당량 초과 시 gemini-1.5-flash 로 자동 전환
+    for model_name in ["gemini-2.0-flash", "gemini-1.5-flash"]:
+        try:
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                system_instruction=system_prompt,
+                tools="google_search_retrieval",
+            )
 
-    # Gemini는 role이 user / model 두 가지
-    gemini_messages = []
-    for m in messages:
-        role = "model" if m["role"] == "assistant" else "user"
-        gemini_messages.append({"role": role, "parts": [m["content"]]})
+            gemini_messages = []
+            for m in messages:
+                role = "model" if m["role"] == "assistant" else "user"
+                gemini_messages.append({"role": role, "parts": [m["content"]]})
 
-    response = model.generate_content(gemini_messages)
+            response = model.generate_content(gemini_messages)
+            return response.text
 
-    try:
-        return response.text
-    except Exception:
-        return "응답을 가져오지 못했습니다. 다시 시도해 주세요."
+        except Exception as e:
+            err = str(e)
+            if "ResourceExhausted" in err or "429" in err or "quota" in err.lower():
+                if model_name == "gemini-1.5-flash":
+                    # 두 모델 모두 할당량 초과
+                    return (
+                        "⚠️ **Gemini API 무료 할당량을 초과했습니다.**\n\n"
+                        "무료 플랜은 분당 요청 횟수에 제한이 있습니다.\n"
+                        "**1~2분 후 다시 시도해 주세요.**\n\n"
+                        "자주 이 오류가 발생한다면 [Google AI Studio](https://aistudio.google.com)에서 "
+                        "결제를 활성화하면 제한이 크게 늘어납니다."
+                    )
+                # 다음 모델로 재시도
+                continue
+            else:
+                return "⚠️ 오류가 발생했습니다: " + err[:200]
+
+    return "⚠️ 응답을 가져오지 못했습니다. 다시 시도해 주세요."
 
 # ── Streamlit UI ─────────────────────────────────────────────
 def main():
