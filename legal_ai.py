@@ -163,7 +163,7 @@ def build_system(docs):
 def call_ai(system_prompt, messages):
     from google.genai import types
 
-    for model_name in ["gemini-2.0-flash", "gemini-2.0-flash-lite"]:
+    for model_name in ["gemini-2.5-flash", "gemini-2.5-flash-lite"]:
         try:
             history = []
             for m in messages[:-1]:
@@ -182,7 +182,7 @@ def call_ai(system_prompt, messages):
         except Exception as e:
             err = str(e)
             if "ResourceExhausted" in err or "429" in err or "quota" in err.lower():
-                if model_name == "gemini-2.0-flash-lite":
+                if model_name == "gemini-2.5-flash-lite":
                     return (
                         "⚠️ **Gemini API 할당량을 초과했습니다.**\n\n"
                         "**1~2분 후 다시 시도해 주세요.**"
