@@ -145,7 +145,7 @@ def build_system(docs):
         "- 독점규제 및 공정거래에 관한 법률(공정거래법)\n"
         "- 하도급거래 공정화에 관한 법률\n\n"
         "[답변 방식]\n"
-        "1. Google 검색을 통해 관련 법령 최신 조항을 먼저 확인하세요.\n"
+        "1. 대규모유통업법, 보세판매장 고시, 공정거래법 등 관련 법령 지식을 최대한 활용하세요.\n"
         "2. 사규 → 계약서 조항 → 약정서 → 법령 순서로 교차 분석하세요.\n"
         "3. 계약 조항과 법령이 충돌하는 경우 리스크 수준(高/中/低)을 명시하세요.\n"
         "4. 출처 표기 형식 (반드시 준수):\n"
@@ -159,15 +159,13 @@ def build_system(docs):
         "[주의] 중요 의사결정은 법무팀 최종 검토를 권장하며, 본 답변은 내부 참고용입니다."
     )
 
-# ── AI 호출 (Gemini + Google 검색) ──────────────────────────
+# ── AI 호출 (Gemini) ─────────────────────────────────────────
 def call_ai(system_prompt, messages):
-    # gemini-2.0-flash 시도 → 할당량 초과 시 gemini-1.5-flash 로 자동 전환
-    for model_name in ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash-latest"]:
+    for model_name in ["gemini-2.0-flash", "gemini-2.0-flash-lite"]:
         try:
             model = genai.GenerativeModel(
                 model_name=model_name,
                 system_instruction=system_prompt,
-                tools="google_search_retrieval",
             )
 
             gemini_messages = []
@@ -181,8 +179,7 @@ def call_ai(system_prompt, messages):
         except Exception as e:
             err = str(e)
             if "ResourceExhausted" in err or "429" in err or "quota" in err.lower():
-                if model_name == "gemini-1.5-flash-latest":
-                    # 두 모델 모두 할당량 초과
+                if model_name == "gemini-2.0-flash-lite":
                     return (
                         "⚠️ **Gemini API 무료 할당량을 초과했습니다.**\n\n"
                         "무료 플랜은 분당 요청 횟수에 제한이 있습니다.\n"
@@ -190,7 +187,6 @@ def call_ai(system_prompt, messages):
                         "자주 이 오류가 발생한다면 [Google AI Studio](https://aistudio.google.com)에서 "
                         "결제를 활성화하면 제한이 크게 늘어납니다."
                     )
-                # 다음 모델로 재시도
                 continue
             else:
                 return "⚠️ 오류가 발생했습니다: " + err[:200]
@@ -347,7 +343,7 @@ def main():
             cnt = sum(1 for d in st.session_state.docs if d["cat"] == cat_id)
             if cnt:
                 badge_parts.append(cat_info["icon"] + " " + cat_info["label"] + " " + str(cnt))
-        st.caption("  |  ".join(badge_parts) + "  |  🔍 대규모유통업법 보세판매장 고시 실시간 검색")
+        st.caption("  |  ".join(badge_parts) + "  |  ⚖ 대규모유통업법 · 보세판매장 고시 기반 분석")
         st.divider()
     else:
         st.info("👆 사이드바에서 사규, 계약서, 약정서를 업로드하면 자문이 시작됩니다.")
