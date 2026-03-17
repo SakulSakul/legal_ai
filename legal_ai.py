@@ -161,7 +161,7 @@ def build_system(docs):
 
 # ── AI 호출 (Gemini) ─────────────────────────────────────────
 def call_ai(system_prompt, messages):
-    for model_name in ["gemini-2.0-flash", "gemini-2.0-flash-lite"]:
+    for model_name in ["gemini-2.5-flash-preview-05-20", "gemini-2.0-flash-lite"]:
         try:
             model = genai.GenerativeModel(
                 model_name=model_name,
