@@ -27,7 +27,7 @@
 # ============================================================
 
 import streamlit as st
-import google.generativeai as genai
+from google import genai
 import os
 from datetime import datetime
 from docx import Document
@@ -45,8 +45,8 @@ GEMINI_KEY   = get_secret("GEMINI_API_KEY")
 SUPABASE_URL = get_secret("SUPABASE_URL")
 SUPABASE_KEY = get_secret("SUPABASE_KEY")
 
-genai.configure(api_key=GEMINI_KEY)
-SUPA = create_client(SUPABASE_URL, SUPABASE_KEY)
+SUPA        = create_client(SUPABASE_URL, SUPABASE_KEY)
+GEMINI      = genai.Client(api_key=GEMINI_KEY)
 
 CONTRACT_TYPES  = ["특약매입", "직매입"]
 YAKJEONG_TYPES  = ["협력사원", "인테리어설치", "매장이동", "공동판촉", "기타"]
@@ -161,19 +161,22 @@ def build_system(docs):
 
 # ── AI 호출 (Gemini) ─────────────────────────────────────────
 def call_ai(system_prompt, messages):
-    for model_name in ["gemini-2.5-flash-preview-05-20", "gemini-2.0-flash-lite"]:
+    from google.genai import types
+
+    for model_name in ["gemini-2.0-flash", "gemini-2.0-flash-lite"]:
         try:
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                system_instruction=system_prompt,
-            )
-
-            gemini_messages = []
-            for m in messages:
+            history = []
+            for m in messages[:-1]:
                 role = "model" if m["role"] == "assistant" else "user"
-                gemini_messages.append({"role": role, "parts": [m["content"]]})
+                history.append(types.Content(role=role, parts=[types.Part(text=m["content"])]))
 
-            response = model.generate_content(gemini_messages)
+            last_msg = messages[-1]["content"]
+
+            response = GEMINI.models.generate_content(
+                model=model_name,
+                contents=history + [types.Content(role="user", parts=[types.Part(text=last_msg)])],
+                config=types.GenerateContentConfig(system_instruction=system_prompt),
+            )
             return response.text
 
         except Exception as e:
@@ -181,11 +184,8 @@ def call_ai(system_prompt, messages):
             if "ResourceExhausted" in err or "429" in err or "quota" in err.lower():
                 if model_name == "gemini-2.0-flash-lite":
                     return (
-                        "⚠️ **Gemini API 무료 할당량을 초과했습니다.**\n\n"
-                        "무료 플랜은 분당 요청 횟수에 제한이 있습니다.\n"
-                        "**1~2분 후 다시 시도해 주세요.**\n\n"
-                        "자주 이 오류가 발생한다면 [Google AI Studio](https://aistudio.google.com)에서 "
-                        "결제를 활성화하면 제한이 크게 늘어납니다."
+                        "⚠️ **Gemini API 할당량을 초과했습니다.**\n\n"
+                        "**1~2분 후 다시 시도해 주세요.**"
                     )
                 continue
             else:
