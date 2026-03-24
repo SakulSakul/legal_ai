@@ -206,7 +206,7 @@ def main():
 
     st.markdown("""
     <style>
-    #MainMenu, footer, header {visibility: hidden;}
+    #MainMenu, footer {visibility: hidden;} /* header 제거하여 사이드바 토글 버튼 노출 */
     .block-container {padding: 1.2rem 1.5rem;}
     .stChatMessage {border-radius: 10px; margin-bottom: 6px;}
     </style>
