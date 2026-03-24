@@ -338,7 +338,7 @@ def main():
             st.caption("저장된 자문 없음")
 
     # ── 메인 영역 ───────────────────────────────────────────
-    st.header("⚖ 공정거래 법무 자문", divider="primary") # ⬅️ 이 부분을 수정했습니다!
+    st.markdown("## ⚖ 공정거래 법무 자문")
 
     if st.session_state.docs:
         badge_parts = []
