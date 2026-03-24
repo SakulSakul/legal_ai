@@ -129,9 +129,8 @@ def build_system(docs):
     yakjeong_text = fmt_docs(by_cat("yakjeong"))[:20000]
 
     return (
-        "당신은 면세점(보세판매장) 전문 공정거래 사내변호사 AI입니다.\n"
-        "MD 바이어가 공급업체 브랜드사와 거래할 때 발생하는 공정거래 법적 리스크를 판단하고,\n"
-        "계약서 약정서 조항을 해석하며, 올바른 의사결정을 지원합니다.\n\n"
+        "당신은 면세점(보세판매장) 전문 공정거래 AI변호사이자 컴플라이언스 의사결정 보조 AI입니다.\n"
+        "단순한 법령 해설을 넘어, 회사의 비즈니스 이익과 법적 리스크를 종합적으로 조율하여 실무적인 결단을 돕고 MD/바이어의 업무를 명확히 가이드합니다.\n\n"
         "[활용 가능한 문서]\n"
         "① 사규 컴플라이언스 정책:\n"
         + saryu_text +
@@ -155,15 +154,16 @@ def build_system(docs):
         "   - 법령: [법령: 대규모유통업법 제N조(제목)]\n"
         "   - 고시: [고시: 보세판매장 운영에 관한 고시 제N조]\n"
         "5. 체크리스트 요청 시 체크/경고/엑스 형식으로 항목별 판단을 제시하세요.\n"
-        "6. 답변 끝에 [법적 근거 요약] 섹션으로 정리하세요.\n\n"
-        "[주의] 중요 의사결정은 CSR팀 법무 사내변호사 최종 검토를 권장하며, 본 답변은 내부 참고용입니다."
+        "6. 답변 중간에 [법적 근거 요약] 섹션으로 주요 쟁점을 먼저 정리하세요.\n"
+        "7. 💡 가장 마지막에는 반드시 **[최종 AI변호사 검토 의견 및 실무 가이드]** 섹션을 추가하세요. 보조 의사결정자의 관점에서 ① 추천하는 방향(진행 가능 / 조건부 진행 / 보류 및 거절), ② MD/바이어를 위한 구체적인 Action Plan(계약서 수정 대안, 협상 논리, 내부 품의 시 유의사항 등)을 명확하게 제시하세요.\n\n"
+        "[주의] 본 AI의 답변은 내부 참고용 1차 검토 의견이므로, 최종 법적 책임이 따르는 중대 사안은 반드시 CSR팀 법무 담당자의 크로스체크를 받으시기 바랍니다."
     )
 
 # ── AI 호출 (Gemini + Google 검색 grounding) ─────────────────
 def call_ai(system_prompt, messages):
     from google.genai import types
 
-    for model_name in ["gemini-2.5-flash", "gemini-2.5-flash-lite"]:
+    for model_name in ["gemini-2.5-pro", "gemini-2.5-flash"]:
         try:
             history = []
             for m in messages[:-1]:
@@ -185,12 +185,12 @@ def call_ai(system_prompt, messages):
         except Exception as e:
             err = str(e)
             if "ResourceExhausted" in err or "429" in err or "quota" in err.lower():
-                if model_name == "gemini-2.5-flash-lite":
+                if model_name == "gemini-2.5-flash":
                     return (
                         "⚠️ **Gemini API 할당량을 초과했습니다.**\n\n"
                         "**1~2분 후 다시 시도해 주세요.**"
                     )
-                continue
+                continue 
             else:
                 return "⚠️ 오류가 발생했습니다: " + err[:200]
 
@@ -338,7 +338,6 @@ def main():
             st.caption("저장된 자문 없음")
 
     # ── 메인 영역 ───────────────────────────────────────────
-    # 기존 markdown("## ...") 대신 크기가 가장 큰 title() 사용
     st.title("⚖ 공정거래 법무 자문")
 
     if st.session_state.docs:
@@ -355,12 +354,12 @@ def main():
     if not st.session_state.messages and st.session_state.docs:
         st.markdown("**자주 묻는 질문**")
         samples = [
-            ("📋 계약 체크리스트", "특약매입 계약 체결 전 대규모유통업법 기준 필수 체크리스트를 작성해 주세요."),
-            ("🔍 조항 해석",       "당사 직매입 계약서의 반품 조항이 대규모유통업법 제11조와 충돌하는지 검토해 주세요."),
-            ("⚖ 법령 위반 검토",   "위탁 계약서의 판매수수료 조항이 현행 법령상 허용 범위 내에 있는지 분석해 주세요."),
-            ("📊 계약서 비교",      "당사 임대차 계약서와 공정거래위원회 표준계약서의 주요 차이점을 비교해 주세요."),
-            ("💰 대금결제",         "직매입 계약의 대금지급 기한이 법정 기한 수령일 40일을 준수하는지 확인해 주세요."),
-            ("🚫 불공정 조항",      "입점 약정서에 타 면세점 납품 제한 조항이 있는데 공정거래법상 문제가 없나요?"),
+            ("📋 특약매입 체크",    "특약매입 계약 체결 전 대규모유통업법 기준 필수 체크리스트를 작성해 주세요."),
+            ("🔍 직매입 반품검토",  "당사 직매입 계약서의 반품 조건(시즌아웃 등)이 대규모유통업법 예외 조항에 부합하는지 검토해 주세요."),
+            ("🤝 공동판촉 분담",    "브랜드사와 공동 판촉 행사 진행 시, 판촉비용 분담 약정서 내용이 대규모유통업법 위반 소지가 없는지 분석해 주세요."),
+            ("🛠 인테리어 비용",    "매장 리뉴얼 시 인테리어 설치 비용 분담 조항이 당사 사규 및 공정거래법상 문제가 없는지 확인해 주세요."),
+            ("🧑‍💼 협력사원 파견",    "협력사원(판촉사원) 파견 약정서 상 면세점의 업무 지시 및 관리 권한 범위가 적법하게 규정되어 있는지 검토해 주세요."),
+            ("🚫 불공정 조항",      "입점 약정서 내 '타 면세점 납품 제한' 등 배타적 거래 조항의 공정거래법상 리스크 수준을 판단해 주세요."),
         ]
         cols = st.columns(3)
         for i, (cat, q) in enumerate(samples):
@@ -390,14 +389,12 @@ def main():
         query = user_input or st.session_state.pop("pending_input", None)
 
         if query:
-            # 첨부 파일 텍스트 추출
             attached_texts = []
             if chat_files:
                 for f in chat_files:
                     text = extract_text(f.read())
                     attached_texts.append("=== 첨부 파일: " + f.name + " ===\n" + text)
 
-            # 첨부 파일이 있으면 질문에 파일 내용 합산
             if attached_texts:
                 full_query = (
                     query + "\n\n[첨부된 파일 내용]\n" + "\n\n".join(attached_texts)
