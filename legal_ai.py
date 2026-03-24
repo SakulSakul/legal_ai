@@ -206,7 +206,7 @@ def main():
 
     st.markdown("""
     <style>
-    #MainMenu, footer {visibility: hidden;} /* header 제거하여 사이드바 토글 버튼 노출 */
+    #MainMenu, footer, header {visibility: hidden;}
     .block-container {padding: 1.2rem 1.5rem;}
     .stChatMessage {border-radius: 10px; margin-bottom: 6px;}
     </style>
@@ -338,7 +338,8 @@ def main():
             st.caption("저장된 자문 없음")
 
     # ── 메인 영역 ───────────────────────────────────────────
-    st.markdown("## ⚖ 공정거래 법무 자문")
+    # 기존 markdown("## ...") 대신 크기가 가장 큰 title() 사용
+    st.title("⚖ 공정거래 법무 자문")
 
     if st.session_state.docs:
         badge_parts = []
