@@ -8,6 +8,7 @@ import os
 from datetime import datetime
 from docx import Document
 import io
+import time  # ⏱️ 시간 측정을 위한 모듈 추가
 from supabase import create_client
 
 # ── 설정 ─────────────────────────────────────────────────────
@@ -34,10 +35,10 @@ DOC_CATS = {
 
 # 🌟 사내 표준 조항 (Playbook) 데이터
 PLAYBOOK = {
-    "판촉비 분담 (표준)": "제O조 (판촉비용의 분담)\n대규모유통업법 제11조에 따라 사전 서면 약정 없이 협력사에 판촉비용을 전가할 수 없으며, 당사와 협력사의 예상이익 비율에 따라 분담하되 협력사의 분담 비율은 50%를 초과할 수 없다.",
-    "인테리어 비용 (표준)": "제O조 (인테리어 비용)\n매장 이동 및 리뉴얼에 따른 인테리어 비용은 당사의 사유(MD개편 등)인 경우 당사가 전액 부담하며, 협력사의 사유(브랜드 자발적 리뉴얼)인 경우 상호 협의하여 분담한다.",
-    "타사 입점 보장 (배타적 거래 금지)": "제O조 (타사 입점 보장)\n당사는 협력사가 타 면세점 및 유통채널에 입점하는 것을 부당하게 제한하지 아니하며, 협력사의 경영 활동에 부당하게 간섭하지 않는다.",
-    "직매입 반품 (표준)": "제O조 (반품의 허용)\n직매입 거래의 경우 원칙적으로 반품이 불가하나, 직매입 계약 체결 시 반품조건을 구체적으로 약정하고 그 조건에 따라 반품하는 경우에 한하여 예외적으로 허용한다."
+    "판촉비 분담 (표준)": "제O조 (판촉비용의 분담)\n대규모유통업법 제11조에 따라 사전 서면 약정 없이 협력사에 판촉비용 전가 불가. 당사와 협력사의 예상이익 비율에 따라 분담(협력사 분담 비율 50% 초과 금지).",
+    "인테리어 비용 (표준)": "제O조 (인테리어 비용)\n매장 리뉴얼 인테리어 비용은 당사 사유 시 당사 전액 부담, 협력사 자발적 리뉴얼 시 상호 협의 분담.",
+    "타사 입점 보장 (배타적 금지)": "제O조 (타사 입점 보장)\n당사는 협력사가 타 면세점 및 유통채널에 입점하는 것을 부당하게 제한하지 아니한다.",
+    "직매입 반품 (표준)": "제O조 (반품의 허용)\n직매입 원칙적 반품 불가. 계약 체결 시 구체적 반품조건을 약정하고 조건에 부합하는 경우에 한하여 예외적 허용."
 }
 
 # ── Supabase: 문서 & 세션 ─────────────────────────────────────
@@ -133,8 +134,10 @@ def call_ai(system_prompt, messages):
         try:
             history = []
             for m in messages[:-1]:
+                # AI가 소요 시간을 기록해둔 시스템 메시지(time)는 API 호출 시 제외해야 함
+                content_text = m["content"]
                 role = "model" if m["role"] == "assistant" else "user"
-                history.append(types.Content(role=role, parts=[types.Part(text=m["content"])]))
+                history.append(types.Content(role=role, parts=[types.Part(text=content_text)]))
             last_msg = messages[-1]["content"]
             response = GEMINI.models.generate_content(
                 model=model_name,
@@ -290,9 +293,13 @@ def main():
                     st.session_state["pending_input"] = q
                     st.rerun()
 
+    # ⏱️ 대화 기록 렌더링 (소요 시간 포함)
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"], avatar="⚖" if msg["role"] == "assistant" else "👤"):
             st.markdown(msg["content"], unsafe_allow_html=True)
+            # 저장된 소요 시간이 있으면 하단에 표시
+            if msg.get("time"):
+                st.caption(f"⏱️ 답변 소요 시간: {msg['time']:.1f}초")
 
     if st.session_state.docs:
         with st.expander("🔄 리비전 교차 비교 (당사 초안 vs 협력사 수정본)", expanded=False):
@@ -328,7 +335,6 @@ def main():
                     text = extract_text(f.read())
                     attached_texts.append(f"=== 검토 대상 첨부 파일: {f.name} ===\n" + text)
             
-            # 🚨 AI가 사용자의 입력값을 헷갈리지 않도록 명확하게 구조화
             if attached_texts:
                 full_query = f"[사용자 문의사항]\n{query}\n\n[검토 대상 텍스트/첨부파일]\n" + "\n\n".join(attached_texts)
                 display_query = query + "\n\n📎 " + ", ".join(f.name for f in chat_files)
@@ -345,9 +351,16 @@ def main():
 
             with st.chat_message("assistant", avatar="⚖"):
                 with st.spinner("제시된 내용을 당사 사규 및 법령 기준과 대조 중..."):
+                    start_time = time.time()  # ⏱️ 호출 전 시간 기록
                     reply = call_ai(build_system(st.session_state.docs), st.session_state.messages)
+                    end_time = time.time()    # ⏱️ 호출 후 시간 기록
+                    elapsed_time = end_time - start_time
+                
                 st.markdown(reply, unsafe_allow_html=True)
-                st.session_state.messages.append({"role": "assistant", "content": reply})
+                st.caption(f"⏱️ 답변 소요 시간: {elapsed_time:.1f}초")
+                
+                # 메시지 기록에 소요 시간 데이터(time) 추가 보관
+                st.session_state.messages.append({"role": "assistant", "content": reply, "time": elapsed_time})
 
             new_id = st.session_state.current_session_id or str(datetime.now().timestamp())
             current_sess = {"id": new_id, "title": display_query[:25]+"...", "date": datetime.now().isoformat(), "messages": st.session_state.messages}
