@@ -117,15 +117,14 @@ def build_system(docs):
         "4. **텍스트 강조 색상 규칙 (Streamlit 마크다운 전용 문법 - 엄격 준수):**\n"
         "   - 법률/사규 위반 소지가 있거나 위험한 내용은 반드시 `:red[여기에 텍스트]` 형태로 작성하세요.\n"
         "   - 적법하거나 수용 가능한 긍정적 사항은 반드시 `:blue[여기에 텍스트]` 형태로 작성하세요.\n"
-        "   - 🚨 **[문법 규칙 1]** `:red[` 또는 `:blue[` 앞에는 반드시 띄어쓰기를 한 칸 해야 합니다. (오류 예시: `경우::red[내용]` -> 올바른 예시: `경우: :red[내용]`)\n"
+        "   - 🚨 **[문법 규칙 1]** `:red[` 또는 `:blue[` 앞에는 반드시 띄어쓰기를 한 칸 해야 합니다.\n"
         "   - 🚨 **[문법 규칙 2]** 대괄호 `[ ]` 안에는 절대 줄바꿈(\\n)이 들어가면 안 됩니다. 긴 문장 전체에 색을 입히지 말고, 핵심 단어나 짧은 구절 단위로 끊어서 색상을 적용하세요.\n"
         "5. 💡 답변의 마지막에는 반드시 **[최종 AI변호사 검토 의견 및 실무 가이드]** 섹션을 추가하여 ① 최종 결론, ② MD Action Plan(수정 대안, 협상 논리)을 명확히 제시하세요.\n\n"
         "[할루시네이션(환각) 방지 및 정확도 확보 엄격 규칙 - 절대 준수]\n"
-        "1. **불확실성 인정 (가정 금지):** 검토할 파일이나 텍스트가 명시적으로 제공되지 않은 경우, 절대로 상황을 임의로 가정하거나 추측하지 마십시오. 사실에만 기반해야 하며, 정보가 부족하면 \"검토할 파일이나 텍스트가 제공되지 않았습니다. 정확한 검토를 위해 내용을 첨부해 주세요.\"라고 답변하고 즉시 검토를 중단하십시오.\n"
+        "1. **검토 대상 부재 시 답변 거부 (가정 절대 금지):** 사용자의 프롬프트 내에 `[검토 대상 텍스트/첨부파일]` 항목이 '(없음 - 첨부파일이나 텍스트가 제공되지 않았습니다.)'라고 기재되어 있다면, 절대 기준 DB 문서를 검토 대상으로 착각하여 혼자 상황을 지어내거나 추측하지 마십시오. 즉시 다음과 같이만 답변하고 검토를 중단하십시오: \"검토할 파일이나 텍스트가 제공되지 않았습니다. 정확한 검토를 위해 내용을 채팅창에 입력하거나 파일을 첨부해 주세요.\"\n"
         "2. **직접 인용 (Direct Quotes):** 제공된 검토 대상 문서에서 업무를 수행하기 전에 반드시 관련된 원문 문장을 토씨 하나 틀리지 않고 그대로 추출(인용)하십시오. 오직 추출된 인용구에만 기반하여 답변을 작성하십시오.\n"
         "3. **출처 기반 검증 (Citations):** 모든 주장이나 검토 의견에는 반드시 그 근거가 되는 인용구와 출처(사규 조항, 계약서 제N조, 법률명 제N조 등)를 명시하여 감사(Audit)가 가능하도록 만드십시오. 제공된 텍스트에서 주장을 뒷받침할 인용구를 찾을 수 없다면 해당 주장을 철회하십시오.\n"
-        "4. **단계적 추론 (Chain-of-Thought):** 잘못된 논리나 숨겨진 가정을 방지하기 위해, 최종 결론을 내리기 전에 단계별 추론 과정과 근거를 명확히 설명하십시오.\n"
-        "5. **외부 지식 제한:** 구체적인 문서가 제공된 경우, 오직 해당 문서의 내용과 명확한 현행 법령(대규모유통업법 등) 정보만 사용하십시오. AI의 일반적인 사전 학습 지식으로 문서의 구체적 문맥을 임의로 덮어쓰거나 왜곡하지 마십시오."
+        "4. **외부 지식 제한:** 구체적인 문서가 제공된 경우, 오직 해당 문서의 내용과 명확한 현행 법령(대규모유통업법 등) 정보만 사용하십시오. AI의 일반적인 사전 학습 지식으로 문서의 구체적 문맥을 임의로 덮어쓰거나 왜곡하지 마십시오."
     )
 
 def call_ai(system_prompt, messages):
@@ -156,29 +155,24 @@ def call_ai(system_prompt, messages):
 def main():
     st.set_page_config(page_title="공정거래 법무 AI", page_icon="⚖", layout="wide")
 
-    # 🎨 iOS 스타일 UI 테마 CSS 주입 (오른쪽 여백 및 줄간격 개선)
     st.markdown("""
     <style>
-    /* 전체 배경 및 폰트 (iOS System Font) */
     html, body, [class*="css"] {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
         background-color: #F2F2F7 !important; 
     }
     .stApp { background-color: #F2F2F7; }
     
-    /* 채팅 메시지 버블 스타일 (iOS iMessage 느낌) */
     .stChatMessage {
         background-color: #FFFFFF;
         border-radius: 18px;
-        /* 여백(Padding)을 위 20px, 오른쪽 40px, 아래 20px, 왼쪽 24px로 주어 우측 공간 확보 */
         padding: 20px 40px 20px 24px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.04);
         margin-bottom: 16px;
         border: 1px solid #E5E5EA;
-        line-height: 1.6; /* 글씨가 빼곡해 보이지 않도록 줄간격 확대 */
+        line-height: 1.6;
     }
     
-    /* 버튼 스타일 (iOS Blue) */
     div.stButton > button:first-child {
         border-radius: 12px;
         font-weight: 600;
@@ -195,13 +189,11 @@ def main():
         border: 1.5px solid #007AFF !important;
     }
     
-    /* 사이드바 스타일 */
     [data-testid="stSidebar"] {
         background-color: #FFFFFF !important;
         border-right: 1px solid #E5E5EA;
     }
     
-    /* 코드 블록 (Playbook 복사용) */
     code { color: #d63384; background-color: #f8f9fa; border-radius: 6px; }
     pre { border-radius: 12px; background-color: #F2F2F7 !important; border: 1px solid #E5E5EA; }
     </style>
@@ -212,13 +204,11 @@ def main():
     if "sessions" not in st.session_state: st.session_state.sessions = load_sessions()
     if "current_session_id" not in st.session_state: st.session_state.current_session_id = None
 
-    # ── 사이드바 ────────────────────────────────────────────
     with st.sidebar:
         st.markdown("## ⚖ 공정거래 법무 AI")
         st.caption("면세점 MD 바이어 전용 · Duty-Free Legal Counsel")
         st.divider()
 
-        # 사내 표준 조항 (Playbook) 메뉴
         with st.expander("📘 사내 표준 조항 (Playbook)", expanded=False):
             st.caption("우측 상단의 복사 아이콘을 눌러 실무에 바로 적용하세요.")
             for title, text in PLAYBOOK.items():
@@ -305,7 +295,6 @@ def main():
             st.markdown(msg["content"], unsafe_allow_html=True)
 
     if st.session_state.docs:
-        # 리비전(V1 vs V2) 교차 비교 UI
         with st.expander("🔄 리비전 교차 비교 (당사 초안 vs 협력사 수정본)", expanded=False):
             st.info("당사 초안(기준)과 협력사가 수정한 문서를 나란히 업로드하면, AI변호사가 변경된 독소조항을 찾아 비교 분석합니다.")
             col1, col2 = st.columns(2)
@@ -326,7 +315,6 @@ def main():
                     st.session_state["pending_input"] = prompt
                     st.rerun()
 
-        # 기본 채팅 입력창 (검토 대상 첨부)
         chat_files = st.file_uploader(
             "📎 검토할 파일 첨부 (협력사 회신본 등)", type=["docx"], accept_multiple_files=True, key="chat_uploader"
         )
@@ -340,11 +328,19 @@ def main():
                     text = extract_text(f.read())
                     attached_texts.append(f"=== 검토 대상 첨부 파일: {f.name} ===\n" + text)
             
+            # 🚨 [핵심 수정 부분] AI가 사용자의 입력값을 헷갈리지 않도록 명확하게 구조화
             if attached_texts:
-                full_query = query + "\n\n[검토 대상 파일 내용]\n" + "\n\n".join(attached_texts)
+                full_query = f"[사용자 문의사항]\n{query}\n\n[검토 대상 텍스트/첨부파일]\n" + "\n\n".join(attached_texts)
                 display_query = query + "\n\n📎 " + ", ".join(f.name for f in chat_files)
             else:
-                full_query = query
+                # 텍스트 내에 검토 대상이 명시되어 있는지 확인 (단순 질문인지, 텍스트를 붙여넣었는지)
+                # 만약 사용자가 "다음 조항을 검토해줘: 제1조..." 라고 쳤다면 query 안에 텍스트가 있는 것임.
+                # 그러나 "첨부한 약정서 검토해줘"라고만 치고 파일이 없으면 AI가 차단하도록 함.
+                if "검토" in query and len(query) < 50 and not chat_files:
+                    full_query = f"[사용자 문의사항]\n{query}\n\n[검토 대상 텍스트/첨부파일]\n(없음 - 첨부파일이나 텍스트가 제공되지 않았습니다.)"
+                else:
+                    # 질문 안에 텍스트가 포함되어 있을 수 있으므로 그대로 넘김
+                    full_query = f"[사용자 문의사항 및 검토 대상 텍스트]\n{query}\n\n[첨부파일]\n(없음)"
                 display_query = query
 
             st.session_state.messages.append({"role": "user", "content": full_query})
@@ -358,7 +354,7 @@ def main():
                 st.session_state.messages.append({"role": "assistant", "content": reply})
 
             new_id = st.session_state.current_session_id or str(datetime.now().timestamp())
-            current_sess = {"id": new_id, "title": query[:25]+"...", "date": datetime.now().isoformat(), "messages": st.session_state.messages}
+            current_sess = {"id": new_id, "title": display_query[:25]+"...", "date": datetime.now().isoformat(), "messages": st.session_state.messages}
             save_session(current_sess)
             st.session_state.current_session_id = new_id
             st.rerun()
