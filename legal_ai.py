@@ -1,6 +1,7 @@
 # ============================================================
 #  공정거래 법무 AI v2.0 — 면세점 MD/바이어용
 #  이중 모델: Gemini(문서/검색) + Claude(법률검토) + 고가용성 우회
+#  보안: 자동 DLP(개인/기업정보) + 협력사명 지정 마스킹 탑재
 # ============================================================
 
 import streamlit as st
@@ -56,17 +57,37 @@ DOC_CATS = {
     "yakjeong": {"label": "약정서", "icon": "📝"},
 }
 
-PLAYBOOK = {
-    "판촉비 분담 (표준)": "제O조 (판촉비용의 분담)\n대규모유통업법 제11조에 따라 사전 서면 약정 없이 협력사에 판촉비용을 전가할 수 없으며, 당사와 협력사의 예상이익 비율에 따라 분담하되 협력사의 분담 비율은 50%를 초과할 수 없다.",
-    "인테리어 비용 (표준)": "제O조 (인테리어 비용)\n매장 이동 및 리뉴얼에 따른 인테리어 비용은 당사의 사유(MD개편 등)인 경우 당사가 전액 부담하며, 협력사의 사유(브랜드 자발적 리뉴얼)인 경우 상호 협의하여 분담한다.",
-    "타사 입점 보장 (배타적 거래 금지)": "제O조 (타사 입점 보장)\n당사는 협력사가 타 면세점 및 유통채널에 입점하는 것을 부당하게 제한하지 아니하며, 협력사의 경영 활동에 부당하게 간섭하지 않는다.",
-    "직매입 반품 (표준)": "제O조 (반품의 허용)\n직매입 거래의 경우 원칙적으로 반품이 불가하나, 직매입 계약 체결 시 반품조건을 구체적으로 약정하고 그 조건에 따라 반품하는 경우에 한하여 예외적으로 허용한다."
-}
-
-# 📌 일상적인 법률 자문 키워드 대폭 추가
 REVIEW_KEYWORDS = ["검토", "확인", "위반", "적법", "수용", "반품", "계약", "약정",
                    "조항", "독소", "비교", "분석", "판촉", "감액", "반려", "승인",
                    "법률", "법적", "맞음", "맞아", "맞나요", "위법", "불법", "가능", "어때", "어떤가요", "문제"]
+
+# ── 자동 보안 마스킹 (DLP) 함수 ──────────────────────────────
+def apply_auto_masking(text, target_partner=""):
+    """정규표현식을 이용한 자동 개인/기업정보 차단 및 지정 협력사명 마스킹"""
+    if not text:
+        return text
+        
+    # 1. 개인정보 및 식별번호 차단 (자동)
+    text = re.sub(r'\b\d{6}[-\s]*[1-4]\d{6}\b', '█주민/외국인번호█', text) 
+    text = re.sub(r'\b\d{3}[-\s]*\d{2}[-\s]*\d{5}\b', '█사업자번호█', text) 
+    text = re.sub(r'\b\d{6}[-\s]*\d{7}\b', '█법인번호█', text) 
+    text = re.sub(r'\b01[016789][-\s]*\d{3,4}[-\s]*\d{4}\b', '█휴대전화█', text)
+    text = re.sub(r'\b0[2-9][0-9]?[-\s]*\d{3,4}[-\s]*\d{4}\b', '█전화번호█', text)
+    text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '█이메일█', text)
+    text = re.sub(r'\b\d{3,6}[-\s]*\d{2,6}[-\s]*\d{3,6}\b', '█계좌번호█', text) 
+    
+    # 2. 당사 식별 키워드 차단 (자동)
+    company_keywords = ['신세계디에프', '신세계면세점', '신세계 DF', 'Shinsegae DF', '신세계']
+    for kw in company_keywords:
+        text = text.replace(kw, '█당사(내부정보)█')
+
+    # 3. 지정된 협력사명 차단 (반자동)
+    if target_partner:
+        partners = [p.strip() for p in target_partner.split(',') if p.strip()]
+        for p in partners:
+            text = text.replace(p, '█협력사█')
+
+    return text
 
 # ── Supabase CRUD ────────────────────────────────────────────
 def load_docs():
@@ -207,8 +228,8 @@ def build_system_claude(docs, laws_db):
         laws_text = "(법령 DB 미등록 — 일반 법률 지식으로 판단)"
 
     return (
-        "당신은 면세점(보세판매장) 전문 공정거래 AI변호사이자 컴플라이언스 의사결정 보조 AI입니다.\n"
-        "단순한 법률 해석을 넘어, ① [외부 법령]과 ② [내부 사규/표준문서]라는 두 가지 관점에서 교차 검토하여 MD/바이어에게 명확한 실무 결단을 내려주세요.\n\n"
+        "당신은 면세점 전문 공정거래 AI변호사이자 의사결정 보조 AI입니다.\n"
+        "단순한 법률 해석을 넘어, ① [외부 법령]과 ② [내부 사규/표준문서]라는 두 가지 관점에서 교차 검토하여 실무 결단을 내려주세요.\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "[기준 문서 (Ground Truth — 절대 자체를 검토하지 말 것)]\n"
@@ -270,7 +291,7 @@ def build_system_gemini(docs):
     yakjeong_text = fmt_docs(by_cat("yakjeong"))[:20000]
 
     return (
-        "당신은 면세점(보세판매장) 전문 공정거래 AI 어시스턴트입니다.\n"
+        "당신은 면세점 전문 공정거래 AI 어시스턴트입니다.\n"
         "사규, 계약서, 약정서 내용에 대한 일반 질문에 친절히 답변하세요.\n"
         "법률 검토 판단(승인/반려)은 하지 말고, 필요시 '검토 요청을 해주세요'라고 안내하세요.\n\n"
         "① 당사 사규:\n" + saryu_text +
@@ -348,11 +369,9 @@ def call_gemini(system_prompt, messages):
     return "⚠️ 응답을 가져오지 못했습니다."
 
 def dispatch_with_fallback(model_choice, messages, docs, laws_db):
-    """🚀 고가용성: 기본 모델 실패 시 대체 모델로 자동 우회(Cross-Fallback)"""
     if model_choice == "claude":
         system = build_system_claude(docs, laws_db)
         reply = call_claude(system, messages)
-        
         if reply.startswith("⚠️"):
             st.warning(f"🔄 {reply}\n→ 예비 시스템(Gemini)으로 자동 우회하여 검토를 진행합니다.")
             fallback_reply = call_gemini(system, messages)
@@ -360,11 +379,9 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
                 return fallback_reply, "Gemini (Fallback)"
             return reply, "Claude (Failed)"
         return reply, "Claude 3.5 Sonnet"
-        
     else:
         system = build_system_gemini(docs)
         reply = call_gemini(system, messages)
-        
         if reply.startswith("⚠️"):
             st.warning(f"🔄 {reply}\n→ 예비 시스템(Claude)으로 자동 우회하여 답변을 생성합니다.")
             fallback_reply = call_claude(system, messages)
@@ -373,11 +390,10 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
             return reply, "Gemini (Failed)"
         return reply, "Gemini"
 
-# ── JSON 파싱 ────────────────────────────────────────────────
+# ── JSON 파싱 및 UI 렌더링 ────────────────────────────────────
 def parse_review_response(response_text):
     json_data = None
     detail_text = response_text
-
     json_match = re.search(r'```json\s*\n(.*?)\n```', response_text, re.DOTALL)
     if json_match:
         try:
@@ -386,10 +402,8 @@ def parse_review_response(response_text):
         except json.JSONDecodeError as e:
             logger.error(f"JSON 파싱 실패: {e}")
             detail_text = response_text
-
     return json_data, detail_text
 
-# ── UI 렌더링 함수 ───────────────────────────────────────────
 def render_verdict_badge(verdict):
     badges = {
         "approved":    ("🟢 진행 가능 (승인)", "success"),
@@ -400,8 +414,7 @@ def render_verdict_badge(verdict):
     getattr(st, msg_type)(label)
 
 def render_issues_table(issues, citation_results):
-    if not issues:
-        return
+    if not issues: return
     risk_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
     for issue in issues:
         risk = issue.get("risk_level", "medium")
@@ -410,7 +423,6 @@ def render_issues_table(issues, citation_results):
             if issue.get("target_clause"):
                 st.markdown(f"**📌 검토 대상 원문:**")
                 st.code(issue["target_clause"], language="text")
-
             col1, col2 = st.columns(2)
             with col1:
                 law_ref = issue.get("applicable_law", "")
@@ -421,17 +433,13 @@ def render_issues_table(issues, citation_results):
                             verified = "✅" if cr["verified"] else "⚠️"
                             break
                     st.markdown(f"**⚖️ 적용 법령:** {law_ref} {verified}")
-                
                 if issue.get("law_analysis"):
                     st.markdown(f"**🔍 법령 관점:** {issue['law_analysis']}")
-
             with col2:
                 if issue.get("applicable_rule"):
                     st.markdown(f"**🏛️ 적용 사규:** {issue['applicable_rule']}")
-                
                 if issue.get("rule_analysis"):
                     st.markdown(f"**🔍 사규 관점:** {issue['rule_analysis']}")
-
             if issue.get("recommendation"):
                 st.info(f"💡 **종합 실무 권고:** {issue['recommendation']}")
 
@@ -442,12 +450,10 @@ def render_alternative_clause(clause):
         st.caption("아래 조항을 복사하여 협상 메일이나 수정 계약서에 활용하세요.")
         st.code(clause, language="text")
 
-# ── 검토의견서 docx 생성 ─────────────────────────────────────
 def generate_review_docx(json_data, detail_text, query_text):
     from docx import Document
-    from docx.shared import Pt, Inches, RGBColor
+    from docx.shared import Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-
     doc = Document()
     style = doc.styles['Normal']
     font = style.font
@@ -461,62 +467,36 @@ def generate_review_docx(json_data, detail_text, query_text):
     run.font.color.rgb = RGBColor(255, 0, 0)
     run.bold = True
 
-    doc.add_paragraph("")
     doc.add_heading("공정거래 법률 검토 의견서", level=1)
     doc.add_paragraph(f"작성일: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    doc.add_paragraph(f"작성: AI 법무 검토 시스템 (다중 AI 연동)")
-    doc.add_paragraph("")
-
+    
     if json_data:
         doc.add_heading("1. 문의사항", level=2)
         doc.add_paragraph(json_data.get("summary", query_text[:200]))
-
         doc.add_heading("2. 검토 결론", level=2)
-        verdict_map = {
-            "approved": "✅ 진행 가능 (승인)",
-            "conditional": "⚠️ 조건부 가능 (수정 필요)",
-            "rejected": "❌ 진행 불가 (반려)",
-        }
+        verdict_map = {"approved": "✅ 진행 가능 (승인)", "conditional": "⚠️ 조건부 가능 (수정 필요)", "rejected": "❌ 진행 불가 (반려)"}
         doc.add_paragraph(verdict_map.get(json_data.get("verdict", ""), "판단 보류"))
         doc.add_paragraph(json_data.get("verdict_reason", ""))
-
         doc.add_heading("3. 쟁점별 교차 분석", level=2)
         for issue in json_data.get("issues", []):
             risk_label = {"high": "[위험]", "medium": "[주의]", "low": "[양호]"}
-            doc.add_heading(
-                f"쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '')} {risk_label.get(issue.get('risk_level',''), '')}",
-                level=3
-            )
-            if issue.get("target_clause"):
-                doc.add_paragraph(f"■ 검토 대상: {issue['target_clause']}")
-            if issue.get("law_analysis"):
-                doc.add_paragraph(f"■ [법령 관점] {issue.get('applicable_law', '')}: {issue['law_analysis']}")
-            if issue.get("rule_analysis"):
-                doc.add_paragraph(f"■ [사규 관점] {issue.get('applicable_rule', '')}: {issue['rule_analysis']}")
-            if issue.get("recommendation"):
-                doc.add_paragraph(f"■ 종합 권고: {issue['recommendation']}")
+            doc.add_heading(f"쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '')} {risk_label.get(issue.get('risk_level',''), '')}", level=3)
+            if issue.get("target_clause"): doc.add_paragraph(f"■ 검토 대상: {issue['target_clause']}")
+            if issue.get("law_analysis"): doc.add_paragraph(f"■ [법령 관점]: {issue['law_analysis']}")
+            if issue.get("rule_analysis"): doc.add_paragraph(f"■ [사규 관점]: {issue['rule_analysis']}")
+            if issue.get("recommendation"): doc.add_paragraph(f"■ 종합 권고: {issue['recommendation']}")
             doc.add_paragraph("")
-
         doc.add_heading("4. MD Action Plan", level=2)
         doc.add_paragraph(json_data.get("action_plan", "(없음)"))
-
         if json_data.get("alternative_clause"):
             doc.add_heading("5. 수정 대안 조항 (초안)", level=2)
             doc.add_paragraph(json_data["alternative_clause"])
-
-        doc.add_heading("6. 인용 법령 목록", level=2)
-        for law in json_data.get("cited_laws", []):
-            doc.add_paragraph(f"• {law}")
     else:
         doc.add_heading("검토 의견", level=2)
         doc.add_paragraph(detail_text[:10000])
 
-    doc.add_paragraph("")
-    doc.add_paragraph("─" * 50)
-    disclaimer = doc.add_paragraph(
-        "본 검토의견서는 AI가 생성한 초안이며, 법적 효력이 없습니다. "
-        "반드시 법무팀의 최종 검토를 거쳐 의사결정에 활용하시기 바랍니다."
-    )
+    doc.add_paragraph("\n" + "─" * 50)
+    disclaimer = doc.add_paragraph("본 검토의견서는 AI가 생성한 초안이며, 법적 효력이 없습니다. 반드시 법무팀의 최종 검토를 거치기 바랍니다.")
     disclaimer.runs[0].font.size = Pt(8)
     disclaimer.runs[0].font.color.rgb = RGBColor(128, 128, 128)
 
@@ -525,155 +505,59 @@ def generate_review_docx(json_data, detail_text, query_text):
     buffer.seek(0)
     return buffer.getvalue()
 
-# ── Streamlit UI ─────────────────────────────────────────────
+# ── Streamlit UI 메인 함수 ────────────────────────────────────
 def main():
     st.set_page_config(page_title="공정거래 법무 AI v2.0", page_icon="⚖", layout="wide")
 
     st.markdown("""
     <style>
-    html, body, [class*="css"] {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
-        background-color: #F2F2F7 !important;
-    }
+    html, body, [class*="css"] { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important; background-color: #F2F2F7 !important; }
     .stApp { background-color: #F2F2F7; }
-    .stChatMessage {
-        background-color: #FFFFFF;
-        border-radius: 18px;
-        padding: 20px 40px 20px 24px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-        margin-bottom: 16px;
-        border: 1px solid #E5E5EA;
-        line-height: 1.6;
-    }
-    div.stButton > button:first-child {
-        border-radius: 12px;
-        font-weight: 600;
-        transition: all 0.2s ease;
-    }
-    button[kind="primary"] {
-        background-color: #007AFF !important;
-        color: white !important;
-        border: none !important;
-    }
-    button[kind="secondary"] {
-        background-color: #FFFFFF !important;
-        color: #007AFF !important;
-        border: 1.5px solid #007AFF !important;
-    }
-    [data-testid="stSidebar"] {
-        background-color: #FFFFFF !important;
-        border-right: 1px solid #E5E5EA;
-    }
+    .stChatMessage { background-color: #FFFFFF; border-radius: 18px; padding: 20px 40px 20px 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); margin-bottom: 16px; border: 1px solid #E5E5EA; line-height: 1.6; }
+    div.stButton > button:first-child { border-radius: 12px; font-weight: 600; transition: all 0.2s ease; }
+    button[kind="primary"] { background-color: #007AFF !important; color: white !important; border: none !important; }
+    [data-testid="stSidebar"] { background-color: #FFFFFF !important; border-right: 1px solid #E5E5EA; }
     code { color: #d63384; background-color: #f8f9fa; border-radius: 6px; }
     pre { border-radius: 12px; background-color: #F2F2F7 !important; border: 1px solid #E5E5EA; }
     </style>
     """, unsafe_allow_html=True)
 
-    # ── 비밀번호 게이트 ──────────────────────────────────────
     app_pw = get_secret("APP_PASSWORD")
     if app_pw:
-        if "authenticated" not in st.session_state:
-            st.session_state.authenticated = False
+        if "authenticated" not in st.session_state: st.session_state.authenticated = False
         if not st.session_state.authenticated:
             st.markdown("## ⚖ 공정거래 법무 AI")
-            st.caption("접근이 제한된 시스템입니다.")
             pw = st.text_input("비밀번호를 입력하세요", type="password")
             if pw:
-                if pw == app_pw:
-                    st.session_state.authenticated = True
-                    st.rerun()
-                else:
-                    st.error("비밀번호가 올바르지 않습니다.")
+                if pw == app_pw: st.session_state.authenticated = True; st.rerun()
+                else: st.error("비밀번호가 올바르지 않습니다.")
             st.stop()
 
-    # ── 상태 초기화 ──────────────────────────────────────────
-    if "docs" not in st.session_state:
-        st.session_state.docs = load_docs()
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "sessions" not in st.session_state:
-        st.session_state.sessions = load_sessions()
-    if "current_session_id" not in st.session_state:
-        st.session_state.current_session_id = None
-    if "laws_db" not in st.session_state:
-        st.session_state.laws_db = load_laws()
+    if "docs" not in st.session_state: st.session_state.docs = load_docs()
+    if "messages" not in st.session_state: st.session_state.messages = []
+    if "sessions" not in st.session_state: st.session_state.sessions = load_sessions()
+    if "current_session_id" not in st.session_state: st.session_state.current_session_id = None
+    if "laws_db" not in st.session_state: st.session_state.laws_db = load_laws()
 
     if "cleanup_done" not in st.session_state:
         cleanup_old_sessions(90)
         st.session_state.cleanup_done = True
 
-    # ── 사이드바 ─────────────────────────────────────────────
+    # ── 사이드바 (실무자 동선 최적화) ─────────────────────────
     with st.sidebar:
         st.markdown("## ⚖ 공정거래 법무 AI v2.0")
-        st.caption("면세점 MD 바이어 전용 · Gemini + Claude")
-        st.divider()
-
-        law_count = len(st.session_state.laws_db)
-        if law_count > 0:
-            st.success(f"📚 법령 DB: {law_count}개 조문 적재됨")
-        else:
-            st.warning("📚 법령 DB 미설정 — Supabase에 laws 테이블을 생성하세요")
-
-        with st.expander("📘 사내 표준 조항 (Playbook)", expanded=False):
-            st.caption("우측 상단의 복사 아이콘을 눌러 실무에 바로 적용하세요.")
-            for title, text in PLAYBOOK.items():
-                st.markdown(f"**{title}**")
-                st.code(text, language="text")
-
-        st.divider()
-        st.markdown("### 📂 기준 규칙 DB 등록")
-        st.caption("※ 이곳에 등록된 문서는 검토 기준(정답)으로 사용됩니다.")
-        doc_cat = st.selectbox("문서 유형", options=list(DOC_CATS.keys()),
-                               format_func=lambda x: DOC_CATS[x]["icon"] + " " + DOC_CATS[x]["label"])
-        contract_type = st.selectbox("거래 유형", CONTRACT_TYPES) if doc_cat == "contract" else None
-        yakjeong_type = st.selectbox("약정서 유형", YAKJEONG_TYPES) if doc_cat == "yakjeong" else None
-
-        uploaded_files = st.file_uploader("Word 파일 첨부", type=["docx"],
-                                          accept_multiple_files=True, label_visibility="collapsed")
-        if uploaded_files:
-            if st.button("DB에 규칙 등록", use_container_width=True, type="primary"):
-                for f in uploaded_files:
-                    import uuid
-                    label = f"계약서({contract_type})" if contract_type else \
-                            f"약정서({yakjeong_type})" if yakjeong_type else DOC_CATS[doc_cat]["label"]
-                    label += f": {f.name}"
-                    new_doc = {
-                        "id": str(uuid.uuid4()),
-                        "name": f.name, "cat": doc_cat,
-                        "contract_type": contract_type or yakjeong_type,
-                        "label": label,
-                        "text": extract_text(f.read()),
-                        "size": f.size,
-                    }
-                    if save_doc(new_doc):
-                        st.session_state.docs.append(new_doc)
-                st.rerun()
-
-        if st.session_state.docs:
-            st.divider()
-            st.markdown("### 📋 적용 중인 기준 문서")
-            for cat_id, cat_info in DOC_CATS.items():
-                cat_docs = [d for d in st.session_state.docs if d["cat"] == cat_id]
-                if not cat_docs:
-                    continue
-                st.markdown(f"**{cat_info['icon']} {cat_info['label']}**")
-                for doc in cat_docs:
-                    col1, col2 = st.columns([5, 1])
-                    with col1:
-                        st.caption("📎 " + doc["name"])
-                    with col2:
-                        if st.button("X", key="del_" + doc["id"]):
-                            if delete_doc(doc["id"]):
-                                st.session_state.docs = [d for d in st.session_state.docs if d["id"] != doc["id"]]
-                                st.rerun()
-
-        st.divider()
-        if st.button("새 대화 시작", use_container_width=True):
+        st.caption("면세점 MD 바이어 전용")
+        
+        # 1. 최상단: 새 대화 시작
+        if st.button("✨ 새 대화 시작", use_container_width=True, type="primary"):
             st.session_state.messages = []
             st.session_state.current_session_id = None
             st.rerun()
 
-        st.markdown("### 🗂 자문 내역")
+        st.divider()
+
+        # 2. 히스토리 관리
+        st.markdown("### 🗂 최근 자문 내역")
         for sess in st.session_state.sessions:
             col1, col2 = st.columns([5, 1])
             with col1:
@@ -686,6 +570,55 @@ def main():
                     if delete_session_db(sess["id"]):
                         st.session_state.sessions = [s for s in st.session_state.sessions if s["id"] != sess["id"]]
                         st.rerun()
+
+        st.divider()
+
+        # 3. 자동 보안 마스킹 안내 (DLP)
+        st.markdown("### 🛡️ 정보보안 (DLP) 가동 중")
+        st.success(
+            "⚠️ **정보 유출 방지 시스템 작동 안내**\n\n"
+            "외부 클라우드 AI 서버로 당사의 핵심 기밀 및 협력사 정보가 유출되는 것을 원천 차단하기 위해, **문서 내 민감 정보는 모두 AI 전송 전에 자동 블라인드(마스킹) 처리됩니다.**\n\n"
+            "• **자동 차단:** 주민/외국인번호, 휴대전화, 이메일, 사업자/법인번호, 계좌번호, 당사 명칭\n"
+            "• **수동 차단:** 하단 텍스트 입력창에 기재한 '협력사명'"
+        )
+
+        st.divider()
+
+        # 4. 관리자용 DB 관리는 가장 아래 숨김 (Expander)
+        with st.expander("⚙️ 기준 문서 DB 관리 (관리자 전용)", expanded=False):
+            law_count = len(st.session_state.laws_db)
+            if law_count > 0: st.success(f"📚 법령 DB: {law_count}개")
+            else: st.warning("📚 법령 DB 미설정")
+
+            doc_cat = st.selectbox("문서 유형", options=list(DOC_CATS.keys()), format_func=lambda x: DOC_CATS[x]["icon"] + " " + DOC_CATS[x]["label"])
+            contract_type = st.selectbox("거래 유형", CONTRACT_TYPES) if doc_cat == "contract" else None
+            yakjeong_type = st.selectbox("약정서 유형", YAKJEONG_TYPES) if doc_cat == "yakjeong" else None
+
+            uploaded_files = st.file_uploader("Word 파일 첨부", type=["docx"], accept_multiple_files=True, label_visibility="collapsed")
+            if uploaded_files:
+                if st.button("DB에 규칙 등록", use_container_width=True):
+                    for f in uploaded_files:
+                        import uuid
+                        label = f"계약서({contract_type})" if contract_type else f"약정서({yakjeong_type})" if yakjeong_type else DOC_CATS[doc_cat]["label"]
+                        label += f": {f.name}"
+                        new_doc = {"id": str(uuid.uuid4()), "name": f.name, "cat": doc_cat, "contract_type": contract_type or yakjeong_type, "label": label, "text": extract_text(f.read()), "size": f.size}
+                        if save_doc(new_doc): st.session_state.docs.append(new_doc)
+                    st.rerun()
+
+            if st.session_state.docs:
+                st.markdown("**📋 적용 중인 문서**")
+                for cat_id, cat_info in DOC_CATS.items():
+                    cat_docs = [d for d in st.session_state.docs if d["cat"] == cat_id]
+                    if not cat_docs: continue
+                    st.markdown(f"**{cat_info['icon']} {cat_info['label']}**")
+                    for doc in cat_docs:
+                        col1, col2 = st.columns([5, 1])
+                        with col1: st.caption(doc["name"])
+                        with col2:
+                            if st.button("X", key="del_" + doc["id"]):
+                                if delete_doc(doc["id"]):
+                                    st.session_state.docs = [d for d in st.session_state.docs if d["id"] != doc["id"]]
+                                    st.rerun()
 
     # ── 메인 영역 ────────────────────────────────────────────
     st.title("⚖ 공정거래 법무 자문 v2.0")
@@ -700,7 +633,7 @@ def main():
         )
         
         samples = [
-            ("🔹 [1단계] 단순 사내 규정 문의", "현재 등록된 당사 사규에 따르면, 브랜드 자발적 사유로 매장을 리뉴얼할 때 인테리어 비용 분담 기준이 어떻게 돼?"),
+            ("🔹 [1단계] 단순 사내 규정 문의", "현재 등록된 당사에 따르면, 브랜드 자발적 사유로 매장을 리뉴얼할 때 인테리어 비용 분담 기준이 어떻게 돼?"),
             ("🔹 [2단계] 심층 법률 조항 검토", "협력사가 특약매입 판촉비 분담률을 60%로 요구하고 있어. 법률적으로 이게 맞음? 수용 가능한지 당사 기준과 대규모유통업법을 비교해서 분석해줘."),
             ("🔹 [2단계] 첨부파일 교차 검토", "[파일 첨부 후 클릭] 첨부한 파견 약정서(협력사 회신본) 내용 중, 당사 표준 규정에 어긋나거나 법 위반 소지가 있는 독소조항을 찾아내 줘.")
         ]
@@ -726,13 +659,7 @@ def main():
                 
                 if jd.get("verdict"):
                     docx_bytes = generate_review_docx(jd, msg.get("detail_text", ""), "")
-                    st.download_button(
-                        "📥 검토의견서 다운로드 (.docx)",
-                        data=docx_bytes,
-                        file_name=f"검토의견서_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        key=f"dl_{msg.get('msg_id', datetime.now().timestamp())}"
-                    )
+                    st.download_button("📥 검토의견서 다운로드 (.docx)", data=docx_bytes, file_name=f"검토의견서_{datetime.now().strftime('%Y%m%d_%H%M')}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"dl_{msg.get('msg_id', datetime.now().timestamp())}")
             else:
                 st.markdown(msg["content"])
 
@@ -742,17 +669,22 @@ def main():
 
     # ── 입력 처리 ────────────────────────────────────────────
     if st.session_state.docs:
+        
+        st.markdown("---")
+        st.markdown("### 💬 신규 검토 요청")
+        
+        # 📌 협력사명 입력란 바로 윗부분에 사유 및 안내 문구 추가
+        st.info("🔒 **기밀 유출 방지 시스템:** 당사의 기밀이나 특정 브랜드명, 상호명이 외부 AI로 전송되어 학습에 오남용되는 것을 막기 위해 아래 칸에 **검토 대상 협력사명**을 기재해 주세요. 해당 단어는 문서와 채팅에서 모두 가려집니다.")
+        target_partner = st.text_input("🏢 검토 대상 협력사명 입력 (보안 마스킹용)", placeholder="예: 에르메스, 샤넬 (입력 시 █협력사█로 자동 치환)", key="target_partner")
+
         with st.expander("🔄 리비전 교차 비교 (당사 초안 vs 협력사 수정본)", expanded=False):
             st.info("당사 초안(기준)과 협력사가 수정한 문서를 나란히 업로드하면, AI변호사가 변경된 독소조항을 찾아 비교 분석합니다.")
             col1, col2 = st.columns(2)
-            with col1:
-                v1_file = st.file_uploader("📄 V1 (당사 표준 초안)", type=["docx"], key="v1_upload")
-            with col2:
-                v2_file = st.file_uploader("📝 V2 (협력사 수정본)", type=["docx"], key="v2_upload")
+            with col1: v1_file = st.file_uploader("📄 V1 (당사 표준 초안)", type=["docx"], key="v1_upload")
+            with col2: v2_file = st.file_uploader("📝 V2 (협력사 수정본)", type=["docx"], key="v2_upload")
             if v1_file and v2_file:
                 if st.button("교차 비교 분석 실행", type="primary", use_container_width=True):
-                    v1_bytes = v1_file.read()
-                    v2_bytes = v2_file.read()
+                    v1_bytes, v2_bytes = v1_file.read(), v2_file.read()
                     prompt = (
                         f"당사가 보낸 초안(V1)과 협력사가 회신한 수정본(V2)을 교차 비교해주세요.\n\n"
                         f"1. 협력사가 어느 조항을 어떻게 변경/추가/삭제했는지 핵심만 대조해주세요.\n"
@@ -760,42 +692,45 @@ def main():
                         f"[V1 당사 초안 내용]\n{extract_text(v1_bytes)}\n\n"
                         f"[V2 협력사 수정본 내용]\n{extract_text(v2_bytes)}"
                     )
-                    st.session_state["pending_input"] = prompt
+                    # 프롬프트 자동/반자동 마스킹 동시 적용
+                    st.session_state["pending_input"] = apply_auto_masking(prompt, target_partner)
                     st.rerun()
 
-        chat_files = st.file_uploader(
-            "📎 검토할 파일 첨부 (협력사 회신본 등)", type=["docx"],
-            accept_multiple_files=True, key="chat_uploader"
-        )
+        chat_files = st.file_uploader("📎 검토할 파일 첨부 (협력사 회신본 등)", type=["docx"], accept_multiple_files=True, key="chat_uploader")
         user_input = st.chat_input("검토할 텍스트를 입력하거나 파일을 첨부하세요...")
         query = user_input or st.session_state.pop("pending_input", None)
 
         if query:
+            # 1. 파일 텍스트 추출 및 즉각적인 마스킹 적용 (자동+반자동)
             attached_texts = []
             if chat_files:
                 for f in chat_files:
                     f.seek(0)
-                    text = extract_text(f.read())
-                    attached_texts.append(f"=== 검토 대상 첨부 파일: {f.name} ===\n" + text)
+                    raw_text = extract_text(f.read())
+                    safe_text = apply_auto_masking(raw_text, target_partner)
+                    attached_texts.append(f"=== 검토 대상 첨부 파일: {f.name} ===\n" + safe_text)
 
             has_attachment = bool(attached_texts)
 
+            # 2. 질문 텍스트에도 마스킹 적용
+            safe_query = apply_auto_masking(query, target_partner)
+
             if attached_texts:
-                full_query = f"[사용자 문의사항]\n{query}\n\n[검토 대상 텍스트/첨부파일]\n" + "\n\n".join(attached_texts)
-                display_query = query + "\n\n📎 " + ", ".join(f.name for f in chat_files)
+                full_query = f"[사용자 문의사항]\n{safe_query}\n\n[검토 대상 텍스트/첨부파일]\n" + "\n\n".join(attached_texts)
+                display_query = safe_query + "\n\n📎 " + ", ".join(f.name for f in chat_files)
             else:
-                has_review_content = len(query) > 80 or "조" in query or "항" in query or ":" in query
-                if any(kw in query for kw in ["검토", "확인", "분석"]) and not has_review_content:
-                    full_query = f"[사용자 문의사항]\n{query}\n\n[검토 대상 텍스트/첨부파일]\n(없음 - 첨부파일이나 텍스트가 제공되지 않았습니다.)"
+                has_review_content = len(safe_query) > 80 or "조" in safe_query or "항" in safe_query or ":" in safe_query
+                if any(kw in safe_query for kw in ["검토", "확인", "분석"]) and not has_review_content:
+                    full_query = f"[사용자 문의사항]\n{safe_query}\n\n[검토 대상 텍스트/첨부파일]\n(없음 - 첨부파일이나 텍스트가 제공되지 않았습니다.)"
                 else:
-                    full_query = f"[사용자 문의사항 및 검토 대상 텍스트]\n{query}\n\n[첨부파일]\n(없음)"
-                display_query = query
+                    full_query = f"[사용자 문의사항 및 검토 대상 텍스트]\n{safe_query}\n\n[첨부파일]\n(없음)"
+                display_query = safe_query
 
             st.session_state.messages.append({"role": "user", "content": full_query})
             with st.chat_message("user", avatar="👤"):
                 st.markdown(display_query)
 
-            model_choice = route_query(query, has_attachment)
+            model_choice = route_query(safe_query, has_attachment)
 
             with st.chat_message("assistant", avatar="⚖"):
                 if model_choice == "claude":
@@ -805,31 +740,15 @@ def main():
 
                 with st.spinner(spinner_msg):
                     start_time = time.time()
-                    
-                    # 🚀 고가용성 우회 로직 (둘 중 하나가 죽으면 다른 하나가 대신 처리)
-                    reply, actual_model = dispatch_with_fallback(
-                        model_choice, st.session_state.messages, 
-                        st.session_state.docs, st.session_state.laws_db
-                    )
-                    
+                    reply, actual_model = dispatch_with_fallback(model_choice, st.session_state.messages, st.session_state.docs, st.session_state.laws_db)
                     elapsed = time.time() - start_time
 
-                msg_data = {
-                    "role": "assistant",
-                    "content": reply,
-                    "time": elapsed,
-                    "model": actual_model,
-                    "msg_id": str(datetime.now().timestamp()),
-                }
+                msg_data = {"role": "assistant", "content": reply, "time": elapsed, "model": actual_model, "msg_id": str(datetime.now().timestamp())}
 
-                # 실패하지 않았거나, 실패했더라도 정상적으로 Fallback 되어 JSON 파싱을 시도할 조건
                 if "Failed" not in actual_model and ("Claude" in actual_model or (model_choice == "claude" and "Gemini" in actual_model)):
                     json_data, detail_text = parse_review_response(reply)
                     if json_data:
-                        citation_results = verify_citations(
-                            json_data.get("cited_laws", []),
-                            st.session_state.laws_db
-                        )
+                        citation_results = verify_citations(json_data.get("cited_laws", []), st.session_state.laws_db)
                         msg_data["json_data"] = json_data
                         msg_data["detail_text"] = detail_text
                         msg_data["citation_results"] = citation_results
@@ -837,26 +756,15 @@ def main():
                         render_verdict_badge(json_data.get("verdict", ""))
                         st.markdown(f"**📋 {json_data.get('summary', '')}**")
                         render_issues_table(json_data.get("issues", []), citation_results)
-                        if json_data.get("alternative_clause"):
-                            render_alternative_clause(json_data["alternative_clause"])
-                        with st.expander("📄 상세 검토 의견 전문", expanded=False):
-                            st.markdown(detail_text)
+                        if json_data.get("alternative_clause"): render_alternative_clause(json_data["alternative_clause"])
+                        with st.expander("📄 상세 검토 의견 전문", expanded=False): st.markdown(detail_text)
 
                         docx_bytes = generate_review_docx(json_data, detail_text, display_query)
-                        st.download_button(
-                            "📥 검토의견서 다운로드 (.docx)",
-                            data=docx_bytes,
-                            file_name=f"검토의견서_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        )
+                        st.download_button("📥 검토의견서 다운로드 (.docx)", data=docx_bytes, file_name=f"검토의견서_{datetime.now().strftime('%Y%m%d_%H%M')}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
                         save_review_log({
-                            "id": msg_data["msg_id"],
-                            "session_id": st.session_state.current_session_id,
-                            "verdict": json_data.get("verdict", "unknown"),
-                            "issues": json_data.get("issues"),
-                            "action_plan": json_data.get("action_plan"),
-                            "cited_laws": json_data.get("cited_laws"),
+                            "id": msg_data["msg_id"], "session_id": st.session_state.current_session_id, "verdict": json_data.get("verdict", "unknown"),
+                            "issues": json_data.get("issues"), "action_plan": json_data.get("action_plan"), "cited_laws": json_data.get("cited_laws"),
                             "citation_verified": all(cr["verified"] for cr in citation_results) if citation_results else False,
                         })
                     else:
@@ -869,12 +777,7 @@ def main():
 
             import uuid
             new_id = st.session_state.current_session_id or str(uuid.uuid4())
-            current_sess = {
-                "id": new_id,
-                "title": display_query[:25] + "...",
-                "date": datetime.now().isoformat(),
-                "messages": st.session_state.messages,
-            }
+            current_sess = {"id": new_id, "title": display_query[:25] + "...", "date": datetime.now().isoformat(), "messages": st.session_state.messages}
             if save_session(current_sess):
                 st.session_state.current_session_id = new_id
                 existing = [s for s in st.session_state.sessions if s["id"] != new_id]
@@ -882,7 +785,7 @@ def main():
             st.rerun()
 
     else:
-        st.info("👈 사이드바에서 사규/계약서/약정서를 먼저 등록해주세요. 등록된 문서가 검토 기준이 됩니다.")
+        st.info("👈 사이드바 아래 '⚙️ 기준 문서 DB 관리'에서 사규/계약서를 먼저 등록해주세요.")
 
 if __name__ == "__main__":
     main()
