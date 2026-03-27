@@ -1,12 +1,21 @@
 # ============================================================
-#  🤝 공정거래 실무 어시스턴트 v2.0 — 면세점 MD/바이어용
+#  🤝 공정거래 실무 어시스턴트 v2.1 — 면세점 MD/바이어용
 #  이중 모델: Gemini(문서/검색) + Claude(법률검토) + 고가용성 우회
 #  보안: 자동 DLP(개인/기업정보) + 협력사명 지정 마스킹 탑재
 #  디자인: 신세계그룹 뉴스룸 테마 적용 (Pretendard, Corporate Red)
+#
+#  v2.1 변경사항:
+#  - Claude 모델 버전 설정값 외부화 (Secrets 지원)
+#  - 계좌번호 DLP 정규식 오탐 수정 (은행별 패턴 정밀화)
+#  - Gemini 폴백 시 에러 타입별 분기 (rate limit 공유 쿼터 대응)
+#  - extract_text 에러 핸들링 추가
+#  - 시스템 프롬프트 토큰 관리 (조항 단위 자르기)
+#  - st.rerun() 타이밍 개선 (다운로드 가능 상태 보장)
+#  - import 위치 정리 (uuid 등 상단 이동)
 # ============================================================
 
 import streamlit as st
-import os, io, json, re, time, logging
+import os, io, json, re, time, logging, uuid
 from datetime import datetime, timedelta
 
 # ── 로깅 설정 ────────────────────────────────────────────────
@@ -14,11 +23,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── 설정 ─────────────────────────────────────────────────────
-def get_secret(key):
+def get_secret(key, default=""):
+    """Secrets → 환경변수 → default 순으로 설정값 조회"""
     try:
         return st.secrets[key]
     except Exception:
-        return os.environ.get(key, "")
+        return os.environ.get(key, default)
+
+# 모델명 외부 설정 지원 (Secrets에 없으면 기본값 사용)
+CLAUDE_MODEL = get_secret("CLAUDE_MODEL", "claude-sonnet-4-20250514")
+GEMINI_MODELS = [
+    get_secret("GEMINI_MODEL_PRIMARY", "gemini-2.5-pro"),
+    get_secret("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash"),
+]
 
 # ── Lazy 클라이언트 초기화 ────────────────────────────────────
 @st.cache_resource
@@ -64,18 +81,33 @@ REVIEW_KEYWORDS = ["검토", "확인", "위반", "적법", "수용", "반품", "
 
 # ── 자동 보안 마스킹 (DLP) 함수 ──────────────────────────────
 def apply_auto_masking(text, target_partner=""):
-    """정규표현식을 이용한 자동 개인/기업정보 차단 및 지정 협력사명 마스킹"""
+    """정규표현식을 이용한 자동 개인/기업정보 차단 및 지정 협력사명 마스킹
+    
+    v2.1: 계좌번호 패턴을 은행별 실제 자릿수로 정밀화하여 오탐 방지
+    """
     if not text:
         return text
         
     # 1. 개인정보 및 식별번호 차단 (자동)
+    # 주민등록번호 / 외국인등록번호 (6자리-7자리, 뒷자리 1~4로 시작)
     text = re.sub(r'\b\d{6}[-\s]*[1-4]\d{6}\b', '█주민/외국인번호█', text) 
-    text = re.sub(r'\b\d{3}[-\s]*\d{2}[-\s]*\d{5}\b', '█사업자번호█', text) 
-    text = re.sub(r'\b\d{6}[-\s]*\d{7}\b', '█법인번호█', text) 
-    text = re.sub(r'\b01[016789][-\s]*\d{3,4}[-\s]*\d{4}\b', '█휴대전화█', text)
-    text = re.sub(r'\b0[2-9][0-9]?[-\s]*\d{3,4}[-\s]*\d{4}\b', '█전화번호█', text)
+    # 사업자등록번호 (3-2-5 형식, 반드시 하이픈 포함)
+    text = re.sub(r'\b\d{3}-\d{2}-\d{5}\b', '█사업자번호█', text) 
+    # 법인등록번호 (6-7 형식, 반드시 하이픈 포함)
+    text = re.sub(r'\b\d{6}-\d{7}\b', '█법인번호█', text) 
+    # 휴대전화 (010/011/016/017/018/019 + 3~4자리 + 4자리)
+    text = re.sub(r'\b01[016789][-\s]?\d{3,4}[-\s]?\d{4}\b', '█휴대전화█', text)
+    # 일반 전화번호 (지역번호 2~3자리 + 3~4자리 + 4자리)
+    text = re.sub(r'\b0[2-9][0-9]?[-\s]?\d{3,4}[-\s]?\d{4}\b', '█전화번호█', text)
+    # 이메일
     text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '█이메일█', text)
-    text = re.sub(r'\b\d{3,6}[-\s]*\d{2,6}[-\s]*\d{3,6}\b', '█계좌번호█', text) 
+    # 계좌번호: "계좌" 키워드 근접 시에만 마스킹 (오탐 방지)
+    # 패턴: "계좌" 뒤 30자 이내의 10~16자리 숫자열 (하이픈 허용)
+    text = re.sub(
+        r'(계좌[^\d]{0,30})(\d{2,6}[-]?\d{2,6}[-]?\d{2,6})',
+        lambda m: m.group(1) + '█계좌번호█',
+        text
+    )
     
     # 2. 당사 식별 키워드 차단 (자동)
     company_keywords = ['신세계디에프', '신세계면세점', '신세계 DF', 'Shinsegae DF', '신세계']
@@ -174,11 +206,46 @@ def cleanup_old_sessions(days=90):
     except Exception:
         pass
 
-# ── docx 텍스트 추출 ─────────────────────────────────────────
+# ── docx 텍스트 추출 (에러 핸들링 강화) ───────────────────────
 def extract_text(file_bytes):
-    from docx import Document
-    doc = Document(io.BytesIO(file_bytes))
-    return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+    """docx 파일에서 텍스트 추출. 실패 시 에러 메시지 반환."""
+    if not file_bytes:
+        return "(빈 파일입니다.)"
+    try:
+        from docx import Document
+        doc = Document(io.BytesIO(file_bytes))
+        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+        if not paragraphs:
+            # 테이블에만 텍스트가 있을 수 있으므로 테이블도 시도
+            table_texts = []
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                    if row_text:
+                        table_texts.append(row_text)
+            if table_texts:
+                return "\n".join(table_texts)
+            return "(문서에서 텍스트를 추출하지 못했습니다. 이미지만 있는 문서일 수 있습니다.)"
+        return "\n".join(paragraphs)
+    except Exception as e:
+        logger.error(f"텍스트 추출 실패: {e}")
+        return f"(파일 읽기 실패: 손상되었거나 지원하지 않는 형식입니다 — {type(e).__name__})"
+
+# ── 시스템 프롬프트용 텍스트 자르기 (조항 단위) ─────────────────
+def truncate_at_boundary(text, max_chars):
+    """문서 구분자(---) 기준으로 자르기. 조항 중간에서 잘리지 않도록 함."""
+    if len(text) <= max_chars:
+        return text
+    # max_chars 이전의 마지막 구분자 위치를 찾아 거기서 자름
+    truncated = text[:max_chars]
+    last_separator = truncated.rfind("\n\n---\n\n")
+    if last_separator > max_chars * 0.5:  # 절반 이상은 보존
+        return truncated[:last_separator]
+    # 구분자가 없으면 마지막 줄바꿈 기준
+    last_newline = truncated.rfind("\n")
+    if last_newline > max_chars * 0.7:
+        return truncated[:last_newline]
+    return truncated
 
 # ── 쿼리 라우팅 ──────────────────────────────────────────────
 def route_query(query, has_attachment):
@@ -207,6 +274,21 @@ def verify_citations(cited_laws, laws_db):
         })
     return results
 
+# ── 에러 타입 분류 헬퍼 ──────────────────────────────────────
+def classify_api_error(error):
+    """API 에러를 분류하여 (에러유형, 메시지) 튜플 반환.
+    에러유형: 'rate_limit', 'auth', 'server', 'unknown'
+    """
+    error_msg = str(error).lower()
+    if any(kw in error_msg for kw in ["rate", "quota", "429", "resource_exhausted"]):
+        return "rate_limit", "API 사용 한도 또는 요금을 초과했습니다."
+    elif any(kw in error_msg for kw in ["401", "403", "authentication", "api_key", "permission"]):
+        return "auth", "API 키가 유효하지 않거나 만료되었습니다."
+    elif any(kw in error_msg for kw in ["500", "502", "503", "504", "unavailable", "timeout"]):
+        return "server", "서버가 일시적으로 응답하지 않습니다."
+    else:
+        return "unknown", f"알 수 없는 오류가 발생했습니다: {type(error).__name__}"
+
 # ── 시스템 프롬프트 ──────────────────────────────────────────
 def build_system_claude(docs, laws_db):
     def by_cat(cat):
@@ -215,9 +297,9 @@ def build_system_claude(docs, laws_db):
         if not ds: return "(등록 없음)"
         return "\n\n---\n\n".join(["[" + d["label"] + "]\n" + d["text"] for d in ds])
 
-    saryu_text    = fmt_docs(by_cat("saryu"))[:25000]
-    contract_text = fmt_docs(by_cat("contract"))[:35000]
-    yakjeong_text = fmt_docs(by_cat("yakjeong"))[:20000]
+    saryu_text    = truncate_at_boundary(fmt_docs(by_cat("saryu")), 25000)
+    contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 35000)
+    yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 20000)
 
     laws_text = ""
     if laws_db:
@@ -287,9 +369,9 @@ def build_system_gemini(docs):
         if not ds: return "(등록 없음)"
         return "\n\n---\n\n".join(["[" + d["label"] + "]\n" + d["text"] for d in ds])
 
-    saryu_text    = fmt_docs(by_cat("saryu"))[:25000]
-    contract_text = fmt_docs(by_cat("contract"))[:35000]
-    yakjeong_text = fmt_docs(by_cat("yakjeong"))[:20000]
+    saryu_text    = truncate_at_boundary(fmt_docs(by_cat("saryu")), 25000)
+    contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 35000)
+    yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 20000)
 
     return (
         "당신은 면세점 전문 공정거래 실무 어시스턴트 AI입니다.\n"
@@ -321,26 +403,35 @@ def call_claude(system_prompt, messages):
 
     try:
         response = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model=CLAUDE_MODEL,
             max_tokens=4096,
             system=system_prompt,
             messages=claude_messages,
         )
         return response.content[0].text
     except Exception as e:
-        error_msg = str(e).lower()
         logger.error(f"Claude API 오류: {e}")
-        if "rate" in error_msg or "quota" in error_msg or "429" in error_msg:
-            return "⚠️ [API 한도 초과] Claude API 사용 한도 또는 요금을 초과했습니다. 관리자에게 문의하여 한도를 늘려주세요."
-        elif "401" in error_msg or "403" in error_msg or "authentication" in error_msg:
-            return "⚠️ [API 인증 오류] Claude API 키가 유효하지 않거나 만료되었습니다."
-        else:
-            return "⚠️ [서버 통신 장애] 현재 Anthropic(Claude) 본사 서버에 일시적인 장애가 있거나 통신이 지연되고 있습니다."
+        err_type, err_msg = classify_api_error(e)
+        label_map = {
+            "rate_limit": "API 한도 초과",
+            "auth": "API 인증 오류",
+            "server": "서버 통신 장애",
+            "unknown": "통신 오류",
+        }
+        return f"⚠️ [{label_map[err_type]}] Claude: {err_msg}"
 
 def call_gemini(system_prompt, messages):
     from google.genai import types
     client = init_gemini()
-    for model_name in ["gemini-2.5-pro", "gemini-2.5-flash"]:
+    
+    last_error_type = None
+    
+    for model_name in GEMINI_MODELS:
+        # rate_limit 에러 시 동일 API 키 쿼터를 공유하므로 다음 모델로 폴백해도 무의미
+        if last_error_type == "rate_limit":
+            logger.info(f"Gemini rate limit 발생 — 동일 쿼터 공유로 {model_name} 폴백 건너뜀")
+            continue
+            
         try:
             history = []
             for m in messages[:-1]:
@@ -357,17 +448,25 @@ def call_gemini(system_prompt, messages):
             )
             return response.text
         except Exception as e:
-            error_msg = str(e).lower()
             logger.error(f"Gemini ({model_name}) 오류: {e}")
-            if model_name == "gemini-2.5-flash":
-                if "rate" in error_msg or "quota" in error_msg or "429" in error_msg:
-                    return "⚠️ [API 한도 초과] Gemini API 사용 한도를 초과했습니다."
-                elif "401" in error_msg or "403" in error_msg or "api_key" in error_msg:
-                    return "⚠️ [API 인증 오류] Gemini API 키가 유효하지 않습니다."
-                else:
-                    return "⚠️ [서버 통신 장애] 현재 구글(Gemini) 서버가 응답하지 않습니다."
+            last_error_type, last_err_msg = classify_api_error(e)
+            
+            # 마지막 모델이거나 rate_limit(공유 쿼터)인 경우 즉시 에러 반환
+            is_last = (model_name == GEMINI_MODELS[-1])
+            if is_last or last_error_type == "rate_limit":
+                label_map = {
+                    "rate_limit": "API 한도 초과",
+                    "auth": "API 인증 오류",
+                    "server": "서버 통신 장애",
+                    "unknown": "통신 오류",
+                }
+                return f"⚠️ [{label_map[last_error_type]}] Gemini: {last_err_msg}"
+            # auth 에러도 같은 키를 쓰므로 폴백 무의미
+            if last_error_type == "auth":
+                return f"⚠️ [API 인증 오류] Gemini: {last_err_msg}"
             continue
-    return "⚠️ 응답을 가져오지 못했습니다."
+    
+    return "⚠️ Gemini 응답을 가져오지 못했습니다."
 
 def dispatch_with_fallback(model_choice, messages, docs, laws_db):
     if model_choice == "claude":
@@ -379,7 +478,7 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
             if not fallback_reply.startswith("⚠️"):
                 return fallback_reply, "Gemini (Fallback)"
             return reply, "Claude (Failed)"
-        return reply, "Claude 3.5 Sonnet"
+        return reply, f"Claude ({CLAUDE_MODEL})"
     else:
         system = build_system_gemini(docs)
         reply = call_gemini(system, messages)
@@ -387,7 +486,7 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
             st.warning(f"🔄 {reply}\n→ 예비 시스템(Claude)으로 자동 우회하여 답변을 생성합니다.")
             fallback_reply = call_claude(system, messages)
             if not fallback_reply.startswith("⚠️"):
-                return fallback_reply, "Claude 3.5 Sonnet (Fallback)"
+                return fallback_reply, f"Claude ({CLAUDE_MODEL}, Fallback)"
             return reply, "Gemini (Failed)"
         return reply, "Gemini"
 
@@ -508,7 +607,7 @@ def generate_review_docx(json_data, detail_text, query_text):
 
 # ── Streamlit UI 메인 함수 ────────────────────────────────────
 def main():
-    st.set_page_config(page_title="공정거래 실무 어시스턴트 v2.0", page_icon="🤝", layout="wide")
+    st.set_page_config(page_title="공정거래 실무 어시스턴트 v2.1", page_icon="🤝", layout="wide")
 
     st.markdown("""
     <style>
@@ -612,14 +711,21 @@ def main():
     if "sessions" not in st.session_state: st.session_state.sessions = load_sessions()
     if "current_session_id" not in st.session_state: st.session_state.current_session_id = None
     if "laws_db" not in st.session_state: st.session_state.laws_db = load_laws()
+    # 응답 완료 후 rerun 플래그 (다운로드 버튼 렌더링 보장)
+    if "needs_rerun" not in st.session_state: st.session_state.needs_rerun = False
 
     if "cleanup_done" not in st.session_state:
         cleanup_old_sessions(90)
         st.session_state.cleanup_done = True
 
+    # 이전 턴에서 세션 저장 후 rerun이 필요한 경우
+    if st.session_state.needs_rerun:
+        st.session_state.needs_rerun = False
+        st.rerun()
+
     # ── 사이드바 (실무자 동선 최적화) ─────────────────────────
     with st.sidebar:
-        st.markdown("## 🤝 공정거래 실무 어시스턴트 v2.0")
+        st.markdown("## 🤝 공정거래 실무 어시스턴트 v2.1")
         st.caption("면세점 MD 바이어 전용")
         
         # 1. 자동 보안 마스킹 안내 (DLP) - 최상단 배치
@@ -664,6 +770,9 @@ def main():
             if law_count > 0: st.success(f"📚 법령 DB: {law_count}개")
             else: st.warning("📚 법령 DB 미설정")
 
+            st.caption(f"🤖 Claude: `{CLAUDE_MODEL}`")
+            st.caption(f"🤖 Gemini: `{GEMINI_MODELS[0]}` → `{GEMINI_MODELS[1]}`")
+
             doc_cat = st.selectbox("문서 유형", options=list(DOC_CATS.keys()), format_func=lambda x: DOC_CATS[x]["icon"] + " " + DOC_CATS[x]["label"])
             contract_type = st.selectbox("거래 유형", CONTRACT_TYPES) if doc_cat == "contract" else None
             yakjeong_type = st.selectbox("약정서 유형", YAKJEONG_TYPES) if doc_cat == "yakjeong" else None
@@ -672,10 +781,18 @@ def main():
             if uploaded_files:
                 if st.button("DB에 규칙 등록", use_container_width=True):
                     for f in uploaded_files:
-                        import uuid
                         label = f"계약서({contract_type})" if contract_type else f"약정서({yakjeong_type})" if yakjeong_type else DOC_CATS[doc_cat]["label"]
                         label += f": {f.name}"
-                        new_doc = {"id": str(uuid.uuid4()), "name": f.name, "cat": doc_cat, "contract_type": contract_type or yakjeong_type, "label": label, "text": extract_text(f.read()), "size": f.size}
+                        file_bytes = f.read()
+                        new_doc = {
+                            "id": str(uuid.uuid4()),
+                            "name": f.name,
+                            "cat": doc_cat,
+                            "contract_type": contract_type or yakjeong_type,
+                            "label": label,
+                            "text": extract_text(file_bytes),
+                            "size": len(file_bytes),
+                        }
                         if save_doc(new_doc): st.session_state.docs.append(new_doc)
                     st.rerun()
 
@@ -695,7 +812,7 @@ def main():
                                     st.rerun()
 
     # ── 메인 영역 ────────────────────────────────────────────
-    st.title("🤝 공정거래 실무 어시스턴트 v2.0")
+    st.title("🤝 공정거래 실무 어시스턴트 v2.1")
     st.caption("사규·표준계약서 질의응답 및 심층 계약/법률 검토 AI")
 
     if not st.session_state.messages and st.session_state.docs:
@@ -757,16 +874,27 @@ def main():
             with col2: v2_file = st.file_uploader("📝 V2 (협력사 수정본)", type=["docx"], key="v2_upload")
             if v1_file and v2_file:
                 if st.button("교차 비교 분석 실행", type="primary", use_container_width=True):
+                    v1_file.seek(0)
+                    v2_file.seek(0)
                     v1_bytes, v2_bytes = v1_file.read(), v2_file.read()
-                    prompt = (
-                        f"당사가 보낸 초안(V1)과 협력사가 회신한 수정본(V2)을 교차 비교해주세요.\n\n"
-                        f"1. 협력사가 어느 조항을 어떻게 변경/추가/삭제했는지 핵심만 대조해주세요.\n"
-                        f"2. 수정본(V2)의 내용이 DB의 [기준 문서]와 [법령]을 위반하는지 엄격히 심사해주세요.\n\n"
-                        f"[V1 당사 초안 내용]\n{extract_text(v1_bytes)}\n\n"
-                        f"[V2 협력사 수정본 내용]\n{extract_text(v2_bytes)}"
-                    )
-                    st.session_state["pending_input"] = apply_auto_masking(prompt, target_partner)
-                    st.rerun()
+                    v1_text = extract_text(v1_bytes)
+                    v2_text = extract_text(v2_bytes)
+                    
+                    # 추출 실패 체크
+                    if v1_text.startswith("(") and v1_text.endswith(")"):
+                        st.error(f"V1 파일 읽기 실패: {v1_text}")
+                    elif v2_text.startswith("(") and v2_text.endswith(")"):
+                        st.error(f"V2 파일 읽기 실패: {v2_text}")
+                    else:
+                        prompt = (
+                            f"당사가 보낸 초안(V1)과 협력사가 회신한 수정본(V2)을 교차 비교해주세요.\n\n"
+                            f"1. 협력사가 어느 조항을 어떻게 변경/추가/삭제했는지 핵심만 대조해주세요.\n"
+                            f"2. 수정본(V2)의 내용이 DB의 [기준 문서]와 [법령]을 위반하는지 엄격히 심사해주세요.\n\n"
+                            f"[V1 당사 초안 내용]\n{v1_text}\n\n"
+                            f"[V2 협력사 수정본 내용]\n{v2_text}"
+                        )
+                        st.session_state["pending_input"] = apply_auto_masking(prompt, target_partner)
+                        st.rerun()
 
         chat_files = st.file_uploader("📎 검토할 파일 첨부 (협력사 회신본 등)", type=["docx"], accept_multiple_files=True, key="chat_uploader")
         user_input = st.chat_input("검토할 텍스트를 입력하거나 파일을 첨부하세요...")
@@ -778,6 +906,7 @@ def main():
                 for f in chat_files:
                     f.seek(0)
                     raw_text = extract_text(f.read())
+                    # 추출 실패 시에도 마스킹 적용 후 전달 (AI가 에러 메시지를 받아 안내)
                     safe_text = apply_auto_masking(raw_text, target_partner)
                     attached_texts.append(f"=== 검토 대상 첨부 파일: {f.name} ===\n" + safe_text)
 
@@ -844,14 +973,15 @@ def main():
                 st.caption(f"⏱️ {elapsed:.1f}초 · {actual_model}")
                 st.session_state.messages.append(msg_data)
 
-            import uuid
+            # 세션 저장 후 다음 렌더 사이클에서 rerun (다운로드 버튼 접근 보장)
             new_id = st.session_state.current_session_id or str(uuid.uuid4())
             current_sess = {"id": new_id, "title": display_query[:25] + "...", "date": datetime.now().isoformat(), "messages": st.session_state.messages}
             if save_session(current_sess):
                 st.session_state.current_session_id = new_id
                 existing = [s for s in st.session_state.sessions if s["id"] != new_id]
                 st.session_state.sessions = [current_sess] + existing
-            st.rerun()
+            # 즉시 rerun 대신 플래그 설정 → 현재 렌더에서 다운로드 버튼이 먼저 표시됨
+            st.session_state.needs_rerun = True
 
     else:
         st.info("👈 사이드바 아래 '⚙️ 기준 문서 DB 관리'에서 사규/계약서를 먼저 등록해주세요.")
