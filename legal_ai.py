@@ -1,6 +1,6 @@
 # ============================================================
 #  공정거래 법무 AI v2.0 — 면세점 MD/바이어용
-#  이중 모델: Gemini(문서/검색) + Claude(법률검토)
+#  이중 모델: Gemini(문서/검색) + Claude(법률검토) + 고가용성 우회
 # ============================================================
 
 import streamlit as st
@@ -63,8 +63,10 @@ PLAYBOOK = {
     "직매입 반품 (표준)": "제O조 (반품의 허용)\n직매입 거래의 경우 원칙적으로 반품이 불가하나, 직매입 계약 체결 시 반품조건을 구체적으로 약정하고 그 조건에 따라 반품하는 경우에 한하여 예외적으로 허용한다."
 }
 
+# 📌 일상적인 법률 자문 키워드 대폭 추가
 REVIEW_KEYWORDS = ["검토", "확인", "위반", "적법", "수용", "반품", "계약", "약정",
-                   "조항", "독소", "비교", "분석", "판촉", "감액", "반려", "승인"]
+                   "조항", "독소", "비교", "분석", "판촉", "감액", "반려", "승인",
+                   "법률", "법적", "맞음", "맞아", "맞나요", "위법", "불법", "가능", "어때", "어떤가요", "문제"]
 
 # ── Supabase CRUD ────────────────────────────────────────────
 def load_docs():
@@ -144,7 +146,6 @@ def load_laws():
         return []
 
 def cleanup_old_sessions(days=90):
-    """90일 초과 세션 자동 삭제"""
     try:
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         init_supabase().table("sessions").delete().lt("created_at", cutoff).execute()
@@ -159,16 +160,13 @@ def extract_text(file_bytes):
 
 # ── 쿼리 라우팅 ──────────────────────────────────────────────
 def route_query(query, has_attachment):
-    """검토 요청 → claude, 일반 질문 → gemini"""
     if has_attachment:
         return "claude"
     if any(kw in query for kw in REVIEW_KEYWORDS):
         return "claude"
     return "gemini"
 
-# ── 법령 인용 검증 ───────────────────────────────────────────
 def verify_citations(cited_laws, laws_db):
-    """AI가 인용한 법령이 DB에 존재하는지 검증"""
     results = []
     if not cited_laws:
         return results
@@ -189,7 +187,6 @@ def verify_citations(cited_laws, laws_db):
 
 # ── 시스템 프롬프트 ──────────────────────────────────────────
 def build_system_claude(docs, laws_db):
-    """Claude용 시스템 프롬프트 (구조화 JSON 출력 강제)"""
     def by_cat(cat):
         return [d for d in docs if d["cat"] == cat]
     def fmt_docs(ds):
@@ -200,7 +197,6 @@ def build_system_claude(docs, laws_db):
     contract_text = fmt_docs(by_cat("contract"))[:35000]
     yakjeong_text = fmt_docs(by_cat("yakjeong"))[:20000]
 
-    # 법령 DB 텍스트 구성
     laws_text = ""
     if laws_db:
         law_entries = []
@@ -212,18 +208,14 @@ def build_system_claude(docs, laws_db):
 
     return (
         "당신은 면세점(보세판매장) 전문 공정거래 AI변호사이자 컴플라이언스 의사결정 보조 AI입니다.\n"
-        "단순한 법령 해설을 넘어, 회사의 비즈니스 이익과 법적 리스크를 종합적으로 조율하여 실무적인 결단을 돕고 MD/바이어의 업무를 명확히 가이드합니다.\n\n"
+        "단순한 법률 해석을 넘어, ① [외부 법령]과 ② [내부 사규/표준문서]라는 두 가지 관점에서 교차 검토하여 MD/바이어에게 명확한 실무 결단을 내려주세요.\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "[기준 문서 (Ground Truth — 절대 자체를 검토하지 말 것)]\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "아래 제공된 사규, 계약서, 약정서는 당사의 '표준 규칙(정답)'입니다.\n"
-        "이 문서 자체의 위법성이나 문제점을 검토하지 마십시오.\n"
-        "오직 사용자가 채팅창에 입력하거나 첨부한 파일(검토 대상)을 평가할 때 '잣대'로만 사용하십시오.\n\n"
-
-        "① 당사 사규 및 컴플라이언스 정책 (기준표):\n" + saryu_text +
-        "\n\n② 거래유형별 당사 표준 계약서 (기준표):\n" + contract_text +
-        "\n\n③ 당사 표준 약정서 (기준표):\n" + yakjeong_text +
+        "① 당사 사규 및 컴플라이언스 정책:\n" + saryu_text +
+        "\n\n② 거래유형별 당사 표준 계약서:\n" + contract_text +
+        "\n\n③ 당사 표준 약정서:\n" + yakjeong_text +
 
         "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "[적용 법령 DB (현행 법령 원문)]\n"
@@ -233,56 +225,40 @@ def build_system_claude(docs, laws_db):
         "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "[답변 형식 — 엄격 준수]\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "법률 검토 요청을 받으면 반드시 아래 형식으로 응답하세요.\n"
-        "```json``` 블록 하나와 상세 설명 텍스트 하나를 순서대로 출력합니다.\n\n"
+        "반드시 아래 형식의 ```json``` 블록 하나와 상세 설명 텍스트를 출력하세요.\n\n"
 
         "**[PART 1: JSON 블록]**\n"
         "```json\n"
         "{\n"
         '  "summary": "문의사항 1줄 요약",\n'
         '  "verdict": "approved | conditional | rejected",\n'
-        '  "verdict_reason": "최종 판단 근거 2-3줄",\n'
+        '  "verdict_reason": "법령과 사내 기준을 종합한 최종 판단 근거",\n'
         '  "issues": [\n'
         '    {\n'
         '      "issue_no": 1,\n'
         '      "title": "쟁점 제목",\n'
         '      "risk_level": "high | medium | low",\n'
-        '      "target_clause": "검토 대상 문서에서 해당 원문 그대로 인용",\n'
-        '      "applicable_law": "적용 법령 (예: 대규모유통업법 제11조 제1항)",\n'
-        '      "applicable_law_text": "위 법령 DB에서 해당 조문 원문 인용",\n'
-        '      "applicable_rule": "적용 사규/기준문서 조항 (해당시)",\n'
-        '      "analysis": "왜 위반/적법인지 구체적 분석",\n'
-        '      "recommendation": "수정 권고 또는 수용 가능 사유"\n'
+        '      "target_clause": "검토 대상 문서 원문 인용",\n'
+        '      "applicable_law": "적용 법령 (예: 대규모유통업법 제11조)",\n'
+        '      "law_analysis": "법령 관점에서의 위법성 평가",\n'
+        '      "applicable_rule": "적용 사규/표준계약서 조항",\n'
+        '      "rule_analysis": "사규 및 당사 기준 관점에서의 부합성 평가",\n'
+        '      "recommendation": "두 관점을 종합한 최종 권고안 및 실무 가이드"\n'
         '    }\n'
         '  ],\n'
-        '  "action_plan": "MD가 취해야 할 구체적 액션 (단계별)",\n'
-        '  "alternative_clause": "수정 대안 조항 초안 (해당시, 없으면 null)",\n'
-        '  "cited_laws": ["대규모유통업법 제11조", "공정거래법 제45조"]\n'
+        '  "action_plan": "MD가 상대방에게 해야 할 구체적 액션 (단계별)",\n'
+        '  "alternative_clause": "수정 대안 조항 초안 (없으면 null)",\n'
+        '  "cited_laws": ["대규모유통업법 제11조"]\n'
         "}\n"
         "```\n\n"
 
         "**[PART 2: 상세 설명]**\n"
-        "JSON 아래에 읽기 편한 마크다운 형식으로 상세 검토 의견을 작성하세요.\n"
-        "- 서두: **문의사항:** [요약]으로 시작 (절대 '사건명:' 사용 금지)\n"
-        "- 위험 사항: :red[텍스트] 형태로 표시\n"
-        "- 적법 사항: :blue[텍스트] 형태로 표시\n"
-        "- :red[ 또는 :blue[ 앞에 반드시 띄어쓰기 한 칸\n"
-        "- 대괄호 안에 줄바꿈 금지, 핵심 단어/짧은 구절 단위로 색상 적용\n"
-        "- 마지막에 **[최종 AI변호사 검토 의견 및 실무 가이드]** 섹션 필수\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "[할루시네이션 방지 규칙 — 절대 준수]\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "1. 검토 대상 부재 시: 즉시 \"검토할 파일이나 텍스트가 제공되지 않았습니다.\"라고만 답변\n"
-        "2. 직접 인용: 검토 대상에서 관련 원문을 토씨 하나 틀리지 않고 추출 후 답변\n"
-        "3. 출처 기반 검증: 모든 주장에 근거 인용구와 출처 명시 (사규 조항, 법률명 제N조)\n"
-        "4. 법령 인용 시 반드시 위 [적용 법령 DB]에 있는 조문 원문을 우선 사용\n"
-        "5. DB에 없는 법령을 인용할 때는 \"(법령 DB 미등록 — 원문 확인 필요)\"를 반드시 병기\n"
-        "6. 외부 지식 제한: 제공된 문서와 현행 법령 정보만 사용, AI 사전학습 지식으로 덮어쓰기 금지"
+        "JSON 아래에 마크다운 형식으로 작성.\n"
+        "- 서두: **문의사항:** [요약]\n"
+        "- 위험: :red[위반 내용], 적법: :blue[통과 내용] 문법 사용.\n"
     )
 
 def build_system_gemini(docs):
-    """Gemini용 시스템 프롬프트 (일반 질의/검색용)"""
     def by_cat(cat):
         return [d for d in docs if d["cat"] == cat]
     def fmt_docs(ds):
@@ -303,9 +279,8 @@ def build_system_gemini(docs):
         "\n\n답변 시 Streamlit 색상 문법을 사용하세요: :red[위험] :blue[적법]"
     )
 
-# ── AI 호출 함수 ─────────────────────────────────────────────
+# ── AI 호출 및 에러 핸들링 함수 ────────────────────────────────
 def call_claude(system_prompt, messages):
-    """Claude 3.5 Sonnet 호출 (법률 검토용)"""
     client = init_anthropic()
     claude_messages = []
     last_role = None
@@ -313,16 +288,12 @@ def call_claude(system_prompt, messages):
     for m in messages:
         role = "assistant" if m["role"] == "assistant" else "user"
         content = m["content"]
-        
-        # Claude API의 Alternating (교차) 역할 강제 규칙 처리
         if role == last_role:
-            # 같은 역할이 연속으로 나오면 이전 메시지 내용과 병합
             claude_messages[-1]["content"] += f"\n\n{content}"
         else:
             claude_messages.append({"role": role, "content": content})
             last_role = role
             
-    # 첫 번째 메시지는 반드시 'user'여야 함 (보안상 첫 메시지가 assistant인 경우 제거)
     if claude_messages and claude_messages[0]["role"] == "assistant":
         claude_messages.pop(0)
 
@@ -335,13 +306,16 @@ def call_claude(system_prompt, messages):
         )
         return response.content[0].text
     except Exception as e:
+        error_msg = str(e).lower()
         logger.error(f"Claude API 오류: {e}")
-        if "rate" in str(e).lower() or "quota" in str(e).lower():
-            return "⚠️ **Claude API 할당량 초과. 잠시 후 시도해주세요.**"
-        return f"⚠️ Claude 응답 오류: {str(e)[:100]}"
+        if "rate" in error_msg or "quota" in error_msg or "429" in error_msg:
+            return "⚠️ [API 한도 초과] Claude API 사용 한도 또는 요금을 초과했습니다. 관리자에게 문의하여 한도를 늘려주세요."
+        elif "401" in error_msg or "403" in error_msg or "authentication" in error_msg:
+            return "⚠️ [API 인증 오류] Claude API 키가 유효하지 않거나 만료되었습니다."
+        else:
+            return "⚠️ [서버 통신 장애] 현재 Anthropic(Claude) 본사 서버에 일시적인 장애가 있거나 통신이 지연되고 있습니다."
 
 def call_gemini(system_prompt, messages):
-    """Gemini 호출 (일반 질의용)"""
     from google.genai import types
     client = init_gemini()
     for model_name in ["gemini-2.5-pro", "gemini-2.5-flash"]:
@@ -361,24 +335,53 @@ def call_gemini(system_prompt, messages):
             )
             return response.text
         except Exception as e:
+            error_msg = str(e).lower()
             logger.error(f"Gemini ({model_name}) 오류: {e}")
             if model_name == "gemini-2.5-flash":
-                return f"⚠️ Gemini 응답 오류: {str(e)[:100]}"
+                if "rate" in error_msg or "quota" in error_msg or "429" in error_msg:
+                    return "⚠️ [API 한도 초과] Gemini API 사용 한도를 초과했습니다."
+                elif "401" in error_msg or "403" in error_msg or "api_key" in error_msg:
+                    return "⚠️ [API 인증 오류] Gemini API 키가 유효하지 않습니다."
+                else:
+                    return "⚠️ [서버 통신 장애] 현재 구글(Gemini) 서버가 응답하지 않습니다."
             continue
     return "⚠️ 응답을 가져오지 못했습니다."
 
+def dispatch_with_fallback(model_choice, messages, docs, laws_db):
+    """🚀 고가용성: 기본 모델 실패 시 대체 모델로 자동 우회(Cross-Fallback)"""
+    if model_choice == "claude":
+        system = build_system_claude(docs, laws_db)
+        reply = call_claude(system, messages)
+        
+        if reply.startswith("⚠️"):
+            st.warning(f"🔄 {reply}\n→ 예비 시스템(Gemini)으로 자동 우회하여 검토를 진행합니다.")
+            fallback_reply = call_gemini(system, messages)
+            if not fallback_reply.startswith("⚠️"):
+                return fallback_reply, "Gemini (Fallback)"
+            return reply, "Claude (Failed)"
+        return reply, "Claude 3.5 Sonnet"
+        
+    else:
+        system = build_system_gemini(docs)
+        reply = call_gemini(system, messages)
+        
+        if reply.startswith("⚠️"):
+            st.warning(f"🔄 {reply}\n→ 예비 시스템(Claude)으로 자동 우회하여 답변을 생성합니다.")
+            fallback_reply = call_claude(system, messages)
+            if not fallback_reply.startswith("⚠️"):
+                return fallback_reply, "Claude 3.5 Sonnet (Fallback)"
+            return reply, "Gemini (Failed)"
+        return reply, "Gemini"
+
 # ── JSON 파싱 ────────────────────────────────────────────────
 def parse_review_response(response_text):
-    """Claude 응답에서 JSON 블록과 상세 설명을 분리"""
     json_data = None
     detail_text = response_text
 
-    # ```json ... ``` 블록 추출
     json_match = re.search(r'```json\s*\n(.*?)\n```', response_text, re.DOTALL)
     if json_match:
         try:
             json_data = json.loads(json_match.group(1))
-            # JSON 블록 이후의 텍스트를 상세 설명으로
             detail_text = response_text[json_match.end():].strip()
         except json.JSONDecodeError as e:
             logger.error(f"JSON 파싱 실패: {e}")
@@ -388,7 +391,6 @@ def parse_review_response(response_text):
 
 # ── UI 렌더링 함수 ───────────────────────────────────────────
 def render_verdict_badge(verdict):
-    """신호등 배지"""
     badges = {
         "approved":    ("🟢 진행 가능 (승인)", "success"),
         "conditional": ("🟡 조건부 가능 (수정 필요)", "warning"),
@@ -398,7 +400,6 @@ def render_verdict_badge(verdict):
     getattr(st, msg_type)(label)
 
 def render_issues_table(issues, citation_results):
-    """쟁점별 테이블 (expander)"""
     if not issues:
         return
     risk_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
@@ -414,28 +415,27 @@ def render_issues_table(issues, citation_results):
             with col1:
                 law_ref = issue.get("applicable_law", "")
                 if law_ref:
-                    # 인용 검증 결과 매칭
                     verified = "⚪"
                     for cr in citation_results:
                         if any(part in cr["citation"] for part in law_ref.split()):
                             verified = "✅" if cr["verified"] else "⚠️"
                             break
                     st.markdown(f"**⚖️ 적용 법령:** {law_ref} {verified}")
+                
+                if issue.get("law_analysis"):
+                    st.markdown(f"**🔍 법령 관점:** {issue['law_analysis']}")
+
             with col2:
                 if issue.get("applicable_rule"):
-                    st.markdown(f"**📋 적용 사규:** {issue['applicable_rule']}")
-
-            if issue.get("applicable_law_text"):
-                st.caption(f"법령 원문: {issue['applicable_law_text'][:150]}...")
-
-            if issue.get("analysis"):
-                st.markdown(f"**🔍 분석:** {issue['analysis']}")
+                    st.markdown(f"**🏛️ 적용 사규:** {issue['applicable_rule']}")
+                
+                if issue.get("rule_analysis"):
+                    st.markdown(f"**🔍 사규 관점:** {issue['rule_analysis']}")
 
             if issue.get("recommendation"):
-                st.info(f"💡 **권고:** {issue['recommendation']}")
+                st.info(f"💡 **종합 실무 권고:** {issue['recommendation']}")
 
 def render_alternative_clause(clause):
-    """대안 조항 복사 블록"""
     if clause and clause != "null":
         st.markdown("---")
         st.markdown("### 📝 수정 대안 조항 (초안)")
@@ -444,20 +444,16 @@ def render_alternative_clause(clause):
 
 # ── 검토의견서 docx 생성 ─────────────────────────────────────
 def generate_review_docx(json_data, detail_text, query_text):
-    """검토의견서 docx 생성 → bytes 반환"""
     from docx import Document
     from docx.shared import Pt, Inches, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
     doc = Document()
-
-    # 스타일 설정
     style = doc.styles['Normal']
     font = style.font
     font.name = '맑은 고딕'
     font.size = Pt(10)
 
-    # 워터마크 고지
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = p.add_run("⚠️ AI 검토 초안 — 법무팀 최종 확인 필요 ⚠️")
@@ -466,19 +462,15 @@ def generate_review_docx(json_data, detail_text, query_text):
     run.bold = True
 
     doc.add_paragraph("")
-
-    # 제목
     doc.add_heading("공정거래 법률 검토 의견서", level=1)
     doc.add_paragraph(f"작성일: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    doc.add_paragraph(f"작성: AI 법무 검토 시스템 (Claude 3.5 Sonnet)")
+    doc.add_paragraph(f"작성: AI 법무 검토 시스템 (다중 AI 연동)")
     doc.add_paragraph("")
 
     if json_data:
-        # 1. 문의사항
         doc.add_heading("1. 문의사항", level=2)
         doc.add_paragraph(json_data.get("summary", query_text[:200]))
 
-        # 2. 검토 결론
         doc.add_heading("2. 검토 결론", level=2)
         verdict_map = {
             "approved": "✅ 진행 가능 (승인)",
@@ -488,8 +480,7 @@ def generate_review_docx(json_data, detail_text, query_text):
         doc.add_paragraph(verdict_map.get(json_data.get("verdict", ""), "판단 보류"))
         doc.add_paragraph(json_data.get("verdict_reason", ""))
 
-        # 3. 쟁점별 분석
-        doc.add_heading("3. 쟁점별 분석", level=2)
+        doc.add_heading("3. 쟁점별 교차 분석", level=2)
         for issue in json_data.get("issues", []):
             risk_label = {"high": "[위험]", "medium": "[주의]", "low": "[양호]"}
             doc.add_heading(
@@ -497,36 +488,29 @@ def generate_review_docx(json_data, detail_text, query_text):
                 level=3
             )
             if issue.get("target_clause"):
-                doc.add_paragraph(f"검토 대상: {issue['target_clause']}")
-            if issue.get("applicable_law"):
-                doc.add_paragraph(f"적용 법령: {issue['applicable_law']}")
-            if issue.get("applicable_rule"):
-                doc.add_paragraph(f"적용 사규: {issue['applicable_rule']}")
-            if issue.get("analysis"):
-                doc.add_paragraph(f"분석: {issue['analysis']}")
+                doc.add_paragraph(f"■ 검토 대상: {issue['target_clause']}")
+            if issue.get("law_analysis"):
+                doc.add_paragraph(f"■ [법령 관점] {issue.get('applicable_law', '')}: {issue['law_analysis']}")
+            if issue.get("rule_analysis"):
+                doc.add_paragraph(f"■ [사규 관점] {issue.get('applicable_rule', '')}: {issue['rule_analysis']}")
             if issue.get("recommendation"):
-                doc.add_paragraph(f"권고: {issue['recommendation']}")
+                doc.add_paragraph(f"■ 종합 권고: {issue['recommendation']}")
             doc.add_paragraph("")
 
-        # 4. Action Plan
         doc.add_heading("4. MD Action Plan", level=2)
         doc.add_paragraph(json_data.get("action_plan", "(없음)"))
 
-        # 5. 대안 조항
         if json_data.get("alternative_clause"):
             doc.add_heading("5. 수정 대안 조항 (초안)", level=2)
             doc.add_paragraph(json_data["alternative_clause"])
 
-        # 6. 인용 법령
         doc.add_heading("6. 인용 법령 목록", level=2)
         for law in json_data.get("cited_laws", []):
             doc.add_paragraph(f"• {law}")
     else:
-        # JSON 파싱 실패 시 전체 텍스트
         doc.add_heading("검토 의견", level=2)
         doc.add_paragraph(detail_text[:10000])
 
-    # 면책 고지
     doc.add_paragraph("")
     doc.add_paragraph("─" * 50)
     disclaimer = doc.add_paragraph(
@@ -614,7 +598,6 @@ def main():
     if "laws_db" not in st.session_state:
         st.session_state.laws_db = load_laws()
 
-    # 90일 초과 세션 정리 (앱 시작 시 1회)
     if "cleanup_done" not in st.session_state:
         cleanup_old_sessions(90)
         st.session_state.cleanup_done = True
@@ -625,7 +608,6 @@ def main():
         st.caption("면세점 MD 바이어 전용 · Gemini + Claude")
         st.divider()
 
-        # 법령 DB 상태
         law_count = len(st.session_state.laws_db)
         if law_count > 0:
             st.success(f"📚 법령 DB: {law_count}개 조문 적재됨")
@@ -707,13 +689,20 @@ def main():
 
     # ── 메인 영역 ────────────────────────────────────────────
     st.title("⚖ 공정거래 법무 자문 v2.0")
+    st.caption("사규·표준계약서 질의응답 및 심층 계약/법률 검토 AI")
 
     if not st.session_state.messages and st.session_state.docs:
-        st.markdown("**자주 묻는 질문**")
+        st.markdown("### 💡 AI 법무 자문 100% 활용 가이드")
+        st.info(
+            "본 시스템은 질문의 목적에 따라 **두 가지 수준의 맞춤형 자문**을 제공합니다.\n\n"
+            "🔹 **[1단계] 사내 기준 자문:** 일상적인 규정 문의 시, 등록된 당사 사규와 표준계약서를 바탕으로 신속한 실무 기준을 안내합니다.\n"
+            "🔹 **[2단계] 심층 법무 검토:** 계약서/약정서가 첨부되거나 위법성 판단을 요청하면, 내부 사규와 외부 현행 법령을 교차 분석하여 정식 '검토 의견서'를 발행합니다."
+        )
+        
         samples = [
-            ("📋 계약 검토", "협력사에서 보내온 다음 특약매입 계약서 조항이 당사 사규에 맞는지 확인해줘: [여기에 협력사 조항 붙여넣기]"),
-            ("🤝 약정 검토", "첨부한 파견 약정서(협력사 회신본) 내용 중 법 위반 소지가 있는지 검토해줘."),
-            ("🧑‍💼 법률 질의", "협력사가 반품 기한을 60일로 연장해달라는데, 대규모유통업법과 당사 계약서 기준으로 수용 가능한가요?")
+            ("🔹 [1단계] 단순 사내 규정 문의", "현재 등록된 당사 사규에 따르면, 브랜드 자발적 사유로 매장을 리뉴얼할 때 인테리어 비용 분담 기준이 어떻게 돼?"),
+            ("🔹 [2단계] 심층 법률 조항 검토", "협력사가 특약매입 판촉비 분담률을 60%로 요구하고 있어. 법률적으로 이게 맞음? 수용 가능한지 당사 기준과 대규모유통업법을 비교해서 분석해줘."),
+            ("🔹 [2단계] 첨부파일 교차 검토", "[파일 첨부 후 클릭] 첨부한 파견 약정서(협력사 회신본) 내용 중, 당사 표준 규정에 어긋나거나 법 위반 소지가 있는 독소조항을 찾아내 줘.")
         ]
         cols = st.columns(3)
         for i, (cat, q) in enumerate(samples):
@@ -725,7 +714,6 @@ def main():
     # 대화 히스토리 렌더링
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"], avatar="⚖" if msg["role"] == "assistant" else "👤"):
-            # 구조화된 검토 결과가 있으면 리치 UI로 표시
             if msg["role"] == "assistant" and msg.get("json_data"):
                 jd = msg["json_data"]
                 render_verdict_badge(jd.get("verdict", ""))
@@ -735,7 +723,7 @@ def main():
                     render_alternative_clause(jd["alternative_clause"])
                 with st.expander("📄 상세 검토 의견 전문", expanded=False):
                     st.markdown(msg.get("detail_text", msg["content"]))
-                # 검토의견서 다운로드
+                
                 if jd.get("verdict"):
                     docx_bytes = generate_review_docx(jd, msg.get("detail_text", ""), "")
                     st.download_button(
@@ -807,38 +795,37 @@ def main():
             with st.chat_message("user", avatar="👤"):
                 st.markdown(display_query)
 
-            # 라우팅
             model_choice = route_query(query, has_attachment)
 
             with st.chat_message("assistant", avatar="⚖"):
                 if model_choice == "claude":
-                    spinner_msg = "⚖ Claude가 법령 및 사규 기준으로 검토 중..."
+                    spinner_msg = "⚖ 법령 및 사규 기준으로 교차 검토 중..."
                 else:
-                    spinner_msg = "💬 Gemini가 답변 생성 중..."
+                    spinner_msg = "💬 당사 사내 기준을 검색 및 분석 중..."
 
                 with st.spinner(spinner_msg):
                     start_time = time.time()
-                    if model_choice == "claude":
-                        system = build_system_claude(st.session_state.docs, st.session_state.laws_db)
-                        reply = call_claude(system, st.session_state.messages)
-                    else:
-                        system = build_system_gemini(st.session_state.docs)
-                        reply = call_gemini(system, st.session_state.messages)
+                    
+                    # 🚀 고가용성 우회 로직 (둘 중 하나가 죽으면 다른 하나가 대신 처리)
+                    reply, actual_model = dispatch_with_fallback(
+                        model_choice, st.session_state.messages, 
+                        st.session_state.docs, st.session_state.laws_db
+                    )
+                    
                     elapsed = time.time() - start_time
 
-                # 응답 처리
                 msg_data = {
                     "role": "assistant",
                     "content": reply,
                     "time": elapsed,
-                    "model": "Claude 3.5 Sonnet" if model_choice == "claude" else "Gemini",
+                    "model": actual_model,
                     "msg_id": str(datetime.now().timestamp()),
                 }
 
-                if model_choice == "claude":
+                # 실패하지 않았거나, 실패했더라도 정상적으로 Fallback 되어 JSON 파싱을 시도할 조건
+                if "Failed" not in actual_model and ("Claude" in actual_model or (model_choice == "claude" and "Gemini" in actual_model)):
                     json_data, detail_text = parse_review_response(reply)
                     if json_data:
-                        # 법령 인용 검증
                         citation_results = verify_citations(
                             json_data.get("cited_laws", []),
                             st.session_state.laws_db
@@ -847,7 +834,6 @@ def main():
                         msg_data["detail_text"] = detail_text
                         msg_data["citation_results"] = citation_results
 
-                        # 리치 UI 렌더링
                         render_verdict_badge(json_data.get("verdict", ""))
                         st.markdown(f"**📋 {json_data.get('summary', '')}**")
                         render_issues_table(json_data.get("issues", []), citation_results)
@@ -856,7 +842,6 @@ def main():
                         with st.expander("📄 상세 검토 의견 전문", expanded=False):
                             st.markdown(detail_text)
 
-                        # 검토의견서 다운로드
                         docx_bytes = generate_review_docx(json_data, detail_text, display_query)
                         st.download_button(
                             "📥 검토의견서 다운로드 (.docx)",
@@ -865,7 +850,6 @@ def main():
                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                         )
 
-                        # 검토 이력 저장
                         save_review_log({
                             "id": msg_data["msg_id"],
                             "session_id": st.session_state.current_session_id,
@@ -876,17 +860,13 @@ def main():
                             "citation_verified": all(cr["verified"] for cr in citation_results) if citation_results else False,
                         })
                     else:
-                        # JSON 파싱 실패 → 일반 텍스트로 표시
                         st.markdown(reply)
                 else:
                     st.markdown(reply)
 
-                model_label = msg_data["model"]
-                st.caption(f"⏱️ {elapsed:.1f}초 · {model_label}")
-
+                st.caption(f"⏱️ {elapsed:.1f}초 · {actual_model}")
                 st.session_state.messages.append(msg_data)
 
-            # 세션 저장
             import uuid
             new_id = st.session_state.current_session_id or str(uuid.uuid4())
             current_sess = {
@@ -897,7 +877,6 @@ def main():
             }
             if save_session(current_sess):
                 st.session_state.current_session_id = new_id
-                # 세션 목록 갱신 (오류 수정된 부분)
                 existing = [s for s in st.session_state.sessions if s["id"] != new_id]
                 st.session_state.sessions = [current_sess] + existing
             st.rerun()
