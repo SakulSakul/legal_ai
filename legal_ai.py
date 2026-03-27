@@ -328,8 +328,8 @@ def call_claude(system_prompt, messages):
 
     try:
         response = client.messages.create(
-            model="claude-3-5-sonnet-20241022",  # 📌 최신 3.5 Sonnet 모델로 수정
-            max_tokens=4096,                     # 📌 표준 최대 토큰 값으로 수정
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=4096,
             system=system_prompt,
             messages=claude_messages,
         )
@@ -470,7 +470,7 @@ def generate_review_docx(json_data, detail_text, query_text):
     # 제목
     doc.add_heading("공정거래 법률 검토 의견서", level=1)
     doc.add_paragraph(f"작성일: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    doc.add_paragraph(f"작성: AI 법무 검토 시스템 (Claude 3.5 Sonnet)")  # 📌 이름 변경
+    doc.add_paragraph(f"작성: AI 법무 검토 시스템 (Claude 3.5 Sonnet)")
     doc.add_paragraph("")
 
     if json_data:
@@ -796,7 +796,6 @@ def main():
                 full_query = f"[사용자 문의사항]\n{query}\n\n[검토 대상 텍스트/첨부파일]\n" + "\n\n".join(attached_texts)
                 display_query = query + "\n\n📎 " + ", ".join(f.name for f in chat_files)
             else:
-                # 개선된 판별 로직: 실제 검토 대상 텍스트가 포함되어 있는지 확인
                 has_review_content = len(query) > 80 or "조" in query or "항" in query or ":" in query
                 if any(kw in query for kw in ["검토", "확인", "분석"]) and not has_review_content:
                     full_query = f"[사용자 문의사항]\n{query}\n\n[검토 대상 텍스트/첨부파일]\n(없음 - 첨부파일이나 텍스트가 제공되지 않았습니다.)"
@@ -832,7 +831,7 @@ def main():
                     "role": "assistant",
                     "content": reply,
                     "time": elapsed,
-                    "model": "Claude 3.5 Sonnet" if model_choice == "claude" else "Gemini",  # 📌 모델명 표기 수정
+                    "model": "Claude 3.5 Sonnet" if model_choice == "claude" else "Gemini",
                     "msg_id": str(datetime.now().timestamp()),
                 }
 
@@ -898,6 +897,13 @@ def main():
             }
             if save_session(current_sess):
                 st.session_state.current_session_id = new_id
-                # 세션 목록 갱신
+                # 세션 목록 갱신 (오류 수정된 부분)
                 existing = [s for s in st.session_state.sessions if s["id"] != new_id]
-                st.session_state.sessions =
+                st.session_state.sessions = [current_sess] + existing
+            st.rerun()
+
+    else:
+        st.info("👈 사이드바에서 사규/계약서/약정서를 먼저 등록해주세요. 등록된 문서가 검토 기준이 됩니다.")
+
+if __name__ == "__main__":
+    main()
