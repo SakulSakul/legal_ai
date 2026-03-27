@@ -636,7 +636,7 @@ def generate_review_docx(json_data, detail_text, query_text):
     p_warn = doc.add_paragraph()
     p_warn.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _apply_shading(p_warn, SHADE_WARN)
-    run_warn = p_warn.add_run("⚠️ 본 문서는 AI가 생성한 검토 초안입니다. 법적 효력이 없으며, 반드시 법무팀의 최종 확인을 거쳐야 합니다.")
+    run_warn = p_warn.add_run("⚠️ 본 문서는 AI가 생성한 검토 초안입니다. 법적 효력이 없으며, 반드시 사내변호사의 최종 확인을 거쳐야 합니다.")
     run_warn.font.size = Pt(9)
     run_warn.font.color.rgb = RGBColor(156, 101, 0)
     run_warn.bold = True
@@ -773,7 +773,7 @@ def generate_review_docx(json_data, detail_text, query_text):
     p_footer = doc.add_paragraph()
     p_footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _apply_shading(p_footer, SHADE_QUOTE)
-    run_f = p_footer.add_run("본 검토의견서는 AI가 생성한 초안이며, 법적 효력이 없습니다.\n반드시 법무팀의 최종 검토를 거치기 바랍니다.")
+    run_f = p_footer.add_run("본 검토의견서는 AI가 생성한 초안이며, 법적 효력이 없습니다.\n반드시 사내변호사의 최종 검토를 거치기 바랍니다.")
     run_f.font.size = Pt(8)
     run_f.font.color.rgb = RGBColor(128, 128, 128)
 
