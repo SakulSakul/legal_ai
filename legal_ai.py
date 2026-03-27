@@ -550,55 +550,232 @@ def render_alternative_clause(clause):
         st.caption("아래 조항을 복사하여 협상 메일이나 수정 계약서에 활용하세요.")
         st.code(clause, language="text")
 
+def _apply_shading(paragraph, hex_color):
+    """단락에 배경 음영(shading) 적용 — Word '음영' 스타일과 동일 효과"""
+    from docx.oxml.ns import qn, nsdecls
+    from docx.oxml import parse_xml
+    shading = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{hex_color}" w:val="clear"/>')
+    paragraph.paragraph_format.element.get_or_add_pPr().append(shading)
+
+def _add_shaded_heading(doc, text, level, shade_color="D9E2F3"):
+    """음영 배경이 적용된 Heading 추가 (Word '음영' 디자인 스타일)"""
+    h = doc.add_heading(text, level=level)
+    _apply_shading(h, shade_color)
+    return h
+
 def generate_review_docx(json_data, detail_text, query_text):
+    """검토 의견서 docx 생성 — 화면 렌더링과 동일한 구조로 출력.
+    여백: 좁게 (상하좌우 1.27cm = Word '좁게' 프리셋)
+    디자인: Word 기본 스타일 '음영' 적용
+    """
     from docx import Document
-    from docx.shared import Pt, RGBColor
+    from docx.shared import Pt, RGBColor, Cm
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn, nsdecls
+    from docx.oxml import parse_xml
+
+    # ── 음영 디자인 컬러 팔레트 ──
+    SHADE_H1 = "2F5496"       # Heading 1 배경: 진한 파랑
+    SHADE_H1_FONT = "FFFFFF"  # Heading 1 글자: 흰색
+    SHADE_H2 = "D9E2F3"       # Heading 2 배경: 연한 파랑
+    SHADE_H3 = "E2EFDA"       # Heading 3 배경: 연한 초록
+    SHADE_QUOTE = "F2F2F2"    # 인용/코드 배경: 연한 회색
+    SHADE_INFO = "DAEEF3"     # 권고(info) 배경: 연한 시안
+    SHADE_WARN = "FFF2CC"     # 경고 배경: 연한 노랑
+    SHADE_ALT = "E8E0F0"      # 대안 조항 배경: 연한 보라
+
     doc = Document()
+
+    # ── 페이지 여백: 좁게 (1.27cm = Word 기본 '좁게' 프리셋) ──
+    for section in doc.sections:
+        section.top_margin = Cm(1.27)
+        section.bottom_margin = Cm(1.27)
+        section.left_margin = Cm(1.27)
+        section.right_margin = Cm(1.27)
+
+    # ── 기본 스타일 ──
     style = doc.styles['Normal']
     font = style.font
     font.name = '맑은 고딕'
     font.size = Pt(10)
 
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = p.add_run("⚠️ AI 검토 초안 — 법무팀 최종 확인 필요 ⚠️")
-    run.font.size = Pt(12)
-    run.font.color.rgb = RGBColor(255, 0, 0)
-    run.bold = True
+    # ── Heading 스타일 커스텀 (음영 디자인) ──
+    for hs_id, hs_size, hs_color in [("Heading 1", 16, SHADE_H1), ("Heading 2", 13, SHADE_H2), ("Heading 3", 11, SHADE_H3)]:
+        try:
+            hs = doc.styles[hs_id]
+            hs.font.name = '맑은 고딕'
+            hs.font.size = Pt(hs_size)
+            if hs_id == "Heading 1":
+                hs.font.color.rgb = RGBColor.from_string(SHADE_H1_FONT)
+        except KeyError:
+            pass
 
-    doc.add_heading("공정거래 법률 검토 의견서", level=1)
-    doc.add_paragraph(f"작성일: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    
+    # ── 헤더: 앱 타이틀과 동일 ──
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _apply_shading(p_title, SHADE_H1)
+    run_title = p_title.add_run("🤝 공정거래 실무 어시스턴트 v2.1 — 검토 의견서")
+    run_title.font.size = Pt(18)
+    run_title.bold = True
+    run_title.font.color.rgb = RGBColor(255, 255, 255)
+
+    p_sub = doc.add_paragraph()
+    p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_sub = p_sub.add_run("사규·표준계약서 기반 심층 계약/법률 검토")
+    run_sub.font.size = Pt(9)
+    run_sub.font.color.rgb = RGBColor(128, 128, 128)
+
+    # 작성 정보
+    p_meta = doc.add_paragraph()
+    p_meta.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run_meta = p_meta.add_run(f"작성일: {datetime.now().strftime('%Y-%m-%d %H:%M')}  |  AI 검토 초안")
+    run_meta.font.size = Pt(8)
+    run_meta.font.color.rgb = RGBColor(128, 128, 128)
+
+    # 경고 배너 (음영 배경)
+    p_warn = doc.add_paragraph()
+    p_warn.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _apply_shading(p_warn, SHADE_WARN)
+    run_warn = p_warn.add_run("⚠️ 본 문서는 AI가 생성한 검토 초안입니다. 법적 효력이 없으며, 반드시 법무팀의 최종 확인을 거쳐야 합니다.")
+    run_warn.font.size = Pt(9)
+    run_warn.font.color.rgb = RGBColor(156, 101, 0)
+    run_warn.bold = True
+
+    doc.add_paragraph("")
+
     if json_data:
-        doc.add_heading("1. 문의사항", level=2)
-        doc.add_paragraph(json_data.get("summary", query_text[:200]))
-        doc.add_heading("2. 검토 결론", level=2)
-        verdict_map = {"approved": "✅ 진행 가능 (승인)", "conditional": "⚠️ 조건부 가능 (수정 필요)", "rejected": "❌ 진행 불가 (반려)"}
-        doc.add_paragraph(verdict_map.get(json_data.get("verdict", ""), "판단 보류"))
-        doc.add_paragraph(json_data.get("verdict_reason", ""))
-        doc.add_heading("3. 쟁점별 교차 분석", level=2)
-        for issue in json_data.get("issues", []):
-            risk_label = {"high": "[위험]", "medium": "[주의]", "low": "[양호]"}
-            doc.add_heading(f"쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '')} {risk_label.get(issue.get('risk_level',''), '')}", level=3)
-            if issue.get("target_clause"): doc.add_paragraph(f"■ 검토 대상: {issue['target_clause']}")
-            if issue.get("law_analysis"): doc.add_paragraph(f"■ [법령 관점]: {issue['law_analysis']}")
-            if issue.get("rule_analysis"): doc.add_paragraph(f"■ [사규 관점]: {issue['rule_analysis']}")
-            if issue.get("recommendation"): doc.add_paragraph(f"■ 종합 권고: {issue['recommendation']}")
-            doc.add_paragraph("")
-        doc.add_heading("4. MD Action Plan", level=2)
-        doc.add_paragraph(json_data.get("action_plan", "(없음)"))
-        if json_data.get("alternative_clause"):
-            doc.add_heading("5. 수정 대안 조항 (초안)", level=2)
-            doc.add_paragraph(json_data["alternative_clause"])
+        # ── 검토 결론 배지 (화면의 verdict badge와 동일) ──
+        verdict = json_data.get("verdict", "")
+        verdict_map = {
+            "approved":    "🟢 진행 가능 (승인)",
+            "conditional": "🟡 조건부 가능 (수정 필요)",
+            "rejected":    "🔴 진행 불가 (반려)",
+        }
+        verdict_colors = {
+            "approved":    RGBColor(0, 128, 0),
+            "conditional": RGBColor(200, 150, 0),
+            "rejected":    RGBColor(227, 0, 15),
+        }
+        verdict_shades = {
+            "approved":    "E2EFDA",
+            "conditional": "FFF2CC",
+            "rejected":    "FCE4EC",
+        }
+        p_verdict = doc.add_paragraph()
+        _apply_shading(p_verdict, verdict_shades.get(verdict, "F2F2F2"))
+        run_v = p_verdict.add_run(verdict_map.get(verdict, "⚪ 판단 보류"))
+        run_v.font.size = Pt(14)
+        run_v.bold = True
+        run_v.font.color.rgb = verdict_colors.get(verdict, RGBColor(128, 128, 128))
+
+        # 요약 (화면의 📋 summary와 동일)
+        summary = json_data.get("summary", query_text[:200])
+        p_summary = doc.add_paragraph()
+        run_s = p_summary.add_run(f"📋 {summary}")
+        run_s.font.size = Pt(11)
+        run_s.bold = True
+
+        # 판단 근거
+        if json_data.get("verdict_reason"):
+            doc.add_paragraph(json_data["verdict_reason"])
+
+        doc.add_paragraph("")
+
+        # ── 쟁점별 분석 (화면의 expander 구조와 동일) ──
+        issues = json_data.get("issues", [])
+        if issues:
+            _add_shaded_heading(doc, "쟁점별 교차 분석", level=2, shade_color=SHADE_H2)
+            risk_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+            risk_labels = {"high": "[위험]", "medium": "[주의]", "low": "[양호]"}
+            risk_shades = {"high": "FCE4EC", "medium": "FFF8E1", "low": "E8F5E9"}
+
+            for issue in issues:
+                risk = issue.get("risk_level", "medium")
+                icon = risk_icons.get(risk, "⚪")
+                label = risk_labels.get(risk, "")
+
+                # 쟁점 제목 (음영 배경 + 위험도별 색상)
+                h = doc.add_heading(f"{icon} 쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '제목 없음')} {label}", level=3)
+                _apply_shading(h, risk_shades.get(risk, SHADE_H3))
+
+                # 📌 검토 대상 원문 (회색 음영 박스)
+                if issue.get("target_clause"):
+                    doc.add_paragraph("📌 검토 대상 원문:").runs[0].bold = True
+                    p_clause = doc.add_paragraph(issue["target_clause"])
+                    p_clause.paragraph_format.left_indent = Cm(0.5)
+                    _apply_shading(p_clause, SHADE_QUOTE)
+                    for run in p_clause.runs:
+                        run.font.color.rgb = RGBColor(80, 80, 80)
+                        run.font.size = Pt(9)
+
+                # ⚖️ 적용 법령 + 법령 관점
+                if issue.get("applicable_law"):
+                    p = doc.add_paragraph()
+                    run_label = p.add_run("⚖️ 적용 법령: ")
+                    run_label.bold = True
+                    p.add_run(issue["applicable_law"])
+                if issue.get("law_analysis"):
+                    p = doc.add_paragraph()
+                    run_label = p.add_run("🔍 법령 관점: ")
+                    run_label.bold = True
+                    p.add_run(issue["law_analysis"])
+
+                # 🏛️ 적용 사규 + 사규 관점
+                if issue.get("applicable_rule"):
+                    p = doc.add_paragraph()
+                    run_label = p.add_run("🏛️ 적용 사규: ")
+                    run_label.bold = True
+                    p.add_run(issue["applicable_rule"])
+                if issue.get("rule_analysis"):
+                    p = doc.add_paragraph()
+                    run_label = p.add_run("🔍 사규 관점: ")
+                    run_label.bold = True
+                    p.add_run(issue["rule_analysis"])
+
+                # 💡 종합 실무 권고 (시안 음영 박스 — 화면의 st.info와 동일)
+                if issue.get("recommendation"):
+                    p_rec = doc.add_paragraph()
+                    _apply_shading(p_rec, SHADE_INFO)
+                    run_rec = p_rec.add_run(f"💡 종합 실무 권고: {issue['recommendation']}")
+                    run_rec.bold = True
+                    run_rec.font.color.rgb = RGBColor(0, 80, 160)
+
+                doc.add_paragraph("")  # 쟁점 간 간격
+
+        # ── MD Action Plan ──
+        if json_data.get("action_plan"):
+            _add_shaded_heading(doc, "MD Action Plan", level=2, shade_color=SHADE_H2)
+            doc.add_paragraph(json_data["action_plan"])
+
+        # ── 수정 대안 조항 (보라 음영 박스) ──
+        alt = json_data.get("alternative_clause")
+        if alt and alt != "null":
+            _add_shaded_heading(doc, "📝 수정 대안 조항 (초안)", level=2, shade_color=SHADE_H2)
+            p_alt_desc = doc.add_paragraph("아래 조항을 복사하여 협상 메일이나 수정 계약서에 활용하세요.")
+            p_alt_desc.runs[0].font.size = Pt(8)
+            p_alt_desc.runs[0].font.color.rgb = RGBColor(128, 128, 128)
+            p_alt = doc.add_paragraph(alt)
+            p_alt.paragraph_format.left_indent = Cm(0.5)
+            _apply_shading(p_alt, SHADE_ALT)
+
+        # ── 상세 검토 의견 전문 (화면의 expander 내용과 동일) ──
+        if detail_text:
+            _add_shaded_heading(doc, "📄 상세 검토 의견 전문", level=2, shade_color=SHADE_H2)
+            doc.add_paragraph(detail_text[:10000])
+
     else:
-        doc.add_heading("검토 의견", level=2)
+        # JSON 파싱 실패 시 원문 그대로
+        _add_shaded_heading(doc, "검토 의견", level=2, shade_color=SHADE_H2)
         doc.add_paragraph(detail_text[:10000])
 
-    doc.add_paragraph("\n" + "─" * 50)
-    disclaimer = doc.add_paragraph("본 검토의견서는 AI가 생성한 초안이며, 법적 효력이 없습니다. 반드시 법무팀의 최종 검토를 거치기 바랍니다.")
-    disclaimer.runs[0].font.size = Pt(8)
-    disclaimer.runs[0].font.color.rgb = RGBColor(128, 128, 128)
+    # ── 푸터 면책 (회색 음영) ──
+    doc.add_paragraph("")
+    p_footer = doc.add_paragraph()
+    p_footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _apply_shading(p_footer, SHADE_QUOTE)
+    run_f = p_footer.add_run("본 검토의견서는 AI가 생성한 초안이며, 법적 효력이 없습니다.\n반드시 법무팀의 최종 검토를 거치기 바랍니다.")
+    run_f.font.size = Pt(8)
+    run_f.font.color.rgb = RGBColor(128, 128, 128)
 
     buffer = io.BytesIO()
     doc.save(buffer)
