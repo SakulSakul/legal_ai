@@ -1,0 +1,53 @@
+# ============================================================
+#  📚 법령 DB 자동 업데이트 — GitHub Actions Workflow
+#  매주 월요일 오전 9시(KST) 자동 실행
+#  수동 실행도 가능 (Actions 탭 → Run workflow)
+#
+#  사전 설정:
+#    GitHub 레포 → Settings → Secrets and variables → Actions
+#    아래 4개 Secret 등록:
+#      - DATA_GO_KR_KEY    (공공데이터포털 인코딩 인증키)
+#      - SUPABASE_URL      (Supabase 프로젝트 URL)
+#      - SUPABASE_KEY      (Supabase anon/service key)
+# ============================================================
+
+name: 📚 법령 DB 자동 업데이트
+
+on:
+  schedule:
+    # 매주 월요일 00:00 UTC = 한국시간 오전 9시
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+    # Actions 탭에서 수동 실행 가능
+
+jobs:
+  update-laws:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 레포 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 🐍 Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 의존성 설치
+        run: |
+          pip install requests supabase
+
+      - name: 📚 법령 DB 업데이트 실행
+        env:
+          DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python update_laws.py
+
+      - name: 📋 실행 결과 요약
+        if: always()
+        run: |
+          echo "### 📚 법령 DB 업데이트 완료" >> $GITHUB_STEP_SUMMARY
+          echo "- 실행 시간: $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "- 트리거: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
