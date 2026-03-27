@@ -506,9 +506,9 @@ def parse_review_response(response_text):
 
 def render_verdict_badge(verdict):
     badges = {
-        "approved":    ("🟢 진행 가능 (승인)", "success"),
-        "conditional": ("🟡 조건부 가능 (수정 필요)", "warning"),
-        "rejected":    ("🔴 진행 불가 (반려)", "error"),
+        "approved":    ("🟢 위험 요소 미발견 (사내변호사 확인 권장)", "success"),
+        "conditional": ("🟡 수정 필요 사항 발견", "warning"),
+        "rejected":    ("🔴 중대 위험 발견 (진행 보류 권고)", "error"),
     }
     label, msg_type = badges.get(verdict, ("⚪ 판단 보류", "info"))
     getattr(st, msg_type)(label)
@@ -647,9 +647,9 @@ def generate_review_docx(json_data, detail_text, query_text):
         # ── 검토 결론 배지 (화면의 verdict badge와 동일) ──
         verdict = json_data.get("verdict", "")
         verdict_map = {
-            "approved":    "🟢 진행 가능 (승인)",
-            "conditional": "🟡 조건부 가능 (수정 필요)",
-            "rejected":    "🔴 진행 불가 (반려)",
+            "approved":    "🟢 위험 요소 미발견 (사내변호사 확인 권장)",
+            "conditional": "🟡 수정 필요 사항 발견",
+            "rejected":    "🔴 중대 위험 발견 (진행 보류 권고)",
         }
         verdict_colors = {
             "approved":    RGBColor(0, 128, 0),
@@ -1029,6 +1029,11 @@ def main():
                 jd = msg["json_data"]
                 render_verdict_badge(jd.get("verdict", ""))
                 st.markdown(f"**📋 {jd.get('summary', '')}**")
+                # 4번: 인용 검증 실패 경고
+                cit_results = msg.get("citation_results", [])
+                if cit_results and not all(cr["verified"] for cr in cit_results):
+                    unverified = [cr["citation"] for cr in cit_results if not cr["verified"]]
+                    st.warning(f"⚠️ 다음 법령 인용의 DB 검증이 완료되지 않았습니다: {', '.join(unverified)}\n\n사내변호사에게 해당 조문의 현행 유효 여부를 반드시 확인받으세요.")
                 render_issues_table(jd.get("issues", []), msg.get("citation_results", []))
                 if jd.get("alternative_clause"):
                     render_alternative_clause(jd["alternative_clause"])
@@ -1037,6 +1042,7 @@ def main():
                 
                 if jd.get("verdict"):
                     docx_bytes = generate_review_docx(jd, msg.get("detail_text", ""), "")
+                    st.caption("⚠️ 본 문서를 사내변호사 확인 없이 외부에 발송하지 마세요.")
                     st.download_button("📥 검토의견서 다운로드 (.docx)", data=docx_bytes, file_name=f"검토의견서_{datetime.now().strftime('%Y%m%d_%H%M')}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"dl_{msg.get('msg_id', datetime.now().timestamp())}")
             else:
                 st.markdown(msg["content"])
@@ -1140,11 +1146,16 @@ def main():
 
                         render_verdict_badge(json_data.get("verdict", ""))
                         st.markdown(f"**📋 {json_data.get('summary', '')}**")
+                        # 4번: 인용 검증 실패 경고
+                        if citation_results and not all(cr["verified"] for cr in citation_results):
+                            unverified = [cr["citation"] for cr in citation_results if not cr["verified"]]
+                            st.warning(f"⚠️ 다음 법령 인용의 DB 검증이 완료되지 않았습니다: {', '.join(unverified)}\n\n사내변호사에게 해당 조문의 현행 유효 여부를 반드시 확인받으세요.")
                         render_issues_table(json_data.get("issues", []), citation_results)
                         if json_data.get("alternative_clause"): render_alternative_clause(json_data["alternative_clause"])
                         with st.expander("📄 상세 검토 의견 전문", expanded=False): st.markdown(detail_text)
 
                         docx_bytes = generate_review_docx(json_data, detail_text, display_query)
+                        st.caption("⚠️ 본 문서를 사내변호사 확인 없이 외부에 발송하지 마세요.")
                         st.download_button("📥 검토의견서 다운로드 (.docx)", data=docx_bytes, file_name=f"검토의견서_{datetime.now().strftime('%Y%m%d_%H%M')}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
                         save_review_log({
@@ -1171,7 +1182,44 @@ def main():
             st.session_state.needs_rerun = True
 
     else:
-        st.info("👈 사이드바 아래 '⚙️ 기준 문서 DB 관리'에서 사규/계약서를 먼저 등록해주세요.")
+        st.markdown("### 🚀 시작하기 — 3단계 설정 가이드")
+        st.markdown("아래 순서대로 기준 문서를 등록하면 AI 검토를 시작할 수 있습니다.")
+        
+        # 등록 현황 체크
+        has_saryu = any(d["cat"] == "saryu" for d in st.session_state.docs)
+        has_contract = any(d["cat"] == "contract" for d in st.session_state.docs)
+        has_yakjeong = any(d["cat"] == "yakjeong" for d in st.session_state.docs)
+        
+        check = lambda done: "✅" if done else "⬜"
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown(f"#### {check(has_saryu)} STEP 1")
+            st.markdown("**🏛 사규 등록**")
+            st.caption("공정거래 컴플라이언스 정책, 내부 규정 등")
+            if has_saryu:
+                st.success("등록 완료")
+            else:
+                st.warning("미등록")
+        with col2:
+            st.markdown(f"#### {check(has_contract)} STEP 2")
+            st.markdown("**📄 표준 계약서 등록**")
+            st.caption("특약매입/직매입 거래유형별 당사 표준 계약서")
+            if has_contract:
+                st.success("등록 완료")
+            else:
+                st.warning("미등록")
+        with col3:
+            st.markdown(f"#### {check(has_yakjeong)} STEP 3")
+            st.markdown("**📝 표준 약정서 등록**")
+            st.caption("협력사원, 인테리어, 매장이동, 공동판촉 약정서")
+            if has_yakjeong:
+                st.success("등록 완료")
+            else:
+                st.warning("미등록")
+        
+        st.markdown("---")
+        st.info("👈 사이드바 하단 **'⚙️ 기준 문서 DB 관리'**를 열고, 문서 유형을 선택한 뒤 Word 파일을 업로드하세요.\n\n최소 **사규 1개 + 계약서 1개**가 등록되면 AI 검토를 시작할 수 있습니다.")
 
 if __name__ == "__main__":
     main()
