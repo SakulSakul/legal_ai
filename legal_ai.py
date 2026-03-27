@@ -305,17 +305,31 @@ def build_system_gemini(docs):
 
 # ── AI 호출 함수 ─────────────────────────────────────────────
 def call_claude(system_prompt, messages):
-    """Claude Sonnet 4.6 호출 (법률 검토용)"""
+    """Claude 3.5 Sonnet 호출 (법률 검토용)"""
     client = init_anthropic()
     claude_messages = []
+    last_role = None
+
     for m in messages:
         role = "assistant" if m["role"] == "assistant" else "user"
-        claude_messages.append({"role": role, "content": m["content"]})
+        content = m["content"]
+        
+        # Claude API의 Alternating (교차) 역할 강제 규칙 처리
+        if role == last_role:
+            # 같은 역할이 연속으로 나오면 이전 메시지 내용과 병합
+            claude_messages[-1]["content"] += f"\n\n{content}"
+        else:
+            claude_messages.append({"role": role, "content": content})
+            last_role = role
+            
+    # 첫 번째 메시지는 반드시 'user'여야 함 (보안상 첫 메시지가 assistant인 경우 제거)
+    if claude_messages and claude_messages[0]["role"] == "assistant":
+        claude_messages.pop(0)
 
     try:
         response = client.messages.create(
-            model="claude-opus-4-6-20250514",
-            max_tokens=8192,
+            model="claude-3-5-sonnet-20241022",  # 📌 최신 3.5 Sonnet 모델로 수정
+            max_tokens=4096,                     # 📌 표준 최대 토큰 값으로 수정
             system=system_prompt,
             messages=claude_messages,
         )
@@ -456,7 +470,7 @@ def generate_review_docx(json_data, detail_text, query_text):
     # 제목
     doc.add_heading("공정거래 법률 검토 의견서", level=1)
     doc.add_paragraph(f"작성일: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    doc.add_paragraph(f"작성: AI 법무 검토 시스템 (Claude Opus 4.6)")
+    doc.add_paragraph(f"작성: AI 법무 검토 시스템 (Claude 3.5 Sonnet)")  # 📌 이름 변경
     doc.add_paragraph("")
 
     if json_data:
@@ -818,7 +832,7 @@ def main():
                     "role": "assistant",
                     "content": reply,
                     "time": elapsed,
-                    "model": "Claude Opus 4.6" if model_choice == "claude" else "Gemini",
+                    "model": "Claude 3.5 Sonnet" if model_choice == "claude" else "Gemini",  # 📌 모델명 표기 수정
                     "msg_id": str(datetime.now().timestamp()),
                 }
 
@@ -886,11 +900,4 @@ def main():
                 st.session_state.current_session_id = new_id
                 # 세션 목록 갱신
                 existing = [s for s in st.session_state.sessions if s["id"] != new_id]
-                st.session_state.sessions = [current_sess] + existing
-            st.rerun()
-
-    else:
-        st.info("👈 사이드바에서 사규/계약서/약정서를 먼저 등록해주세요. 등록된 문서가 검토 기준이 됩니다.")
-
-if __name__ == "__main__":
-    main()
+                st.session_state.sessions =
