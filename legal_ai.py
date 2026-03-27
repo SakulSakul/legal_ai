@@ -548,7 +548,18 @@ def main():
         st.markdown("## ⚖ 공정거래 법무 AI v2.0")
         st.caption("면세점 MD 바이어 전용")
         
-        # 1. 최상단: 새 대화 시작
+        # 1. 자동 보안 마스킹 안내 (DLP) - 최상단 배치
+        st.markdown("### 🛡️ 정보보안 (DLP) 가동 중")
+        st.success(
+            "⚠️ **정보 유출 방지 시스템 작동 안내**\n\n"
+            "외부 클라우드 AI 서버로 당사의 핵심 기밀 및 협력사 정보가 유출되는 것을 원천 차단하기 위해, **문서 내 민감 정보는 모두 AI 전송 전에 자동 블라인드(마스킹) 처리됩니다.**\n\n"
+            "• **자동 차단:** 주민/외국인번호, 휴대전화, 이메일, 사업자/법인번호, 계좌번호, 당사 명칭\n"
+            "• **수동 차단:** 하단 텍스트 입력창에 기재한 '협력사명'"
+        )
+
+        st.divider()
+
+        # 2. 새 대화 시작
         if st.button("✨ 새 대화 시작", use_container_width=True, type="primary"):
             st.session_state.messages = []
             st.session_state.current_session_id = None
@@ -556,7 +567,7 @@ def main():
 
         st.divider()
 
-        # 2. 히스토리 관리
+        # 3. 히스토리 관리
         st.markdown("### 🗂 최근 자문 내역")
         for sess in st.session_state.sessions:
             col1, col2 = st.columns([5, 1])
@@ -570,17 +581,6 @@ def main():
                     if delete_session_db(sess["id"]):
                         st.session_state.sessions = [s for s in st.session_state.sessions if s["id"] != sess["id"]]
                         st.rerun()
-
-        st.divider()
-
-        # 3. 자동 보안 마스킹 안내 (DLP)
-        st.markdown("### 🛡️ 정보보안 (DLP) 가동 중")
-        st.success(
-            "⚠️ **정보 유출 방지 시스템 작동 안내**\n\n"
-            "외부 클라우드 AI 서버로 당사의 핵심 기밀 및 협력사 정보가 유출되는 것을 원천 차단하기 위해, **문서 내 민감 정보는 모두 AI 전송 전에 자동 블라인드(마스킹) 처리됩니다.**\n\n"
-            "• **자동 차단:** 주민/외국인번호, 휴대전화, 이메일, 사업자/법인번호, 계좌번호, 당사 명칭\n"
-            "• **수동 차단:** 하단 텍스트 입력창에 기재한 '협력사명'"
-        )
 
         st.divider()
 
@@ -673,7 +673,6 @@ def main():
         st.markdown("---")
         st.markdown("### 💬 신규 검토 요청")
         
-        # 📌 협력사명 입력란 바로 윗부분에 사유 및 안내 문구 추가
         st.info("🔒 **기밀 유출 방지 시스템:** 당사의 기밀이나 특정 브랜드명, 상호명이 외부 AI로 전송되어 학습에 오남용되는 것을 막기 위해 아래 칸에 **검토 대상 협력사명**을 기재해 주세요. 해당 단어는 문서와 채팅에서 모두 가려집니다.")
         target_partner = st.text_input("🏢 검토 대상 협력사명 입력 (보안 마스킹용)", placeholder="예: 에르메스, 샤넬 (입력 시 █협력사█로 자동 치환)", key="target_partner")
 
@@ -692,7 +691,6 @@ def main():
                         f"[V1 당사 초안 내용]\n{extract_text(v1_bytes)}\n\n"
                         f"[V2 협력사 수정본 내용]\n{extract_text(v2_bytes)}"
                     )
-                    # 프롬프트 자동/반자동 마스킹 동시 적용
                     st.session_state["pending_input"] = apply_auto_masking(prompt, target_partner)
                     st.rerun()
 
@@ -701,7 +699,6 @@ def main():
         query = user_input or st.session_state.pop("pending_input", None)
 
         if query:
-            # 1. 파일 텍스트 추출 및 즉각적인 마스킹 적용 (자동+반자동)
             attached_texts = []
             if chat_files:
                 for f in chat_files:
@@ -712,7 +709,6 @@ def main():
 
             has_attachment = bool(attached_texts)
 
-            # 2. 질문 텍스트에도 마스킹 적용
             safe_query = apply_auto_masking(query, target_partner)
 
             if attached_texts:
