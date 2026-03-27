@@ -359,7 +359,7 @@ def build_system_claude(docs, laws_db):
         "**[PART 2: 상세 설명]**\n"
         "JSON 아래에 마크다운 형식으로 작성.\n"
         "- 서두: **문의사항:** [요약]\n"
-        "- 위험: :red[위반 내용], 적법: :blue[통과 내용] 문법 사용.\n"
+        "- 위험: 🔴 위반 내용, 적법: 🔵 통과 내용 형태로 이모지를 사용하세요. Streamlit 색상 단축코드(:red[], :blue[], :blue_circle: 등)는 절대 사용하지 마세요.\n"
     )
 
 def build_system_gemini(docs):
@@ -380,7 +380,7 @@ def build_system_gemini(docs):
         "① 당사 사규:\n" + saryu_text +
         "\n\n② 당사 표준 계약서:\n" + contract_text +
         "\n\n③ 당사 표준 약정서:\n" + yakjeong_text +
-        "\n\n답변 시 Streamlit 색상 문법을 사용하세요: :red[위험] :blue[적법]"
+        "\n\n답변 시 위험은 🔴, 적법은 🔵 이모지를 사용하세요. Streamlit 색상 단축코드(:red[], :blue[], :blue_circle: 등)는 절대 사용하지 마세요."
     )
 
 # ── AI 호출 및 에러 핸들링 함수 ────────────────────────────────
