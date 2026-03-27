@@ -869,6 +869,16 @@ def main():
         background-color: #F8F9FA !important; 
         border: 1px solid #EAECEF; 
     }
+
+    /* 7. 헤딩 앵커 링크 완전 제거 (마우스 오버 시 클립 버튼 + 복사 시 코드 유출 방지) */
+    .stMarkdown a[href^="#"],
+    [data-testid="stHeaderActionElements"] {
+        display: none !important;
+    }
+    h1 a, h2 a, h3 a, h4 a, h5 a, h6 a {
+        display: none !important;
+        pointer-events: none !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
