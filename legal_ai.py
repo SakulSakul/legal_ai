@@ -1,7 +1,8 @@
 # ============================================================
-#  공정거래 법무 AI v2.0 — 면세점 MD/바이어용
+#  🤝 공정거래 실무 어시스턴트 v2.0 — 면세점 MD/바이어용
 #  이중 모델: Gemini(문서/검색) + Claude(법률검토) + 고가용성 우회
 #  보안: 자동 DLP(개인/기업정보) + 협력사명 지정 마스킹 탑재
+#  디자인: 신세계그룹 뉴스룸 테마 적용 (Pretendard, Corporate Red)
 # ============================================================
 
 import streamlit as st
@@ -228,7 +229,7 @@ def build_system_claude(docs, laws_db):
         laws_text = "(법령 DB 미등록 — 일반 법률 지식으로 판단)"
 
     return (
-        "당신은 면세점 전문 공정거래 AI변호사이자 의사결정 보조 AI입니다.\n"
+        "당신은 면세점 전문 공정거래 실무 어시스턴트 AI입니다.\n"
         "단순한 법률 해석을 넘어, ① [외부 법령]과 ② [내부 사규/표준문서]라는 두 가지 관점에서 교차 검토하여 실무 결단을 내려주세요.\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -291,7 +292,7 @@ def build_system_gemini(docs):
     yakjeong_text = fmt_docs(by_cat("yakjeong"))[:20000]
 
     return (
-        "당신은 면세점 전문 공정거래 AI 어시스턴트입니다.\n"
+        "당신은 면세점 전문 공정거래 실무 어시스턴트 AI입니다.\n"
         "사규, 계약서, 약정서 내용에 대한 일반 질문에 친절히 답변하세요.\n"
         "법률 검토 판단(승인/반려)은 하지 말고, 필요시 '검토 요청을 해주세요'라고 안내하세요.\n\n"
         "① 당사 사규:\n" + saryu_text +
@@ -507,18 +508,91 @@ def generate_review_docx(json_data, detail_text, query_text):
 
 # ── Streamlit UI 메인 함수 ────────────────────────────────────
 def main():
-    st.set_page_config(page_title="공정거래 법무 AI v2.0", page_icon="⚖", layout="wide")
+    st.set_page_config(page_title="공정거래 실무 어시스턴트 v2.0", page_icon="🤝", layout="wide")
 
     st.markdown("""
     <style>
-    html, body, [class*="css"] { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important; background-color: #F2F2F7 !important; }
-    .stApp { background-color: #F2F2F7; }
-    .stChatMessage { background-color: #FFFFFF; border-radius: 18px; padding: 20px 40px 20px 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); margin-bottom: 16px; border: 1px solid #E5E5EA; line-height: 1.6; }
-    div.stButton > button:first-child { border-radius: 12px; font-weight: 600; transition: all 0.2s ease; }
-    button[kind="primary"] { background-color: #007AFF !important; color: white !important; border: none !important; }
-    [data-testid="stSidebar"] { background-color: #FFFFFF !important; border-right: 1px solid #E5E5EA; }
-    code { color: #d63384; background-color: #f8f9fa; border-radius: 6px; }
-    pre { border-radius: 12px; background-color: #F2F2F7 !important; border: 1px solid #E5E5EA; }
+    /* 1. 최고급 웹 폰트 'Pretendard' 불러오기 */
+    @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css");
+
+    /* 2. 전체 폰트 및 기본 타이포그래피 (신세계 뉴스룸 스타일의 정갈한 자간) */
+    html, body, [class*="css"] { 
+        font-family: 'Pretendard Variable', Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif !important; 
+        letter-spacing: -0.02em; 
+        color: #222222;
+    }
+
+    /* 앱 배경: 아주 연한 라이트 그레이로 깔끔하게 */
+    .stApp { background-color: #F8F9FA !important; }
+
+    /* 3. 채팅 메시지 블록 (기업형 UI에 맞게 굴곡 축소 및 깔끔한 보더) */
+    .stChatMessage { 
+        border-radius: 12px; 
+        padding: 24px 32px; 
+        box-shadow: 0 2px 10px rgba(0,0,0,0.03); 
+        margin-bottom: 20px; 
+        border: 1px solid #EAECEF; 
+        background-color: #FFFFFF !important; 
+        line-height: 1.6;
+    }
+
+    /* 📱 4. 모바일 반응형 처리 (스마트폰 환경 최적화) */
+    @media (max-width: 768px) {
+        .stChatMessage {
+            padding: 16px 20px;
+            border-radius: 8px;
+        }
+    }
+
+    /* 5. 버튼 공통 스타일 (뉴스룸 스타일의 단정한 버튼) */
+    div.stButton > button:first-child { 
+        border-radius: 6px; 
+        font-weight: 600; 
+        transition: all 0.2s ease-in-out; 
+    }
+
+    /* 🔴 프라이머리 버튼 (신세계 딥 레드 #E3000F) */
+    button[kind="primary"] { 
+        background-color: #E3000F !important; 
+        color: #FFFFFF !important; 
+        border: none !important; 
+    }
+    button[kind="primary"]:hover {
+        background-color: #C0000C !important; 
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(227, 0, 15, 0.2) !important;
+    }
+
+    /* ⚪ 세컨더리 버튼 (깔끔한 다크 그레이 아웃라인) */
+    button[kind="secondary"] { 
+        background-color: #FFFFFF !important; 
+        color: #444444 !important; 
+        border: 1px solid #DDDDDD !important; 
+    }
+    button[kind="secondary"]:hover {
+        border-color: #222222 !important;
+        color: #222222 !important;
+    }
+
+    /* 6. 사이드바 및 코드 블록 스타일링 */
+    [data-testid="stSidebar"] { 
+        background-color: #FFFFFF !important;
+        border-right: 1px solid #EAECEF; 
+    }
+    
+    /* 법령/사규 인용구 하이라이트 (신세계 레드 톤으로 맞춤) */
+    code { 
+        color: #E3000F; 
+        background-color: #FCE6E7; 
+        border-radius: 4px; 
+        padding: 0.2em 0.4em;
+        font-size: 0.9em;
+    }
+    pre { 
+        border-radius: 8px; 
+        background-color: #F8F9FA !important; 
+        border: 1px solid #EAECEF; 
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -526,7 +600,7 @@ def main():
     if app_pw:
         if "authenticated" not in st.session_state: st.session_state.authenticated = False
         if not st.session_state.authenticated:
-            st.markdown("## ⚖ 공정거래 법무 AI")
+            st.markdown("## 🤝 공정거래 실무 어시스턴트")
             pw = st.text_input("비밀번호를 입력하세요", type="password")
             if pw:
                 if pw == app_pw: st.session_state.authenticated = True; st.rerun()
@@ -545,7 +619,7 @@ def main():
 
     # ── 사이드바 (실무자 동선 최적화) ─────────────────────────
     with st.sidebar:
-        st.markdown("## ⚖ 공정거래 법무 AI v2.0")
+        st.markdown("## 🤝 공정거래 실무 어시스턴트 v2.0")
         st.caption("면세점 MD 바이어 전용")
         
         # 1. 자동 보안 마스킹 안내 (DLP) - 최상단 배치
@@ -621,7 +695,7 @@ def main():
                                     st.rerun()
 
     # ── 메인 영역 ────────────────────────────────────────────
-    st.title("⚖ 공정거래 법무 자문 v2.0")
+    st.title("🤝 공정거래 실무 어시스턴트 v2.0")
     st.caption("사규·표준계약서 질의응답 및 심층 계약/법률 검토 AI")
 
     if not st.session_state.messages and st.session_state.docs:
@@ -646,7 +720,7 @@ def main():
 
     # 대화 히스토리 렌더링
     for msg in st.session_state.messages:
-        with st.chat_message(msg["role"], avatar="⚖" if msg["role"] == "assistant" else "👤"):
+        with st.chat_message(msg["role"], avatar="🤝" if msg["role"] == "assistant" else "👤"):
             if msg["role"] == "assistant" and msg.get("json_data"):
                 jd = msg["json_data"]
                 render_verdict_badge(jd.get("verdict", ""))
@@ -708,7 +782,6 @@ def main():
                     attached_texts.append(f"=== 검토 대상 첨부 파일: {f.name} ===\n" + safe_text)
 
             has_attachment = bool(attached_texts)
-
             safe_query = apply_auto_masking(query, target_partner)
 
             if attached_texts:
@@ -728,7 +801,7 @@ def main():
 
             model_choice = route_query(safe_query, has_attachment)
 
-            with st.chat_message("assistant", avatar="⚖"):
+            with st.chat_message("assistant", avatar="🤝"):
                 if model_choice == "claude":
                     spinner_msg = "⚖ 법령 및 사규 기준으로 교차 검토 중..."
                 else:
