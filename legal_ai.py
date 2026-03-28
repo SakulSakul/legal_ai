@@ -924,6 +924,25 @@ def main():
             "• **수동 차단:** 하단 텍스트 입력창에 기재한 '협력사명'"
         )
 
+        # 법령 DB 업데이트 이력 (일반 사용자 대상)
+        law_count = len(st.session_state.laws_db)
+        if law_count > 0:
+            last_dates = [d.get("last_updated") or d.get("created_at", "") for d in st.session_state.laws_db if d.get("last_updated") or d.get("created_at")]
+            if last_dates:
+                latest = max(last_dates)
+                try:
+                    from datetime import datetime as _dt
+                    if "T" in latest:
+                        dt_obj = _dt.fromisoformat(latest.replace("Z", "+00:00"))
+                    else:
+                        dt_obj = _dt.fromisoformat(latest)
+                    display_date = dt_obj.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    display_date = latest[:16]
+                st.caption(f"📚 적용 법령: {law_count}개 조문 · 🕐 {display_date} 기준")
+            else:
+                st.caption(f"📚 적용 법령: {law_count}개 조문")
+
         st.divider()
 
         # 2. 새 대화 시작
@@ -954,8 +973,26 @@ def main():
         # 4. 관리자용 DB 관리는 가장 아래 숨김 (Expander)
         with st.expander("⚙️ 기준 문서 DB 관리 (관리자 전용)", expanded=False):
             law_count = len(st.session_state.laws_db)
-            if law_count > 0: st.success(f"📚 법령 DB: {law_count}개")
-            else: st.warning("📚 법령 DB 미설정")
+            if law_count > 0:
+                # 최신 업데이트 일시 추출
+                last_dates = [d.get("last_updated") or d.get("created_at", "") for d in st.session_state.laws_db if d.get("last_updated") or d.get("created_at")]
+                if last_dates:
+                    latest = max(last_dates)
+                    # ISO 형식 → 보기 좋게 변환
+                    try:
+                        from datetime import datetime as _dt
+                        if "T" in latest:
+                            dt_obj = _dt.fromisoformat(latest.replace("Z", "+00:00"))
+                        else:
+                            dt_obj = _dt.fromisoformat(latest)
+                        display_date = dt_obj.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        display_date = latest[:16]
+                    st.success(f"📚 법령 DB: {law_count}개 조문\n\n🕐 최종 업데이트: {display_date}")
+                else:
+                    st.success(f"📚 법령 DB: {law_count}개")
+            else:
+                st.warning("📚 법령 DB 미설정")
 
             st.caption(f"🤖 Claude: `{CLAUDE_MODEL}`")
             st.caption(f"🤖 Gemini: `{GEMINI_MODELS[0]}` → `{GEMINI_MODELS[1]}`")
