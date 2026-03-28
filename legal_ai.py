@@ -621,7 +621,7 @@ def generate_review_docx(json_data, detail_text, query_text):
 
     p_sub = doc.add_paragraph()
     p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run_sub = p_sub.add_run("사규·표준계약서 기반 심층 계약/법률 검토")
+    run_sub = p_sub.add_run("MD·협력사 실무 Q&A & 계약·법령 Self-Check AI")
     run_sub.font.size = Pt(9)
     run_sub.font.color.rgb = RGBColor(128, 128, 128)
 
@@ -1074,7 +1074,7 @@ def main():
 
     # ── 메인 영역 ────────────────────────────────────────────
     st.title("🤝 공정거래 실무 어시스턴트 v2.1")
-    st.caption("사규·표준계약서 질의응답 및 심층 계약/법률 검토 AI")
+    st.caption("MD·협력사 실무 Q&A & 계약·법령 Self-Check AI")
 
     if not st.session_state.messages and st.session_state.docs:
         st.markdown("### 💡 AI 법무 자문 100% 활용 가이드")
