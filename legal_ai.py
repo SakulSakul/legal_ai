@@ -919,10 +919,10 @@ def main():
         st.markdown("### 🛡️ 정보보안 (DLP) 가동 중")
         st.success(
             "⚠️ **정보 유출 방지 시스템 작동 안내**\n\n"
-            "외부 클라우드 AI 서버로 당사의 핵심 기밀 및 협력사 정보가 유출되는 것을 원천 차단하기 위해, **문서 내 민감 정보는 모두 AI 전송 전에 자동 블라인드(마스킹) 처리됩니다.**\n\n"
-            "• **자동 차단:** 주민/외국인번호, 휴대전화, 이메일, 사업자/법인번호, 계좌번호, 당사 명칭\n"
-            "• **수동 차단:** 하단 텍스트 입력창에 기재한 '협력사명'"
+            "외부 클라우드 AI 서버로 당사의 핵심 기밀 및 협력사 정보가 유출되는 것을 원천 차단하기 위해, **문서 내 민감 정보는 모두 AI 전송 전에 자동 블라인드(마스킹) 처리됩니다.**"
         )
+        st.caption("• **자동 차단:** 주민/외국인번호, 휴대전화, 이메일, 사업자/법인번호, 계좌번호, 당사 명칭", unsafe_allow_html=True)
+        st.caption("• **수동 차단:** 하단 텍스트 입력창에 기재한 '협력사명'", unsafe_allow_html=True)
 
         # 법령 DB 업데이트 이력 (일반 사용자 대상)
         law_count = len(st.session_state.laws_db)
@@ -939,38 +939,14 @@ def main():
                     display_date = dt_obj.strftime("%Y-%m-%d %H:%M")
                 except Exception:
                     display_date = latest[:16]
-                st.caption(f"📚 적용 법령: {law_count}개 조문 · 🕐 {display_date} 기준")
+                st.caption(f"📚 적용 법령: {law_count}개 조문")
+                st.caption(f"🕐 {display_date} 기준")
             else:
                 st.caption(f"📚 적용 법령: {law_count}개 조문")
 
         st.divider()
 
-        # 2. 새 대화 시작
-        if st.button("✨ 새 대화 시작", use_container_width=True, type="primary"):
-            st.session_state.messages = []
-            st.session_state.current_session_id = None
-            st.rerun()
-
-        st.divider()
-
-        # 3. 히스토리 관리
-        st.markdown("### 🗂 최근 자문 내역")
-        for sess in st.session_state.sessions:
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                if st.button(sess["title"], key="sess_" + sess["id"], use_container_width=True):
-                    st.session_state.messages = sess["messages"]
-                    st.session_state.current_session_id = sess["id"]
-                    st.rerun()
-            with col2:
-                if st.button("🗑", key="delsess_" + sess["id"]):
-                    if delete_session_db(sess["id"]):
-                        st.session_state.sessions = [s for s in st.session_state.sessions if s["id"] != sess["id"]]
-                        st.rerun()
-
-        st.divider()
-
-        # 4. 사용 매뉴얼 (도움말)
+        # 2. 사용 매뉴얼 (도움말)
         with st.expander("📖 사용 매뉴얼", expanded=False):
             st.markdown("""
 **1. 접속 방법**
@@ -1005,6 +981,31 @@ def main():
 - ❓ **대화 내역은 얼마나 보관되나요?** → 90일 후 자동 삭제됩니다.
 - ⚠️ AI가 생성한 검토의견서를 사내변호사 확인 없이 외부에 발송하지 마세요.
 """)
+
+        # 3. 새 대화 시작
+        if st.button("✨ 새 대화 시작", use_container_width=True, type="primary"):
+            st.session_state.messages = []
+            st.session_state.current_session_id = None
+            st.rerun()
+
+        st.divider()
+
+        # 3. 히스토리 관리
+        st.markdown("### 🗂 최근 자문 내역")
+        for sess in st.session_state.sessions:
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                if st.button(sess["title"], key="sess_" + sess["id"], use_container_width=True):
+                    st.session_state.messages = sess["messages"]
+                    st.session_state.current_session_id = sess["id"]
+                    st.rerun()
+            with col2:
+                if st.button("🗑", key="delsess_" + sess["id"]):
+                    if delete_session_db(sess["id"]):
+                        st.session_state.sessions = [s for s in st.session_state.sessions if s["id"] != sess["id"]]
+                        st.rerun()
+
+        st.divider()
 
         # 5. 관리자용 DB 관리는 가장 아래 숨김 (Expander)
         with st.expander("⚙️ 기준 문서 DB 관리 (관리자 전용)", expanded=False):
