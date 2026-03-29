@@ -1,11 +1,12 @@
 """
-법제처 Open API 연동 모듈 v1.4
+법제처 Open API 연동 모듈 v1.5
 ========================
-v1.4 변경사항:
-  - 법령 조문: 법제처 원문 링크 추가 + 별표/서식 안내
-  - 판례 전문: AI 요약 (결론→배경→핵심이유→실무시사점) + 원문
-  - 해석례 전문: AI 요약 (결론→Q&A→핵심이유→실무의미) + 원문
-  - Gemini API를 활용한 요약 생성
+v1.5 변경사항:
+  - expander 제목 40자 제한 + 안에서 전체 제목 표시 (잘림 방지)
+v1.4:
+  - 법령 조문: 법제처 원문 링크 + 별표/서식 안내
+  - 판례: AI 요약 (결론→배경→핵심이유→실무시사점) + 원문
+  - 해석례: AI 요약 (결론→Q&A→핵심이유→실무의미) + 원문
 """
 
 import requests
@@ -76,27 +77,20 @@ def _make_request(base_url, params_dict):
 # ──────────────────────────────────────────────
 # AI 요약 생성 (Gemini 활용)
 # ──────────────────────────────────────────────
-def _summarize_with_ai(prompt_text, max_chars=3000):
-    """Gemini API로 요약 생성. 실패 시 None 반환."""
+def _summarize_with_ai(prompt_text):
     try:
         from google import genai
         from google.genai import types
-        
         try:
             api_key = st.secrets["GEMINI_API_KEY"]
         except Exception:
             import os
             api_key = os.environ.get("GEMINI_API_KEY", "")
-        
         if not api_key:
             return None
-        
         client = genai.Client(api_key=api_key)
-        
-        # 입력 텍스트가 너무 길면 자르기
         if len(prompt_text) > 8000:
             prompt_text = prompt_text[:8000] + "\n...(이하 생략)"
-        
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[types.Content(role="user", parts=[types.Part(text=prompt_text)])],
@@ -109,9 +103,7 @@ def _summarize_with_ai(prompt_text, max_chars=3000):
         logger.warning(f"AI 요약 생성 실패: {e}")
         return None
 
-
 def _summarize_precedent(detail):
-    """판례를 '결론→배경→핵심이유→실무시사점' 구조로 요약"""
     parts = []
     if detail.get("사건명"): parts.append(f"사건명: {detail['사건명']}")
     if detail.get("사건번호"): parts.append(f"사건번호: {detail['사건번호']}")
@@ -121,12 +113,8 @@ def _summarize_precedent(detail):
     if detail.get("판결요지"): parts.append(f"판결요지:\n{detail['판결요지']}")
     if detail.get("참조조문"): parts.append(f"참조조문: {detail['참조조문']}")
     if detail.get("판례내용"): parts.append(f"판례내용:\n{detail['판례내용'][:3000]}")
-    
-    if not parts:
-        return None
-    
+    if not parts: return None
     raw_text = "\n\n".join(parts)
-    
     prompt = f"""아래 판례를 일반인(면세점 MD, 바이어)이 이해하기 쉽게 요약해주세요.
 
 반드시 아래 4단계 구조로 작성하세요:
@@ -146,12 +134,9 @@ def _summarize_precedent(detail):
 ---
 [판례 원문]
 {raw_text}"""
-    
     return _summarize_with_ai(prompt)
 
-
 def _summarize_interpretation(detail):
-    """해석례를 '결론(두괄식)→Q&A→핵심이유→실무의미' 구조로 요약"""
     parts = []
     if detail.get("안건명"): parts.append(f"안건명: {detail['안건명']}")
     if detail.get("안건번호"): parts.append(f"안건번호: {detail['안건번호']}")
@@ -161,12 +146,8 @@ def _summarize_interpretation(detail):
     if detail.get("회답"): parts.append(f"회답:\n{detail['회답']}")
     if detail.get("이유"): parts.append(f"이유:\n{detail['이유']}")
     if detail.get("참조조문"): parts.append(f"참조조문: {detail['참조조문']}")
-    
-    if not parts:
-        return None
-    
+    if not parts: return None
     raw_text = "\n\n".join(parts)
-    
     prompt = f"""아래 법령해석례를 일반인(면세점 MD, 바이어)이 이해하기 쉽게 요약해주세요.
 
 반드시 아래 4단계 구조로 작성하세요:
@@ -187,7 +168,6 @@ def _summarize_interpretation(detail):
 ---
 [해석례 원문]
 {raw_text}"""
-    
     return _summarize_with_ai(prompt)
 
 
@@ -195,13 +175,10 @@ def _summarize_interpretation(detail):
 # 법제처 원문 링크 생성
 # ──────────────────────────────────────────────
 def _build_law_link(mst, oc):
-    """법제처 원문 HTML 링크 생성"""
     return f"https://www.law.go.kr/DRF/lawService.do?OC={oc}&target=law&MST={mst}&type=HTML"
 
 def _build_law_go_kr_link(law_name):
-    """국가법령정보센터 검색 링크 생성"""
-    encoded = quote(law_name, safe='')
-    return f"https://www.law.go.kr/법령/{encoded}"
+    return f"https://www.law.go.kr/법령/{quote(law_name, safe='')}"
 
 
 class LawAPI:
@@ -470,10 +447,14 @@ def render_law_search_results():
     if sr["laws"]:
         with tabs[tab_idx]:
             for i, law in enumerate(sr["laws"]):
+                law_name_short = law['법령명'][:40] + ('…' if len(law['법령명']) > 40 else '')
                 with st.expander(
-                    f"**{law['법령명']}** ({law.get('법령종류', '')}) — 시행 {law.get('시행일자', '')}",
+                    f"**{law_name_short}** ({law.get('법령종류', '')})",
                     expanded=(i == 0)
                 ):
+                    # 전체 제목 표시
+                    st.markdown(f"**{law['법령명']}** ({law.get('법령종류', '')}) — 시행 {law.get('시행일자', '')}")
+
                     col1, col2, col3 = st.columns(3)
                     with col1: st.caption(f"📂 {law.get('법령종류', '')}")
                     with col2: st.caption(f"🏛 {law.get('소관부처', '')}")
@@ -482,7 +463,7 @@ def render_law_search_results():
                     mst = law.get("MST", "")
                     law_name = law.get("법령명", "")
 
-                    # 법제처 원문 링크 (별표/서식 포함)
+                    # 법제처 원문 링크
                     if mst:
                         try:
                             oc = get_oc()
@@ -509,10 +490,10 @@ def render_law_search_results():
                         if cache_key in st.session_state:
                             detail = st.session_state[cache_key]
                             st.markdown(f"**{detail['법령명']}** (시행 {detail['시행일자']}) — 총 {len(detail['조문목록'])}개 조문")
-                            
+
                             # 별표/서식 안내
                             st.info("⚠️ **별표·별지서식 안내:** 법령에 포함된 별표, 서식, 표 등은 이미지로 구성되어 있어 텍스트로 표시되지 않을 수 있습니다. 위 '법제처에서 원문 보기' 링크에서 확인하세요.")
-                            
+
                             for art in detail["조문목록"]:
                                 num = art.get("조문번호", "")
                                 title = art.get("조문제목", "")
@@ -530,10 +511,14 @@ def render_law_search_results():
     if sr["precedents"]:
         with tabs[tab_idx]:
             for i, prec in enumerate(sr["precedents"]):
+                case_name_short = prec['사건명'][:40] + ('…' if len(prec['사건명']) > 40 else '')
                 with st.expander(
-                    f"**[{prec.get('사건번호', '')}]** {prec['사건명'][:60]}",
+                    f"[{prec.get('사건번호', '')}] {case_name_short}",
                     expanded=(i == 0)
                 ):
+                    # 전체 제목 표시
+                    st.markdown(f"**[{prec.get('사건번호', '')}]** {prec['사건명']}")
+
                     col1, col2, col3 = st.columns(3)
                     with col1: st.caption(f"🏛 {prec.get('법원명', '')}")
                     with col2: st.caption(f"📅 {prec.get('선고일자', '')}")
@@ -543,7 +528,7 @@ def render_law_search_results():
                     if prec_id:
                         cache_key = f"prec_detail_{prec_id}"
                         summary_key = f"prec_summary_{prec_id}"
-                        
+
                         if st.button(f"📄 판례 전문 보기", key=f"load_prec_{i}"):
                             try:
                                 api = LawAPI()
@@ -551,7 +536,6 @@ def render_law_search_results():
                                     detail = api.get_precedent_detail(prec_id)
                                 if "error" not in detail:
                                     st.session_state[cache_key] = detail
-                                    # AI 요약 생성
                                     with st.spinner("🤖 AI가 판례를 쉽게 요약하는 중..."):
                                         summary = _summarize_precedent(detail)
                                         if summary:
@@ -564,21 +548,21 @@ def render_law_search_results():
                         if cache_key in st.session_state:
                             detail = st.session_state[cache_key]
                             has_content = False
-                            
-                            # AI 요약 (있으면 먼저 표시)
+
+                            # AI 요약
                             if summary_key in st.session_state:
                                 st.markdown("## 🤖 AI 요약")
                                 st.markdown(st.session_state[summary_key])
                                 st.markdown("---")
                                 has_content = True
-                            
-                            # 원문 (접을 수 있게)
+
+                            # 원문
                             raw_parts = []
                             if detail.get("판시사항"): raw_parts.append(("📌 판시사항", detail["판시사항"]))
                             if detail.get("판결요지"): raw_parts.append(("📌 판결요지", detail["판결요지"]))
                             if detail.get("참조조문"): raw_parts.append(("⚖️ 참조조문", detail["참조조문"]))
                             if detail.get("판례내용"): raw_parts.append(("📄 판례 전문", detail["판례내용"]))
-                            
+
                             if raw_parts:
                                 with st.expander("📜 원문 전체 보기", expanded=False):
                                     for title, content in raw_parts:
@@ -586,7 +570,7 @@ def render_law_search_results():
                                         st.markdown(content[:5000])
                                         st.markdown("---")
                                 has_content = True
-                            
+
                             if not has_content:
                                 st.info("이 판례는 법제처 API에서 상세 내용을 제공하지 않습니다.\n\n[국가법령정보센터](https://www.law.go.kr)에서 직접 검색해 보세요.")
         tab_idx += 1
@@ -595,10 +579,14 @@ def render_law_search_results():
     if sr["interpretations"]:
         with tabs[tab_idx]:
             for i, interp in enumerate(sr["interpretations"]):
+                interp_name_short = interp['안건명'][:40] + ('…' if len(interp['안건명']) > 40 else '')
                 with st.expander(
-                    f"**[{interp.get('안건번호', '')}]** {interp['안건명'][:60]}",
+                    f"[{interp.get('안건번호', '')}] {interp_name_short}",
                     expanded=(i == 0)
                 ):
+                    # 전체 제목 표시
+                    st.markdown(f"**[{interp.get('안건번호', '')}]** {interp['안건명']}")
+
                     col1, col2 = st.columns(2)
                     with col1: st.caption(f"📅 {interp.get('회답일자', '')}")
                     with col2: st.caption(f"🏛 {interp.get('회답기관', '')}")
@@ -607,7 +595,7 @@ def render_law_search_results():
                     if interp_id:
                         cache_key = f"interp_detail_{interp_id}"
                         summary_key = f"interp_summary_{interp_id}"
-                        
+
                         if st.button(f"📄 해석례 전문 보기", key=f"load_interp_{i}"):
                             try:
                                 api = LawAPI()
@@ -615,7 +603,6 @@ def render_law_search_results():
                                     detail = api.get_interpretation_detail(interp_id)
                                 if "error" not in detail:
                                     st.session_state[cache_key] = detail
-                                    # AI 요약 생성
                                     with st.spinner("🤖 AI가 해석례를 쉽게 요약하는 중..."):
                                         summary = _summarize_interpretation(detail)
                                         if summary:
@@ -628,21 +615,21 @@ def render_law_search_results():
                         if cache_key in st.session_state:
                             detail = st.session_state[cache_key]
                             has_content = False
-                            
-                            # AI 요약 (있으면 먼저 표시)
+
+                            # AI 요약
                             if summary_key in st.session_state:
                                 st.markdown("## 🤖 AI 요약")
                                 st.markdown(st.session_state[summary_key])
                                 st.markdown("---")
                                 has_content = True
-                            
-                            # 원문 (접을 수 있게)
+
+                            # 원문
                             raw_parts = []
                             if detail.get("질의요지"): raw_parts.append(("❓ 질의요지", detail["질의요지"]))
                             if detail.get("회답"): raw_parts.append(("💬 회답", detail["회답"]))
                             if detail.get("이유"): raw_parts.append(("📝 이유", detail["이유"]))
                             if detail.get("참조조문"): raw_parts.append(("⚖️ 참조조문", detail["참조조문"]))
-                            
+
                             if raw_parts:
                                 with st.expander("📜 원문 전체 보기", expanded=False):
                                     for title, content in raw_parts:
@@ -650,7 +637,7 @@ def render_law_search_results():
                                         st.markdown(content[:5000])
                                         st.markdown("---")
                                 has_content = True
-                            
+
                             if not has_content:
                                 st.info("이 해석례는 법제처 API에서 상세 내용을 제공하지 않습니다.\n\n[국가법령정보센터](https://www.law.go.kr)에서 직접 검색해 보세요.")
                     else:
