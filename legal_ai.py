@@ -301,22 +301,23 @@ def build_system_claude(docs, laws_db):
     contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 35000)
     yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 20000)
 
-    # 핵심 법령: 시스템 프롬프트에 원문 포함 (면세점/유통 직결)
+    # 핵심 법령/행정규칙: 시스템 프롬프트에 원문 포함 (면세점/유통 직결)
     CORE_LAWS = {
         "대규모유통업법", "대규모유통업법 시행령", "공정거래법", "하도급법",
         "관세법", "상생협력법", "유통산업발전법",
         "대외무역법", "외국환거래법", "환급특례법",
+        "보세판매장고시",
     }
     
     laws_text = ""
     if laws_db:
-        # 핵심 법령: 원문 전체 포함
+        # 핵심 법령/행정규칙: 원문 전체 포함
         core_entries = []
         for law in laws_db:
             if law["law_short"] in CORE_LAWS:
                 core_entries.append(f"[{law['law_short']} {law['article_no']}] {law.get('article_title','')}\n{law['content']}")
         core_text = "\n\n---\n\n".join(core_entries) if core_entries else ""
-        core_text = truncate_at_boundary(core_text, 40000)
+        core_text = truncate_at_boundary(core_text, 45000)
         
         # 보조 법령: 조문 제목만 목록으로 (AI 자체 지식 + DB 사후검증)
         aux_entries = []
@@ -335,11 +336,12 @@ def build_system_claude(docs, laws_db):
                 aux_text
             )
     else:
-        laws_text = "(법령 DB 미등록 — 일반 법률 지식으로 판단)"
+        laws_text = "(법령/행정규칙 DB 미등록 — 일반 법률 지식으로 판단)"
 
     return (
         "당신은 면세점 전문 공정거래 실무 어시스턴트 AI입니다.\n"
-        "단순한 법률 해석을 넘어, ① [외부 법령]과 ② [내부 사규/표준문서]라는 두 가지 관점에서 교차 검토하여 실무 결단을 내려주세요.\n\n"
+        "단순한 법률 해석을 넘어, ① [외부 법령/행정규칙]과 ② [내부 사규/표준문서]라는 두 가지 관점에서 교차 검토하여 실무 결단을 내려주세요.\n"
+        "특히 관세청 고시 등 행정규칙은 법령보다 구체적인 실무 기준을 담고 있으므로, 해당 내용이 있을 경우 반드시 함께 검토하세요.\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "[기준 문서 (Ground Truth — 절대 자체를 검토하지 말 것)]\n"
@@ -349,7 +351,7 @@ def build_system_claude(docs, laws_db):
         "\n\n③ 당사 표준 약정서:\n" + yakjeong_text +
 
         "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "[적용 법령 DB (현행 법령 원문)]\n"
+        "[적용 법령·행정규칙 DB (현행 법령 및 고시 원문)]\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
         laws_text +
 
@@ -370,7 +372,7 @@ def build_system_claude(docs, laws_db):
         '      "title": "쟁점 제목",\n'
         '      "risk_level": "high | medium | low",\n'
         '      "target_clause": "검토 대상 문서 원문 인용",\n'
-        '      "applicable_law": "적용 법령 (예: 대규모유통업법 제11조)",\n'
+        '      "applicable_law": "적용 법령 또는 행정규칙 (예: 대규모유통업법 제11조, 보세판매장고시 제8조)",\n'
         '      "law_analysis": "법령 관점에서의 위법성 평가",\n'
         '      "applicable_rule": "적용 사규/표준계약서 조항",\n'
         '      "rule_analysis": "사규 및 당사 기준 관점에서의 부합성 평가",\n'
