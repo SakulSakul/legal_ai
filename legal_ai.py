@@ -1,22 +1,22 @@
 # ============================================================
-#  🤝 공정거래 실무 어시스턴트 v2.1 — 면세점 MD/바이어용
+#  🤝 공정거래 실무 어시스턴트 v2.2 — 면세점 MD/바이어용
 #  이중 모델: Gemini(문서/검색) + Claude(법률검토) + 고가용성 우회
 #  보안: 자동 DLP(개인/기업정보) + 협력사명 지정 마스킹 탑재
 #  디자인: 신세계그룹 뉴스룸 테마 적용 (Pretendard, Corporate Red)
 #
-#  v2.1 변경사항:
-#  - Claude 모델 버전 설정값 외부화 (Secrets 지원)
-#  - 계좌번호 DLP 정규식 오탐 수정 (은행별 패턴 정밀화)
-#  - Gemini 폴백 시 에러 타입별 분기 (rate limit 공유 쿼터 대응)
-#  - extract_text 에러 핸들링 추가
-#  - 시스템 프롬프트 토큰 관리 (조항 단위 자르기)
-#  - st.rerun() 타이밍 개선 (다운로드 가능 상태 보장)
-#  - import 위치 정리 (uuid 등 상단 이동)
+#  v2.2 변경사항:
+#  - 법제처 Open API 연동 (법령/판례/해석례 실시간 검색)
+#  - 사이드바 법령검색 위젯 추가
+#  - AI 프롬프트에 법제처 실시간 법령 원문 컨텍스트 주입
+#  - build_system_claude에 법제처 실시간 조회 결과 병합
 # ============================================================
 
 import streamlit as st
 import os, io, json, re, time, logging, uuid
 from datetime import datetime, timedelta
+
+# ── 법제처 Open API 모듈 import ──────────────────────────────
+from law_api_module import LawAPI, render_law_search_sidebar
 
 # ── 로깅 설정 ────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -89,20 +89,12 @@ def apply_auto_masking(text, target_partner=""):
         return text
         
     # 1. 개인정보 및 식별번호 차단 (자동)
-    # 주민등록번호 / 외국인등록번호 (6자리-7자리, 뒷자리 1~4로 시작)
     text = re.sub(r'\b\d{6}[-\s]*[1-4]\d{6}\b', '█주민/외국인번호█', text) 
-    # 사업자등록번호 (3-2-5 형식, 반드시 하이픈 포함)
     text = re.sub(r'\b\d{3}-\d{2}-\d{5}\b', '█사업자번호█', text) 
-    # 법인등록번호 (6-7 형식, 반드시 하이픈 포함)
     text = re.sub(r'\b\d{6}-\d{7}\b', '█법인번호█', text) 
-    # 휴대전화 (010/011/016/017/018/019 + 3~4자리 + 4자리)
     text = re.sub(r'\b01[016789][-\s]?\d{3,4}[-\s]?\d{4}\b', '█휴대전화█', text)
-    # 일반 전화번호 (지역번호 2~3자리 + 3~4자리 + 4자리)
     text = re.sub(r'\b0[2-9][0-9]?[-\s]?\d{3,4}[-\s]?\d{4}\b', '█전화번호█', text)
-    # 이메일
     text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '█이메일█', text)
-    # 계좌번호: "계좌" 키워드 근접 시에만 마스킹 (오탐 방지)
-    # 패턴: "계좌" 뒤 30자 이내의 10~16자리 숫자열 (하이픈 허용)
     text = re.sub(
         r'(계좌[^\d]{0,30})(\d{2,6}[-]?\d{2,6}[-]?\d{2,6})',
         lambda m: m.group(1) + '█계좌번호█',
@@ -216,7 +208,6 @@ def extract_text(file_bytes):
         doc = Document(io.BytesIO(file_bytes))
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
         if not paragraphs:
-            # 테이블에만 텍스트가 있을 수 있으므로 테이블도 시도
             table_texts = []
             for table in doc.tables:
                 for row in table.rows:
@@ -236,12 +227,10 @@ def truncate_at_boundary(text, max_chars):
     """문서 구분자(---) 기준으로 자르기. 조항 중간에서 잘리지 않도록 함."""
     if len(text) <= max_chars:
         return text
-    # max_chars 이전의 마지막 구분자 위치를 찾아 거기서 자름
     truncated = text[:max_chars]
     last_separator = truncated.rfind("\n\n---\n\n")
-    if last_separator > max_chars * 0.5:  # 절반 이상은 보존
+    if last_separator > max_chars * 0.5:
         return truncated[:last_separator]
-    # 구분자가 없으면 마지막 줄바꿈 기준
     last_newline = truncated.rfind("\n")
     if last_newline > max_chars * 0.7:
         return truncated[:last_newline]
@@ -276,9 +265,7 @@ def verify_citations(cited_laws, laws_db):
 
 # ── 에러 타입 분류 헬퍼 ──────────────────────────────────────
 def classify_api_error(error):
-    """API 에러를 분류하여 (에러유형, 메시지) 튜플 반환.
-    에러유형: 'rate_limit', 'auth', 'server', 'unknown'
-    """
+    """API 에러를 분류하여 (에러유형, 메시지) 튜플 반환."""
     error_msg = str(error).lower()
     if any(kw in error_msg for kw in ["rate", "quota", "429", "resource_exhausted"]):
         return "rate_limit", "API 사용 한도 또는 요금을 초과했습니다."
@@ -289,8 +276,56 @@ def classify_api_error(error):
     else:
         return "unknown", f"알 수 없는 오류가 발생했습니다: {type(error).__name__}"
 
+# ── 법제처 실시간 법령 컨텍스트 조회 ─────────────────────────
+def get_live_law_context(query):
+    """사용자 질문에서 법령 키워드를 추출하여 법제처 API로 실시간 조회.
+    session_state에 이미 사이드바 검색 결과가 있으면 그것을 우선 사용."""
+    
+    # 1. 사이드바에서 이미 검색한 결과가 있으면 우선 사용
+    if st.session_state.get("law_context"):
+        context = st.session_state.pop("law_context")
+        return context
+    
+    # 2. 질문에서 법령 관련 키워드 자동 감지 → 법제처 API 자동 조회
+    law_keywords = [
+        "표시광고", "대규모유통업", "전자상거래", "공정거래", "하도급",
+        "관세법", "소비자보호", "개인정보", "화장품법", "식품위생",
+        "약사법", "독점규제", "소비자기본법", "담배사업법", "주세법",
+        "관광진흥법", "외국환거래",
+    ]
+    
+    detected = [kw for kw in law_keywords if kw in query]
+    if not detected:
+        return ""
+    
+    try:
+        oc = get_secret("LAW_OC")
+        if not oc:
+            return ""
+        
+        api = LawAPI(oc=oc)
+        context_parts = []
+        
+        for kw in detected[:2]:  # 최대 2개 키워드만 조회 (속도 고려)
+            result = api.build_ai_context(
+                kw,
+                include_law=True,
+                include_precedent=True,
+                include_interpretation=False,
+                max_articles=5,
+            )
+            if result and "찾지 못했습니다" not in result:
+                context_parts.append(result)
+        
+        if context_parts:
+            return "\n\n".join(context_parts)
+    except Exception as e:
+        logger.warning(f"법제처 API 실시간 조회 실패 (무시하고 계속): {e}")
+    
+    return ""
+
 # ── 시스템 프롬프트 ──────────────────────────────────────────
-def build_system_claude(docs, laws_db):
+def build_system_claude(docs, laws_db, live_law_context=""):
     def by_cat(cat):
         return [d for d in docs if d["cat"] == cat]
     def fmt_docs(ds):
@@ -310,6 +345,18 @@ def build_system_claude(docs, laws_db):
     else:
         laws_text = "(법령 DB 미등록 — 일반 법률 지식으로 판단)"
 
+    # 법제처 실시간 조회 결과 병합
+    live_section = ""
+    if live_law_context:
+        live_section = (
+            "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "[법제처 Open API 실시간 조회 결과 (현행 법령 원문)]\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "아래는 법제처 국가법령정보센터에서 실시간으로 조회한 현행 법령 원문입니다.\n"
+            "위 [적용 법령 DB]와 함께 참조하되, 실시간 조회 결과가 더 최신일 수 있습니다.\n\n"
+            + live_law_context
+        )
+
     return (
         "당신은 면세점 전문 공정거래 실무 어시스턴트 AI입니다.\n"
         "단순한 법률 해석을 넘어, ① [외부 법령]과 ② [내부 사규/표준문서]라는 두 가지 관점에서 교차 검토하여 실무 결단을 내려주세요.\n\n"
@@ -322,9 +369,11 @@ def build_system_claude(docs, laws_db):
         "\n\n③ 당사 표준 약정서:\n" + yakjeong_text +
 
         "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "[적용 법령 DB (현행 법령 원문)]\n"
+        "[적용 법령 DB (Supabase 등록 법령)]\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
         laws_text +
+
+        live_section +
 
         "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "[답변 형식 — 엄격 준수]\n"
@@ -427,7 +476,6 @@ def call_gemini(system_prompt, messages):
     last_error_type = None
     
     for model_name in GEMINI_MODELS:
-        # rate_limit 에러 시 동일 API 키 쿼터를 공유하므로 다음 모델로 폴백해도 무의미
         if last_error_type == "rate_limit":
             logger.info(f"Gemini rate limit 발생 — 동일 쿼터 공유로 {model_name} 폴백 건너뜀")
             continue
@@ -451,7 +499,6 @@ def call_gemini(system_prompt, messages):
             logger.error(f"Gemini ({model_name}) 오류: {e}")
             last_error_type, last_err_msg = classify_api_error(e)
             
-            # 마지막 모델이거나 rate_limit(공유 쿼터)인 경우 즉시 에러 반환
             is_last = (model_name == GEMINI_MODELS[-1])
             if is_last or last_error_type == "rate_limit":
                 label_map = {
@@ -461,16 +508,15 @@ def call_gemini(system_prompt, messages):
                     "unknown": "통신 오류",
                 }
                 return f"⚠️ [{label_map[last_error_type]}] Gemini: {last_err_msg}"
-            # auth 에러도 같은 키를 쓰므로 폴백 무의미
             if last_error_type == "auth":
                 return f"⚠️ [API 인증 오류] Gemini: {last_err_msg}"
             continue
     
     return "⚠️ Gemini 응답을 가져오지 못했습니다."
 
-def dispatch_with_fallback(model_choice, messages, docs, laws_db):
+def dispatch_with_fallback(model_choice, messages, docs, laws_db, live_law_context=""):
     if model_choice == "claude":
-        system = build_system_claude(docs, laws_db)
+        system = build_system_claude(docs, laws_db, live_law_context)
         reply = call_claude(system, messages)
         if reply.startswith("⚠️"):
             st.warning(f"🔄 {reply}\n→ 예비 시스템(Gemini)으로 자동 우회하여 검토를 진행합니다.")
@@ -551,55 +597,48 @@ def render_alternative_clause(clause):
         st.code(clause, language="text")
 
 def _apply_shading(paragraph, hex_color):
-    """단락에 배경 음영(shading) 적용 — Word '음영' 스타일과 동일 효과"""
+    """단락에 배경 음영(shading) 적용"""
     from docx.oxml.ns import qn, nsdecls
     from docx.oxml import parse_xml
     shading = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{hex_color}" w:val="clear"/>')
     paragraph.paragraph_format.element.get_or_add_pPr().append(shading)
 
 def _add_shaded_heading(doc, text, level, shade_color="D9E2F3"):
-    """음영 배경이 적용된 Heading 추가 (Word '음영' 디자인 스타일)"""
+    """음영 배경이 적용된 Heading 추가"""
     h = doc.add_heading(text, level=level)
     _apply_shading(h, shade_color)
     return h
 
 def generate_review_docx(json_data, detail_text, query_text):
-    """검토 의견서 docx 생성 — 화면 렌더링과 동일한 구조로 출력.
-    여백: 좁게 (상하좌우 1.27cm = Word '좁게' 프리셋)
-    디자인: Word 기본 스타일 '음영' 적용
-    """
+    """검토 의견서 docx 생성"""
     from docx import Document
     from docx.shared import Pt, RGBColor, Cm
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn, nsdecls
     from docx.oxml import parse_xml
 
-    # ── 음영 디자인 컬러 팔레트 ──
-    SHADE_H1 = "2F5496"       # Heading 1 배경: 진한 파랑
-    SHADE_H1_FONT = "FFFFFF"  # Heading 1 글자: 흰색
-    SHADE_H2 = "D9E2F3"       # Heading 2 배경: 연한 파랑
-    SHADE_H3 = "E2EFDA"       # Heading 3 배경: 연한 초록
-    SHADE_QUOTE = "F2F2F2"    # 인용/코드 배경: 연한 회색
-    SHADE_INFO = "DAEEF3"     # 권고(info) 배경: 연한 시안
-    SHADE_WARN = "FFF2CC"     # 경고 배경: 연한 노랑
-    SHADE_ALT = "E8E0F0"      # 대안 조항 배경: 연한 보라
+    SHADE_H1 = "2F5496"
+    SHADE_H1_FONT = "FFFFFF"
+    SHADE_H2 = "D9E2F3"
+    SHADE_H3 = "E2EFDA"
+    SHADE_QUOTE = "F2F2F2"
+    SHADE_INFO = "DAEEF3"
+    SHADE_WARN = "FFF2CC"
+    SHADE_ALT = "E8E0F0"
 
     doc = Document()
 
-    # ── 페이지 여백: 좁게 (1.27cm = Word 기본 '좁게' 프리셋) ──
     for section in doc.sections:
         section.top_margin = Cm(1.27)
         section.bottom_margin = Cm(1.27)
         section.left_margin = Cm(1.27)
         section.right_margin = Cm(1.27)
 
-    # ── 기본 스타일 ──
     style = doc.styles['Normal']
     font = style.font
     font.name = '맑은 고딕'
     font.size = Pt(10)
 
-    # ── Heading 스타일 커스텀 (음영 디자인) ──
     for hs_id, hs_size, hs_color in [("Heading 1", 16, SHADE_H1), ("Heading 2", 13, SHADE_H2), ("Heading 3", 11, SHADE_H3)]:
         try:
             hs = doc.styles[hs_id]
@@ -610,11 +649,10 @@ def generate_review_docx(json_data, detail_text, query_text):
         except KeyError:
             pass
 
-    # ── 헤더: 앱 타이틀과 동일 ──
     p_title = doc.add_paragraph()
     p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _apply_shading(p_title, SHADE_H1)
-    run_title = p_title.add_run("🤝 공정거래 실무 어시스턴트 v2.1 — 검토 의견서")
+    run_title = p_title.add_run("🤝 공정거래 실무 어시스턴트 v2.2 — 검토 의견서")
     run_title.font.size = Pt(18)
     run_title.bold = True
     run_title.font.color.rgb = RGBColor(255, 255, 255)
@@ -625,14 +663,12 @@ def generate_review_docx(json_data, detail_text, query_text):
     run_sub.font.size = Pt(9)
     run_sub.font.color.rgb = RGBColor(128, 128, 128)
 
-    # 작성 정보
     p_meta = doc.add_paragraph()
     p_meta.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     run_meta = p_meta.add_run(f"작성일: {datetime.now().strftime('%Y-%m-%d %H:%M')}  |  AI 검토 초안")
     run_meta.font.size = Pt(8)
     run_meta.font.color.rgb = RGBColor(128, 128, 128)
 
-    # 경고 배너 (음영 배경)
     p_warn = doc.add_paragraph()
     p_warn.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _apply_shading(p_warn, SHADE_WARN)
@@ -644,7 +680,6 @@ def generate_review_docx(json_data, detail_text, query_text):
     doc.add_paragraph("")
 
     if json_data:
-        # ── 검토 결론 배지 (화면의 verdict badge와 동일) ──
         verdict = json_data.get("verdict", "")
         verdict_map = {
             "approved":    "🟢 위험 요소 미발견 (사내변호사 확인 권장)",
@@ -668,20 +703,17 @@ def generate_review_docx(json_data, detail_text, query_text):
         run_v.bold = True
         run_v.font.color.rgb = verdict_colors.get(verdict, RGBColor(128, 128, 128))
 
-        # 요약 (화면의 📋 summary와 동일)
         summary = json_data.get("summary", query_text[:200])
         p_summary = doc.add_paragraph()
         run_s = p_summary.add_run(f"📋 {summary}")
         run_s.font.size = Pt(11)
         run_s.bold = True
 
-        # 판단 근거
         if json_data.get("verdict_reason"):
             doc.add_paragraph(json_data["verdict_reason"])
 
         doc.add_paragraph("")
 
-        # ── 쟁점별 분석 (화면의 expander 구조와 동일) ──
         issues = json_data.get("issues", [])
         if issues:
             _add_shaded_heading(doc, "쟁점별 교차 분석", level=2, shade_color=SHADE_H2)
@@ -694,11 +726,9 @@ def generate_review_docx(json_data, detail_text, query_text):
                 icon = risk_icons.get(risk, "⚪")
                 label = risk_labels.get(risk, "")
 
-                # 쟁점 제목 (음영 배경 + 위험도별 색상)
                 h = doc.add_heading(f"{icon} 쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '제목 없음')} {label}", level=3)
                 _apply_shading(h, risk_shades.get(risk, SHADE_H3))
 
-                # 📌 검토 대상 원문 (회색 음영 박스)
                 if issue.get("target_clause"):
                     doc.add_paragraph("📌 검토 대상 원문:").runs[0].bold = True
                     p_clause = doc.add_paragraph(issue["target_clause"])
@@ -708,7 +738,6 @@ def generate_review_docx(json_data, detail_text, query_text):
                         run.font.color.rgb = RGBColor(80, 80, 80)
                         run.font.size = Pt(9)
 
-                # ⚖️ 적용 법령 + 법령 관점
                 if issue.get("applicable_law"):
                     p = doc.add_paragraph()
                     run_label = p.add_run("⚖️ 적용 법령: ")
@@ -720,7 +749,6 @@ def generate_review_docx(json_data, detail_text, query_text):
                     run_label.bold = True
                     p.add_run(issue["law_analysis"])
 
-                # 🏛️ 적용 사규 + 사규 관점
                 if issue.get("applicable_rule"):
                     p = doc.add_paragraph()
                     run_label = p.add_run("🏛️ 적용 사규: ")
@@ -732,7 +760,6 @@ def generate_review_docx(json_data, detail_text, query_text):
                     run_label.bold = True
                     p.add_run(issue["rule_analysis"])
 
-                # 💡 종합 실무 권고 (시안 음영 박스 — 화면의 st.info와 동일)
                 if issue.get("recommendation"):
                     p_rec = doc.add_paragraph()
                     _apply_shading(p_rec, SHADE_INFO)
@@ -740,14 +767,12 @@ def generate_review_docx(json_data, detail_text, query_text):
                     run_rec.bold = True
                     run_rec.font.color.rgb = RGBColor(0, 80, 160)
 
-                doc.add_paragraph("")  # 쟁점 간 간격
+                doc.add_paragraph("")
 
-        # ── MD Action Plan ──
         if json_data.get("action_plan"):
             _add_shaded_heading(doc, "MD Action Plan", level=2, shade_color=SHADE_H2)
             doc.add_paragraph(json_data["action_plan"])
 
-        # ── 수정 대안 조항 (보라 음영 박스) ──
         alt = json_data.get("alternative_clause")
         if alt and alt != "null":
             _add_shaded_heading(doc, "📝 수정 대안 조항 (초안)", level=2, shade_color=SHADE_H2)
@@ -758,17 +783,14 @@ def generate_review_docx(json_data, detail_text, query_text):
             p_alt.paragraph_format.left_indent = Cm(0.5)
             _apply_shading(p_alt, SHADE_ALT)
 
-        # ── 상세 검토 의견 전문 (화면의 expander 내용과 동일) ──
         if detail_text:
             _add_shaded_heading(doc, "📄 상세 검토 의견 전문", level=2, shade_color=SHADE_H2)
             doc.add_paragraph(detail_text[:10000])
 
     else:
-        # JSON 파싱 실패 시 원문 그대로
         _add_shaded_heading(doc, "검토 의견", level=2, shade_color=SHADE_H2)
         doc.add_paragraph(detail_text[:10000])
 
-    # ── 푸터 면책 (회색 음영) ──
     doc.add_paragraph("")
     p_footer = doc.add_paragraph()
     p_footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -784,24 +806,20 @@ def generate_review_docx(json_data, detail_text, query_text):
 
 # ── Streamlit UI 메인 함수 ────────────────────────────────────
 def main():
-    st.set_page_config(page_title="공정거래 실무 어시스턴트 v2.1", page_icon="🤝", layout="wide")
+    st.set_page_config(page_title="공정거래 실무 어시스턴트 v2.2", page_icon="🤝", layout="wide")
+
+    # ── [임시] OC값 확인용 — 확인 후 아래 1줄 삭제하세요 ──
+    st.write("OC값 확인:", st.secrets.get("LAW_OC", "없음"))
 
     st.markdown("""
     <style>
-    /* 1. 최고급 웹 폰트 'Pretendard' 불러오기 */
     @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css");
-
-    /* 2. 전체 폰트 및 기본 타이포그래피 (신세계 뉴스룸 스타일의 정갈한 자간) */
     html, body, [class*="css"] { 
         font-family: 'Pretendard Variable', Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif !important; 
         letter-spacing: -0.02em; 
         color: #222222;
     }
-
-    /* 앱 배경: 아주 연한 라이트 그레이로 깔끔하게 */
     .stApp { background-color: #F8F9FA !important; }
-
-    /* 3. 채팅 메시지 블록 (기업형 UI에 맞게 굴곡 축소 및 깔끔한 보더) */
     .stChatMessage { 
         border-radius: 12px; 
         padding: 24px 32px; 
@@ -811,74 +829,28 @@ def main():
         background-color: #FFFFFF !important; 
         line-height: 1.6;
     }
-
-    /* 📱 4. 모바일 반응형 처리 (스마트폰 환경 최적화) */
     @media (max-width: 768px) {
-        .stChatMessage {
-            padding: 16px 20px;
-            border-radius: 8px;
-        }
+        .stChatMessage { padding: 16px 20px; border-radius: 8px; }
     }
-
-    /* 5. 버튼 공통 스타일 (뉴스룸 스타일의 단정한 버튼) */
     div.stButton > button:first-child { 
-        border-radius: 6px; 
-        font-weight: 600; 
-        transition: all 0.2s ease-in-out; 
+        border-radius: 6px; font-weight: 600; transition: all 0.2s ease-in-out; 
     }
-
-    /* 🔴 프라이머리 버튼 (신세계 딥 레드 #E3000F) */
     button[kind="primary"] { 
-        background-color: #E3000F !important; 
-        color: #FFFFFF !important; 
-        border: none !important; 
+        background-color: #E3000F !important; color: #FFFFFF !important; border: none !important; 
     }
     button[kind="primary"]:hover {
-        background-color: #C0000C !important; 
-        transform: translateY(-1px);
+        background-color: #C0000C !important; transform: translateY(-1px);
         box-shadow: 0 4px 8px rgba(227, 0, 15, 0.2) !important;
     }
-
-    /* ⚪ 세컨더리 버튼 (깔끔한 다크 그레이 아웃라인) */
     button[kind="secondary"] { 
-        background-color: #FFFFFF !important; 
-        color: #444444 !important; 
-        border: 1px solid #DDDDDD !important; 
+        background-color: #FFFFFF !important; color: #444444 !important; border: 1px solid #DDDDDD !important; 
     }
-    button[kind="secondary"]:hover {
-        border-color: #222222 !important;
-        color: #222222 !important;
-    }
-
-    /* 6. 사이드바 및 코드 블록 스타일링 */
-    [data-testid="stSidebar"] { 
-        background-color: #FFFFFF !important;
-        border-right: 1px solid #EAECEF; 
-    }
-    
-    /* 법령/사규 인용구 하이라이트 (신세계 레드 톤으로 맞춤) */
-    code { 
-        color: #E3000F; 
-        background-color: #FCE6E7; 
-        border-radius: 4px; 
-        padding: 0.2em 0.4em;
-        font-size: 0.9em;
-    }
-    pre { 
-        border-radius: 8px; 
-        background-color: #F8F9FA !important; 
-        border: 1px solid #EAECEF; 
-    }
-
-    /* 7. 헤딩 앵커 링크 완전 제거 (마우스 오버 시 클립 버튼 + 복사 시 코드 유출 방지) */
-    .stMarkdown a[href^="#"],
-    [data-testid="stHeaderActionElements"] {
-        display: none !important;
-    }
-    h1 a, h2 a, h3 a, h4 a, h5 a, h6 a {
-        display: none !important;
-        pointer-events: none !important;
-    }
+    button[kind="secondary"]:hover { border-color: #222222 !important; color: #222222 !important; }
+    [data-testid="stSidebar"] { background-color: #FFFFFF !important; border-right: 1px solid #EAECEF; }
+    code { color: #E3000F; background-color: #FCE6E7; border-radius: 4px; padding: 0.2em 0.4em; font-size: 0.9em; }
+    pre { border-radius: 8px; background-color: #F8F9FA !important; border: 1px solid #EAECEF; }
+    .stMarkdown a[href^="#"], [data-testid="stHeaderActionElements"] { display: none !important; }
+    h1 a, h2 a, h3 a, h4 a, h5 a, h6 a { display: none !important; pointer-events: none !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -898,24 +870,25 @@ def main():
     if "sessions" not in st.session_state: st.session_state.sessions = load_sessions()
     if "current_session_id" not in st.session_state: st.session_state.current_session_id = None
     if "laws_db" not in st.session_state: st.session_state.laws_db = load_laws()
-    # 응답 완료 후 rerun 플래그 (다운로드 버튼 렌더링 보장)
     if "needs_rerun" not in st.session_state: st.session_state.needs_rerun = False
 
     if "cleanup_done" not in st.session_state:
         cleanup_old_sessions(90)
         st.session_state.cleanup_done = True
 
-    # 이전 턴에서 세션 저장 후 rerun이 필요한 경우
     if st.session_state.needs_rerun:
         st.session_state.needs_rerun = False
         st.rerun()
 
-    # ── 사이드바 (실무자 동선 최적화) ─────────────────────────
+    # ── 사이드바 ─────────────────────────────────────────────
     with st.sidebar:
-        st.markdown("## 🤝 공정거래 실무 어시스턴트 v2.1")
+        st.markdown("## 🤝 공정거래 실무 어시스턴트 v2.2")
         st.caption("면세점 MD 바이어 전용")
+
+        # ── 법제처 법령 실시간 검색 위젯 ──
+        render_law_search_sidebar()
         
-        # 1. 자동 보안 마스킹 안내 (DLP) - 최상단 배치
+        # 1. 자동 보안 마스킹 안내 (DLP)
         st.markdown("### 🛡️ 정보보안 (DLP) 가동 중")
         st.success(
             "⚠️ **정보 유출 방지 시스템 작동 안내**\n\n"
@@ -924,7 +897,6 @@ def main():
         st.caption("• **자동 차단:** 주민/외국인번호, 휴대전화, 이메일, 사업자/법인번호, 계좌번호, 당사 명칭", unsafe_allow_html=True)
         st.caption("• **수동 차단:** 하단 텍스트 입력창에 기재한 '협력사명'", unsafe_allow_html=True)
 
-        # 법령 DB 업데이트 이력 (일반 사용자 대상)
         law_count = len(st.session_state.laws_db)
         if law_count > 0:
             last_dates = [d.get("last_updated") or d.get("created_at", "") for d in st.session_state.laws_db if d.get("last_updated") or d.get("created_at")]
@@ -946,7 +918,7 @@ def main():
 
         st.divider()
 
-        # 2. 사용 매뉴얼 (도움말)
+        # 2. 사용 매뉴얼
         with st.expander("📖 사용 매뉴얼", expanded=False):
             st.markdown("""
 **1. 접속 방법**
@@ -965,18 +937,23 @@ def main():
 - 쟁점별로 ⚖️ 법령 관점 / 🏛️ 사규 관점이 교차 분석됩니다
 - 💡 종합 실무 권고를 참고하여 협력사에 대응하세요
 
-**4. 🛡️ 보안(DLP) 안내**
+**4. 📖 법령 실시간 검색 (NEW)**
+- 사이드바 상단 '법령 실시간 검색'에서 키워드 입력 후 검색
+- 검색된 법령 원문이 AI 검토 시 자동으로 참조됩니다
+- 법제처 국가법령정보센터의 현행 법령을 실시간 조회합니다
+
+**5. 🛡️ 보안(DLP) 안내**
 - 주민번호, 전화번호, 이메일, 사업자번호 등은 AI 전송 전 **자동 마스킹** 됩니다
 - 협력사명은 **검토 대상 협력사명** 입력란에 기재하면 추가 마스킹됩니다
 - 당사 명칭은 항상 자동 차단됩니다
 
-**5. 기준 문서 등록 (관리자)**
+**6. 기준 문서 등록 (관리자)**
 - 사이드바 하단 ⚙️ 기준 문서 DB 관리 열기
 - 문서 유형(사규/계약서/약정서) 선택 → Word 파일 업로드 → 'DB에 규칙 등록' 클릭
 
-**6. FAQ / 주의사항**
+**7. FAQ / 주의사항**
 - ❓ **AI 검토 결과를 그대로 써도 되나요?** → 아니요. 반드시 사내변호사의 최종 확인을 받으세요.
-- ❓ **어떤 법령이 적용되나요?** → 대규모유통업법, 동 시행령, 공정거래법, 하도급법이 DB에 등록되어 있습니다.
+- ❓ **어떤 법령이 적용되나요?** → 대규모유통업법, 동 시행령, 공정거래법, 하도급법이 DB에 등록되어 있습니다. 추가로 법제처 API를 통해 실시간 현행 법령도 참조됩니다.
 - ❓ **파일은 어떤 형식을 지원하나요?** → .docx(Word) 파일만 지원합니다.
 - ❓ **대화 내역은 얼마나 보관되나요?** → 90일 후 자동 삭제됩니다.
 - ⚠️ AI가 생성한 검토의견서를 사내변호사 확인 없이 외부에 발송하지 마세요.
@@ -990,7 +967,7 @@ def main():
 
         st.divider()
 
-        # 3. 히스토리 관리
+        # 4. 히스토리 관리
         st.markdown("### 🗂 최근 자문 내역")
         for sess in st.session_state.sessions:
             col1, col2 = st.columns([5, 1])
@@ -1007,15 +984,13 @@ def main():
 
         st.divider()
 
-        # 5. 관리자용 DB 관리는 가장 아래 숨김 (Expander)
+        # 5. 관리자용 DB 관리
         with st.expander("⚙️ 기준 문서 DB 관리 (관리자 전용)", expanded=False):
             law_count = len(st.session_state.laws_db)
             if law_count > 0:
-                # 최신 업데이트 일시 추출
                 last_dates = [d.get("last_updated") or d.get("created_at", "") for d in st.session_state.laws_db if d.get("last_updated") or d.get("created_at")]
                 if last_dates:
                     latest = max(last_dates)
-                    # ISO 형식 → 보기 좋게 변환
                     try:
                         from datetime import datetime as _dt
                         if "T" in latest:
@@ -1033,6 +1008,10 @@ def main():
 
             st.caption(f"🤖 Claude: `{CLAUDE_MODEL}`")
             st.caption(f"🤖 Gemini: `{GEMINI_MODELS[0]}` → `{GEMINI_MODELS[1]}`")
+
+            # 법제처 OC 설정 상태 표시
+            oc_status = "✅ 설정됨" if get_secret("LAW_OC") else "❌ 미설정"
+            st.caption(f"📖 법제처 API (LAW_OC): {oc_status}")
 
             doc_cat = st.selectbox("문서 유형", options=list(DOC_CATS.keys()), format_func=lambda x: DOC_CATS[x]["icon"] + " " + DOC_CATS[x]["label"])
             contract_type = st.selectbox("거래 유형", CONTRACT_TYPES) if doc_cat == "contract" else None
@@ -1073,7 +1052,7 @@ def main():
                                     st.rerun()
 
     # ── 메인 영역 ────────────────────────────────────────────
-    st.title("🤝 공정거래 실무 어시스턴트 v2.1")
+    st.title("🤝 공정거래 실무 어시스턴트 v2.2")
     st.caption("MD·협력사 실무 Q&A & 계약·법령 Self-Check AI")
 
     if not st.session_state.messages and st.session_state.docs:
@@ -1081,7 +1060,8 @@ def main():
         st.info(
             "본 시스템은 질문의 목적에 따라 **두 가지 수준의 맞춤형 자문**을 제공합니다.\n\n"
             "🔹 **[1단계] 사내 기준 자문:** 일상적인 규정 문의 시, 등록된 당사 사규와 표준계약서를 바탕으로 신속한 실무 기준을 안내합니다.\n"
-            "🔹 **[2단계] 심층 법무 검토:** 계약서/약정서가 첨부되거나 위법성 판단을 요청하면, 내부 사규와 외부 현행 법령을 교차 분석하여 정식 '검토 의견서'를 발행합니다."
+            "🔹 **[2단계] 심층 법무 검토:** 계약서/약정서가 첨부되거나 위법성 판단을 요청하면, 내부 사규와 외부 현행 법령을 교차 분석하여 정식 '검토 의견서'를 발행합니다.\n"
+            "🔹 **[NEW] 법령 실시간 검색:** 사이드바에서 법령/판례/해석례를 실시간 검색하면, AI 검토 시 법제처 현행 법령 원문이 자동 참조됩니다."
         )
         
         samples = [
@@ -1103,7 +1083,6 @@ def main():
                 jd = msg["json_data"]
                 render_verdict_badge(jd.get("verdict", ""))
                 st.markdown(f"**📋 {jd.get('summary', '')}**")
-                # 4번: 인용 검증 실패 경고
                 cit_results = msg.get("citation_results", [])
                 if cit_results and not all(cr["verified"] for cr in cit_results):
                     unverified = [cr["citation"] for cr in cit_results if not cr["verified"]]
@@ -1147,7 +1126,6 @@ def main():
                     v1_text = extract_text(v1_bytes)
                     v2_text = extract_text(v2_bytes)
                     
-                    # 추출 실패 체크
                     if v1_text.startswith("(") and v1_text.endswith(")"):
                         st.error(f"V1 파일 읽기 실패: {v1_text}")
                     elif v2_text.startswith("(") and v2_text.endswith(")"):
@@ -1173,7 +1151,6 @@ def main():
                 for f in chat_files:
                     f.seek(0)
                     raw_text = extract_text(f.read())
-                    # 추출 실패 시에도 마스킹 적용 후 전달 (AI가 에러 메시지를 받아 안내)
                     safe_text = apply_auto_masking(raw_text, target_partner)
                     attached_texts.append(f"=== 검토 대상 첨부 파일: {f.name} ===\n" + safe_text)
 
@@ -1204,8 +1181,19 @@ def main():
                     spinner_msg = "💬 당사 사내 기준을 검색 및 분석 중..."
 
                 with st.spinner(spinner_msg):
+                    # 법제처 실시간 법령 컨텍스트 조회
+                    live_law_context = ""
+                    if model_choice == "claude":
+                        live_law_context = get_live_law_context(safe_query)
+                        if live_law_context:
+                            st.toast("📖 법제처 현행 법령 원문을 실시간 참조합니다.", icon="📖")
+                    
                     start_time = time.time()
-                    reply, actual_model = dispatch_with_fallback(model_choice, st.session_state.messages, st.session_state.docs, st.session_state.laws_db)
+                    reply, actual_model = dispatch_with_fallback(
+                        model_choice, st.session_state.messages,
+                        st.session_state.docs, st.session_state.laws_db,
+                        live_law_context
+                    )
                     elapsed = time.time() - start_time
 
                 msg_data = {"role": "assistant", "content": reply, "time": elapsed, "model": actual_model, "msg_id": str(datetime.now().timestamp())}
@@ -1220,7 +1208,6 @@ def main():
 
                         render_verdict_badge(json_data.get("verdict", ""))
                         st.markdown(f"**📋 {json_data.get('summary', '')}**")
-                        # 4번: 인용 검증 실패 경고
                         if citation_results and not all(cr["verified"] for cr in citation_results):
                             unverified = [cr["citation"] for cr in citation_results if not cr["verified"]]
                             st.warning(f"⚠️ 다음 법령 인용의 DB 검증이 완료되지 않았습니다: {', '.join(unverified)}\n\n사내변호사에게 해당 조문의 현행 유효 여부를 반드시 확인받으세요.")
@@ -1245,21 +1232,18 @@ def main():
                 st.caption(f"⏱️ {elapsed:.1f}초 · {actual_model}")
                 st.session_state.messages.append(msg_data)
 
-            # 세션 저장 후 다음 렌더 사이클에서 rerun (다운로드 버튼 접근 보장)
             new_id = st.session_state.current_session_id or str(uuid.uuid4())
             current_sess = {"id": new_id, "title": display_query[:25] + "...", "date": datetime.now().isoformat(), "messages": st.session_state.messages}
             if save_session(current_sess):
                 st.session_state.current_session_id = new_id
                 existing = [s for s in st.session_state.sessions if s["id"] != new_id]
                 st.session_state.sessions = [current_sess] + existing
-            # 즉시 rerun 대신 플래그 설정 → 현재 렌더에서 다운로드 버튼이 먼저 표시됨
             st.session_state.needs_rerun = True
 
     else:
         st.markdown("### 🚀 시작하기 — 3단계 설정 가이드")
         st.markdown("아래 순서대로 기준 문서를 등록하면 AI 검토를 시작할 수 있습니다.")
         
-        # 등록 현황 체크
         has_saryu = any(d["cat"] == "saryu" for d in st.session_state.docs)
         has_contract = any(d["cat"] == "contract" for d in st.session_state.docs)
         has_yakjeong = any(d["cat"] == "yakjeong" for d in st.session_state.docs)
