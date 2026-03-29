@@ -340,8 +340,14 @@ def build_system_claude(docs, laws_db):
 
     return (
         "당신은 면세점 전문 공정거래 실무 어시스턴트 AI입니다.\n"
-        "단순한 법률 해석을 넘어, ① [외부 법령/행정규칙]과 ② [내부 사규/표준문서]라는 두 가지 관점에서 교차 검토하여 실무 결단을 내려주세요.\n"
-        "특히 관세청 고시 등 행정규칙은 법령보다 구체적인 실무 기준을 담고 있으므로, 해당 내용이 있을 경우 반드시 함께 검토하세요.\n\n"
+        "단순한 법률 해석을 넘어, 아래 3가지 관점에서 교차 검토하여 실무 결단을 내려주세요:\n"
+        "① [외부 법령] — 법률, 시행령, 시행규칙의 조문 및 관련 판례·법령해석례\n"
+        "② [행정규칙] — 관세청 고시, 공정위 고시 등 실무 세부 기준\n"
+        "③ [내부 사규/표준문서] — 당사 컴플라이언스 정책, 표준 계약서, 약정서\n\n"
+        "검토 시 유의사항:\n"
+        "- 행정규칙(고시)은 법령보다 구체적인 실무 기준을 담고 있으므로, 해당 내용이 있을 경우 반드시 함께 인용하세요.\n"
+        "- 관련 판례나 법령해석례가 있으면 해당 사건번호 또는 해석례 번호를 함께 제시하세요.\n"
+        "- 법령 조문을 인용할 때는 정확한 법령명과 조문번호를 명시하세요.\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "[기준 문서 (Ground Truth — 절대 자체를 검토하지 말 것)]\n"
@@ -373,7 +379,7 @@ def build_system_claude(docs, laws_db):
         '      "risk_level": "high | medium | low",\n'
         '      "target_clause": "검토 대상 문서 원문 인용",\n'
         '      "applicable_law": "적용 법령 또는 행정규칙 (예: 대규모유통업법 제11조, 보세판매장고시 제8조)",\n'
-        '      "law_analysis": "법령 관점에서의 위법성 평가",\n'
+        '      "law_analysis": "법령·행정규칙 관점 평가 (관련 판례·해석례가 있으면 함께 인용)",\n'
         '      "applicable_rule": "적용 사규/표준계약서 조항",\n'
         '      "rule_analysis": "사규 및 당사 기준 관점에서의 부합성 평가",\n'
         '      "recommendation": "두 관점을 종합한 최종 권고안 및 실무 가이드"\n'
@@ -563,7 +569,7 @@ def render_issues_table(issues, citation_results):
                             break
                     st.markdown(f"**⚖️ 적용 법령:** {law_ref} {verified}")
                 if issue.get("law_analysis"):
-                    st.markdown(f"**🔍 법령 관점:** {issue['law_analysis']}")
+                    st.markdown(f"**🔍 법령·행정규칙·판례 관점:** {issue['law_analysis']}")
             with col2:
                 if issue.get("applicable_rule"):
                     st.markdown(f"**🏛️ 적용 사규:** {issue['applicable_rule']}")
@@ -745,7 +751,7 @@ def generate_review_docx(json_data, detail_text, query_text):
                     p.add_run(issue["applicable_law"])
                 if issue.get("law_analysis"):
                     p = doc.add_paragraph()
-                    run_label = p.add_run("🔍 법령 관점: ")
+                    run_label = p.add_run("🔍 법령·행정규칙·판례 관점: ")
                     run_label.bold = True
                     p.add_run(issue["law_analysis"])
 
@@ -972,6 +978,23 @@ def main():
                 st.caption(f"🕐 {display_date} 기준")
             else:
                 st.caption(f"📚 적용 법령: {law_count}개 조문")
+            
+            # 법령 DB 상세 목록 (접었다 펼치기)
+            with st.expander("📚 적용 법령·행정규칙 DB 목록", expanded=False):
+                # 법령별로 그룹핑
+                law_groups = {}
+                for law in st.session_state.laws_db:
+                    short = law.get("law_short", "기타")
+                    if short not in law_groups:
+                        law_groups[short] = []
+                    title = law.get("article_title", "")
+                    no = law.get("article_no", "")
+                    law_groups[short].append(f"{no} {title}" if title else no)
+                
+                for law_short, articles in sorted(law_groups.items()):
+                    st.markdown(f"**{law_short}** ({len(articles)}개)")
+                    st.caption("  |  ".join(articles))
+                    st.markdown("")
 
         st.divider()
 
@@ -991,7 +1014,7 @@ def main():
 - 🟢 **위험 요소 미발견** — 현재 기준으로 문제없으나, 사내변호사 최종 확인 필요
 - 🟡 **수정 필요 사항 발견** — 특정 조항 수정 후 진행 가능
 - 🔴 **중대 위험 발견** — 진행 보류, 사내변호사와 즉시 협의 필요
-- 쟁점별로 ⚖️ 법령 관점 / 🏛️ 사규 관점이 교차 분석됩니다
+- 쟁점별로 ⚖️ 법령·행정규칙·판례 관점 / 🏛️ 사규 관점이 교차 분석됩니다
 - 💡 종합 실무 권고를 참고하여 협력사에 대응하세요
 
 **4. 🛡️ 보안(DLP) 안내**
@@ -1228,7 +1251,7 @@ def main():
 
             with st.chat_message("assistant", avatar="🤝"):
                 if model_choice == "claude":
-                    spinner_msg = "⚖ 법령 및 사규 기준으로 교차 검토 중..."
+                    spinner_msg = "⚖ 법령·행정규칙·사규 기준으로 교차 검토 중..."
                 else:
                     spinner_msg = "💬 당사 사내 기준을 검색 및 분석 중..."
 
