@@ -1,764 +1,309 @@
-#!/usr/bin/env python3
-# ============================================================
-#  📚 법령 DB 자동 업데이트 — update_laws.py
-#  공공데이터포털(data.go.kr) API → Supabase laws 테이블
-#
-#  ★ 일반인 즉시 사용 가능 (공무원 인증 불필요) ★
-#
-#  사전 준비:
-#    1. https://www.data.go.kr 회원가입 (일반인 OK, 즉시)
-#    2. "법제처_국가법령정보 공유서비스" 활용 신청 → 즉시 인증키 발급
-#       URL: https://www.data.go.kr/data/15000115/openapi.do
-#    3. .streamlit/secrets.toml에 추가:
-#       DATA_GO_KR_KEY = "발급받은인코딩키"
-#    4. python update_laws.py 실행
-#
-#  자동화: GitHub Actions (update-laws.yml) 으로 주 1회 자동 실행
-# ============================================================
+C:\Users\c\Downloads>python update_laws.py
 
-import os, sys, time, json, re
-import xml.etree.ElementTree as ET
-from datetime import datetime
-from urllib.parse import quote_plus
+───────────────────────────────────────────────────────
+  📚 법령 DB 자동 업데이트 (data.go.kr)
+───────────────────────────────────────────────────────
+  실행: 2026-03-30 00:38:02
+  대상: 59개 조문 / 17개 법령
 
-# ── 컬러 출력 ─────────────────────────────────────────────
-class C:
-    OK = "\033[92m"; WARN = "\033[93m"; FAIL = "\033[91m"
-    BOLD = "\033[1m"; DIM = "\033[2m"; END = "\033[0m"
+───────────────────────────────────────────────────────
+  1. 설정 확인
+───────────────────────────────────────────────────────
+  ✅ DATA_GO_KR_KEY: bc825c268d39...
+  ✅ Supabase OK
 
-def ok(msg):   print(f"  {C.OK}✅{C.END} {msg}")
-def warn(msg): print(f"  {C.WARN}⚠️{C.END}  {msg}")
-def fail(msg): print(f"  {C.FAIL}❌{C.END} {msg}")
-def info(msg): print(f"  {C.DIM}ℹ️{C.END}  {msg}")
-def header(msg): print(f"\n{C.BOLD}{'─'*55}\n  {msg}\n{'─'*55}{C.END}")
+───────────────────────────────────────────────────────
+  📖 대규모유통업법 (7개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 대규모유통업에서의 거래 공정화에 관한 법률
+  ✅ 발견: 대규모유통업에서의 거래 공정화에 관한 법률 (MST: 268287, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (58개)
+  ✅   제6조 서면의 교부 및 서류의 보존 등 — 941자
+  ✅   제6조 표준거래계약서 — 466자
+  ✅   제7조 상품대금 감액의 금지 — 265자
+  ✅   제8조 상품판매대금 등의 지급 — 571자
+  ✅   제10조 상품의 반품 금지 — 819자
+  ✅   제11조 판매촉진비용의 부담전가 금지 — 659자
+  ✅   제12조 납품업자등의 종업원 사용 금지 등 — 736자
+  ✅   제13조 배타적 거래 강요 금지 — 100자
+  ℹ️  업데이트 2건 / 변경없음 6건
 
-# ── Secrets 로드 ─────────────────────────────────────────
-def load_secret(key):
-    toml_path = os.path.join(os.getcwd(), ".streamlit", "secrets.toml")
-    if os.path.exists(toml_path):
-        try:
-            import tomllib
-        except ImportError:
-            try:
-                import tomli as tomllib
-            except ImportError:
-                tomllib = None
-        if tomllib:
-            with open(toml_path, "rb") as f:
-                secrets = tomllib.load(f)
-            if key in secrets:
-                return secrets[key]
-    return os.environ.get(key)
+───────────────────────────────────────────────────────
+  📖 대규모유통업법 시행령 (2개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 대규모유통업에서의 거래 공정화에 관한 법률 시행령
+  ✅ 발견: 대규모유통업에서의 거래 공정화에 관한 법률 시행령 (MST: 260093, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (33개)
+  ✅   제5조 서류의 보존 — 1349자
+  ✅   제7조 상품의 수령 거부ㆍ지체 — 349자
+  ℹ️  업데이트 0건 / 변경없음 2건
 
-# ── 관리 대상 법령 및 조문 ─────────────────────────────────
-# 면세점(보세판매장) MD/바이어 실무에 필요한 법령 + 핵심 조문
-TARGET_LAWS = [
-    # ━━━ 공정거래 관련 ━━━
-    {
-        "law_name": "대규모유통업에서의 거래 공정화에 관한 법률",
-        "law_short": "대규모유통업법",
-        "articles": ["제6조", "제7조", "제8조", "제10조", "제11조", "제12조", "제13조"],
-    },
-    {
-        "law_name": "대규모유통업에서의 거래 공정화에 관한 법률 시행령",
-        "law_short": "대규모유통업법 시행령",
-        "articles": ["제5조", "제7조"],
-    },
-    {
-        "law_name": "독점규제 및 공정거래에 관한 법률",
-        "law_short": "공정거래법",
-        "articles": ["제45조"],
-    },
-    {
-        "law_name": "하도급거래 공정화에 관한 법률",
-        "law_short": "하도급법",
-        "articles": ["제3조", "제4조", "제8조"],
-    },
-    # ━━━ 관세/면세점 관련 ━━━
-    {
-        "law_name": "관세법",
-        "law_short": "관세법",
-        "articles": ["제176조", "제177조", "제196조", "제197조", "제198조", "제199조"],
-    },
-    # ━━━ 소비자/표시광고 관련 ━━━
-    {
-        "law_name": "소비자기본법",
-        "law_short": "소비자기본법",
-        "articles": ["제4조", "제19조", "제20조"],
-    },
-    {
-        "law_name": "표시ㆍ광고의 공정화에 관한 법률",
-        "law_short": "표시광고법",
-        "articles": ["제3조", "제4조", "제5조"],
-    },
-    # ━━━ 식품/건강기능식품 관련 ━━━
-    {
-        "law_name": "건강기능식품에 관한 법률",
-        "law_short": "건강기능식품법",
-        "articles": ["제6조", "제18조", "제44조"],
-    },
-    {
-        "law_name": "식품위생법",
-        "law_short": "식품위생법",
-        "articles": ["제10조", "제12조", "제13조"],
-    },
-    # ━━━ 세법 관련 ━━━
-    {
-        "law_name": "부가가치세법",
-        "law_short": "부가가치세법",
-        "articles": ["제11조", "제12조", "제24조", "제26조"],
-    },
-    {
-        "law_name": "개별소비세법",
-        "law_short": "개별소비세법",
-        "articles": ["제1조", "제4조", "제18조"],
-    },
-    {
-        "law_name": "주세법",
-        "law_short": "주세법",
-        "articles": ["제1조", "제5조", "제22조"],
-    },
-    # ━━━ 상생협력 관련 ━━━
-    {
-        "law_name": "대ㆍ중소기업 상생협력 촉진에 관한 법률",
-        "law_short": "상생협력법",
-        "articles": ["제20조", "제21조", "제25조"],
-    },
-    # ━━━ 면세점 수출입/무역 관련 (신규) ━━━
-    {
-        "law_name": "대외무역법",
-        "law_short": "대외무역법",
-        "articles": ["제2조", "제11조", "제19조", "제33조"],
-        # 2: 정의, 11: 수출입승인, 19: 원산지표시, 33: 전략물자
-    },
-    {
-        "law_name": "외국환거래법",
-        "law_short": "외국환거래법",
-        "articles": ["제3조", "제8조", "제15조", "제16조"],
-        # 3: 정의, 8: 신고, 15: 자본거래 신고, 16: 지급수단 수출입
-    },
-    {
-        "law_name": "수출용 원재료에 대한 관세 등 환급에 관한 특례법",
-        "law_short": "환급특례법",
-        "articles": ["제3조", "제4조", "제10조"],
-        # 3: 환급대상, 4: 환급방법, 10: 간이정액환급
-    },
-    # ━━━ 유통산업 관련 (신규) ━━━
-    {
-        "law_name": "유통산업발전법",
-        "law_short": "유통산업발전법",
-        "articles": ["제2조", "제8조", "제12조", "제12조의2"],
-    },
-]
+───────────────────────────────────────────────────────
+  📖 공정거래법 (1개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 독점규제 및 공정거래에 관한 법률
+  ✅ 발견: 독점규제 및 공정거래에 관한 법률 (MST: 277327, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (152개)
+  ✅   제45조  — 47자
+  ✅   제45조 불공정거래행위의 금지 — 1003자
+  ℹ️  업데이트 2건 / 변경없음 0건
 
-# ── 관리 대상 행정규칙 (고시 등) ─────────────────────────────
-TARGET_ADMRULS = [
-    {
-        "admrul_name": "보세판매장 특허 및 운영에 관한 고시",
-        "law_short": "보세판매장고시",
-        "articles": ["제3조", "제4조", "제5조", "제7조", "제8조", "제10조", "제15조", "제18조", "제20조"],
-        # 3: 특허요건, 4: 특허심사, 5: 특허갱신, 7: 물품반입, 8: 판매/인도
-        # 10: 판촉사원, 15: 재고관리, 18: 행정처분, 20: 제도운영위
-    },
-]
+───────────────────────────────────────────────────────
+  📖 하도급법 (3개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 하도급거래 공정화에 관한 법률
+  ✅ 발견: 하도급거래 공정화에 관한 법률 (MST: 273643, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (69개)
+  ✅   제3조 서면의 발급 및 서류의 보존 — 2383자
+  ✅   제3조 표준하도급계약서의 제정ㆍ개정 및 사용 — 968자
+  ✅   제3조 원사업자와 수급사업자 간 협약체결 — 239자
+  ✅   제3조 부당한 특약의 금지 — 527자
+  ✅   제3조 건설하도급 입찰결과의 공개 — 344자
+  ✅   제3조 하도급대금 연동 우수기업의 선정ㆍ지원 — 213자
+  ✅   제3조 하도급대금 연동 확산 지원본부의 지정 등 — 640자
+  ✅   제4조 부당한 하도급대금의 결정 금지 — 832자
+  ✅   제8조 부당한 위탁취소의 금지 등 — 515자
+  ℹ️  업데이트 7건 / 변경없음 2건
 
-# 행정규칙 ID prefix
-ADMRUL_ID_PREFIX = {
-    "보세판매장고시": "bonded_shop_notice",
-}
+───────────────────────────────────────────────────────
+  📖 관세법 (6개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 관세법
+  ✅ 발견: 관세법 (MST: 268725, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (516개)
+  ✅   제176조 특허기간 — 251자
+  ✅   제176조 특허보세구역의 특례 — 1308자
+  ✅   제176조 보세판매장 특허심사위원회 — 310자
+  ✅   제176조 보세판매장 제도운영위원회 — 161자
+  ✅   제177조 장치기간 — 546자
+  ✅   제177조 특허보세구역 운영인의 명의대여 금지 — 89자
+  ✅   제196조  — 9자
+  ✅   제196조 보세판매장 — 516자
+  ✅   제196조 시내보세판매장의 현장 인도 특례 — 603자
+  ✅   제197조  — 10자
+  ✅   제197조 종합보세구역의 지정 등 — 305자
+  ✅   제198조 종합보세사업장의 설치ㆍ운영에 관한 신고 등 — 279자
+  ✅   제199조 종합보세구역에의 물품의 반입ㆍ반출 등 — 184자
+  ✅   제199조 종합보세구역의 판매물품에 대한 관세 등의 환급 — 189자
+  ℹ️  업데이트 13건 / 변경없음 1건
 
+───────────────────────────────────────────────────────
+  📖 소비자기본법 (3개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 소비자기본법
+  ✅ 발견: 소비자기본법 (MST: 277233, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (123개)
+  ✅   제4조  — 15자
+  ✅   제4조 소비자의 기본적 권리 — 452자
+  ✅   제19조 사업자의 책무 — 351자
+  ✅   제20조 소비자의 권익증진 관련기준의 준수 — 288자
+  ✅   제20조 소비자중심경영의 인증 — 564자
+  ✅   제20조 소비자중심경영인증기관의 지정 등 — 585자
+  ✅   제20조 소비자중심경영인증의 취소 — 442자
+  ℹ️  업데이트 6건 / 변경없음 1건
 
-# ── 행정규칙 검색 → 행정규칙ID ────────────────────────────────
-def search_admrul_id(service_key, admrul_name):
-    """data.go.kr 행정규칙 목록 API로 검색"""
-    import requests
-    
-    url = "http://apis.data.go.kr/1170000/law/admrulSearchList.do"
-    params = {
-        "serviceKey": service_key,
-        "target": "admrul",
-        "query": admrul_name,
-        "numOfRows": "10",
-        "pageNo": "1",
-    }
-    
-    info(f"행정규칙 검색: {admrul_name}")
-    try:
-        res = requests.get(url, params=params, timeout=30)
-        res.raise_for_status()
-    except Exception as e:
-        fail(f"행정규칙 검색 API 실패: {e}")
-        return None, None
-    
-    try:
-        root = ET.fromstring(res.text)
-    except ET.ParseError:
-        fail(f"XML 파싱 실패")
-        return None, None
-    
-    err = root.findtext('.//resultCode')
-    if err and err not in ("00", "0"):
-        msg = root.findtext('.//resultMsg') or ""
-        fail(f"API 오류 ({err}): {msg}")
-        return None, None
-    
-    # 행정규칙 ID 탐색 (현행 우선)
-    candidates = []
-    for item in root.iter():
-        children = list(item)
-        if len(children) < 2:
-            continue
-        
-        name_val = ""
-        serial_no = ""
-        admrul_id = ""
-        detail_link = ""
-        is_current = False
-        
-        for child in children:
-            tag = child.tag or ""
-            text = (child.text or "").strip()
-            if not text:
-                continue
-            if '행정규칙명' in tag:
-                name_val = text
-            if '행정규칙일련번호' in tag:
-                serial_no = text
-            if '행정규칙ID' in tag or tag == 'admRulId':
-                admrul_id = text
-            if '행정규칙상세링크' in tag:
-                detail_link = text
-            if '현행연혁구분' in tag and '현행' in text:
-                is_current = True
-        
-        if name_val and (serial_no or admrul_id):
-            if admrul_name in name_val or name_val in admrul_name:
-                mst = serial_no or admrul_id
-                candidates.append({
-                    "name": name_val, "mst": mst, "link": detail_link,
-                    "is_current": is_current
-                })
-    
-    if candidates:
-        current = [c for c in candidates if c["is_current"]]
-        chosen = current[0] if current else candidates[0]
-        ok(f"발견: {chosen['name']} (ID: {chosen['mst']}, 현행: {chosen['is_current']})")
-        return chosen["mst"], chosen["link"]
-    
-    warn("행정규칙ID 미발견")
-    tags = [(e.tag, (e.text or "")[:25]) for e in root.iter() if e.text and e.text.strip()]
-    info(f"응답 샘플: {tags[:15]}")
-    return None, None
+───────────────────────────────────────────────────────
+  📖 표시광고법 (3개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 표시ㆍ광고의 공정화에 관한 법률
+  ✅ 발견: 표시ㆍ광고의 공정화에 관한 법률 (MST: 268659, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (32개)
+  ✅   제3조  — 37자
+  ✅   제3조 부당한 표시ㆍ광고 행위의 금지 — 250자
+  ✅   제4조 중요정보의 고시 및 통합공고 — 982자
+  ✅   제4조  — 20자
+  ✅   제5조 표시ㆍ광고 내용의 실증 등 — 668자
+  ℹ️  업데이트 4건 / 변경없음 1건
 
+───────────────────────────────────────────────────────
+  📖 건강기능식품법 (3개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 건강기능식품에 관한 법률
+  ✅ 발견: 건강기능식품에 관한 법률 (MST: 259283, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (72개)
+  ✅   제6조 영업의 신고 등 — 1473자
+  ✅   제18조  — 19자
+  ✅   제44조 벌칙 — 512자
+  ℹ️  업데이트 0건 / 변경없음 3건
 
-def fetch_admrul_articles(service_key, admrul_id, detail_link=""):
-    """행정규칙 본문 조회 — law.go.kr DRF 사용"""
-    import requests
-    
-    oc_candidates = []
-    if detail_link:
-        import re as _re
-        oc_match = _re.search(r'OC=([^&]+)', detail_link)
-        if oc_match:
-            oc_candidates.append(oc_match.group(1))
-    oc_candidates.extend(["sapphire_5", "test"])
-    seen = set()
-    oc_candidates = [x for x in oc_candidates if not (x in seen or seen.add(x))]
-    
-    for oc in oc_candidates:
-        url = "http://www.law.go.kr/DRF/lawService.do"
-        params = {
-            "OC": oc,
-            "target": "admrul",
-            "ID": admrul_id,
-            "type": "XML",
-        }
-        try:
-            res = requests.get(url, params=params, timeout=60)
-            if res.status_code != 200:
-                info(f"  OC={oc} → HTTP {res.status_code}")
-                continue
-            root = ET.fromstring(res.text)
-            if root.tag == "Response" or root.findtext('.//msg'):
-                info(f"  OC={oc} → 인증 실패")
-                continue
-            
-            # 조문 태그 확인 (행정규칙은 다양한 구조)
-            has_articles = bool(
-                root.findall('.//조문단위') or root.findall('.//조문') or
-                root.findall('.//본문') or root.findall('.//조') or
-                root.findall('.//조문내용')
-            )
-            if has_articles:
-                ok(f"  행정규칙 조문 조회 성공 (OC={oc})")
-                return root
-            
-            # 조문 태그는 없지만 응답이 있는 경우 — 태그 구조 로그
-            all_tags = sorted(set(e.tag for e in root.iter()))
-            info(f"  OC={oc} → 조문 태그 없음. 태그: {all_tags[:20]}")
-            
-            # 본문 텍스트가 있으면 일단 반환 (extract_articles에서 처리)
-            if len(all_tags) > 3:
-                return root
-                
-        except ET.ParseError:
-            info(f"  OC={oc} → XML 파싱 실패")
-            continue
-        except Exception as e:
-            info(f"  OC={oc} → 오류: {e}")
-            continue
-    
-    fail("행정규칙 조문 조회 실패 — 모든 OC 후보 소진")
-    return None
+───────────────────────────────────────────────────────
+  📖 식품위생법 (3개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 식품위생법
+  ✅ 발견: 식품위생법 (MST: 277149, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (164개)
+  ✅   제10조  — 6자
+  ✅   제10조  — 19자
+  ✅   제12조  — 18자
+  ✅   제12조 유전자변형식품등의 표시 — 514자
+  ✅   제12조  — 21자
+  ✅   제12조  — 21자
+  ✅   제13조  — 19자
+  ℹ️  업데이트 6건 / 변경없음 1건
 
-# ── API: 법령 검색 → 법령ID + 상세링크 ─────────────────────────
-def search_law_id(service_key, law_name):
-    import requests
-    
-    url = "http://apis.data.go.kr/1170000/law/lawSearchList.do"
-    params = {
-        "serviceKey": service_key,
-        "target": "law",
-        "query": law_name,
-        "numOfRows": "20",
-        "pageNo": "1",
-    }
-    
-    info(f"검색: {law_name}")
-    try:
-        res = requests.get(url, params=params, timeout=30)
-        res.raise_for_status()
-    except Exception as e:
-        fail(f"검색 API 실패: {e}")
-        return None, None
-    
-    try:
-        root = ET.fromstring(res.text)
-    except ET.ParseError:
-        if "SERVICE_KEY" in res.text or "인증" in res.text:
-            fail("API 인증키 오류 — 인코딩 키를 확인하세요")
-        else:
-            fail(f"XML 파싱 실패 — {res.text[:200]}")
-        return None, None
-    
-    # 에러 체크
-    err = root.findtext('.//returnReasonCode') or root.findtext('.//resultCode')
-    if err and err not in ("00", "0"):
-        msg = root.findtext('.//returnAuthMsg') or root.findtext('.//resultMsg') or ""
-        fail(f"API 오류 ({err}): {msg}")
-        return None, None
-    
-    # 법령ID + 법령상세링크 탐색 (현행 법령 우선)
-    candidates = []
-    for item in root.iter():
-        children = list(item)
-        if len(children) < 2:
-            continue
-        
-        name_val = ""
-        serial_no = ""   # 법령일련번호 (MST로 사용)
-        law_id_val = ""  # 법령ID
-        detail_link = ""
-        is_current = False
-        for child in children:
-            tag = child.tag or ""
-            text = (child.text or "").strip()
-            if not text:
-                continue
-            if any(k in tag for k in ['법령명한글', '법령명', 'lawNm']):
-                name_val = text
-            if '법령일련번호' in tag:
-                serial_no = text
-            if tag == '법령ID' or tag == 'lsId':
-                law_id_val = text
-            if '법령상세링크' in tag:
-                detail_link = text
-            if '현행연혁코드' in tag and '현행' in text:
-                is_current = True
-        
-        # 이름 매칭 체크 (정확 매칭 + 부분 매칭 + 잘린 이름 대응)
-        if name_val and (
-            law_name in name_val or name_val in law_name or
-            name_val[:10] in law_name or law_name[:10] in name_val
-        ):
-            mst = serial_no or law_id_val
-            if mst:
-                candidates.append({
-                    "name": name_val, "mst": mst, "link": detail_link,
-                    "is_current": is_current
-                })
-    
-    if candidates:
-        # 현행 법령 우선 선택
-        current = [c for c in candidates if c["is_current"]]
-        chosen = current[0] if current else candidates[0]
-        ok(f"발견: {chosen['name']} (MST: {chosen['mst']}, 현행: {chosen['is_current']})")
-        return chosen["mst"], chosen["link"]
-    
-    warn("법령ID 미발견 — 태그 구조 확인 필요")
-    tags = [(e.tag, (e.text or "")[:25]) for e in root.iter() if e.text and e.text.strip()]
-    info(f"응답 샘플: {tags[:15]}")
-    return None, None
+───────────────────────────────────────────────────────
+  📖 부가가치세법 (4개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 부가가치세법
+  ✅ 발견: 부가가치세법 (MST: 276117, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (106개)
+  ✅   제11조 용역의 공급 — 170자
+  ✅   제12조 용역 공급의 특례 — 385자
+  ✅   제24조 외화 획득 재화 또는 용역의 공급 등 — 536자
+  ✅   제26조  — 6자
+  ✅   제26조 재화 또는 용역의 공급에 대한 면세 — 1606자
+  ℹ️  업데이트 2건 / 변경없음 3건
 
+───────────────────────────────────────────────────────
+  📖 개별소비세법 (3개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 개별소비세법
+  ✅ 발견: 개별소비세법 (MST: 268719, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (40개)
+  ✅   제1조 과세대상과 세율 — 4673자
+  ✅   제1조 잠정세율 — 361자
+  ✅   제4조 과세시기 — 291자
+  ✅   제18조 조건부면세 — 2343자
+  ℹ️  업데이트 2건 / 변경없음 2건
 
-# ── API: 법령 본문(조문) 조회 ────────────────────────────────
-def fetch_law_articles(service_key, law_id, detail_link=""):
-    """법령 조문 XML 조회. 
-    상세링크에서 OC를 추출하여 시도하고, 실패 시 여러 OC 후보로 폴백.
-    """
-    import requests
-    
-    # 상세링크에서 OC 추출
-    oc_candidates = []
-    if detail_link:
-        import re as _re
-        oc_match = _re.search(r'OC=([^&]+)', detail_link)
-        if oc_match:
-            oc_candidates.append(oc_match.group(1))
-    
-    # 폴백 OC 후보들 (가이드 문서 샘플에서 발견된 값들)
-    oc_candidates.extend(["sapphire_5", "test", ""])
-    # 중복 제거 + 순서 유지
-    seen = set()
-    oc_candidates = [x for x in oc_candidates if not (x in seen or seen.add(x))]
-    
-    for oc in oc_candidates:
-        url = "http://www.law.go.kr/DRF/lawService.do"
-        params = {
-            "OC": oc,
-            "target": "law",
-            "MST": law_id,
-            "type": "XML",
-        }
-        
-        try:
-            res = requests.get(url, params=params, timeout=60)
-            if res.status_code != 200:
-                continue
-            
-            root = ET.fromstring(res.text)
-            
-            # 인증 실패 응답 체크 (Response > msg 구조)
-            if root.tag == "Response" or root.findtext('.//msg'):
-                info(f"  OC={oc} → 인증 실패, 다음 시도...")
-                continue
-            
-            # 조문 태그가 있는지 확인
-            has_articles = bool(
-                root.findall('.//조문단위') or 
-                root.findall('.//조문') or
-                root.findall('.//Article')
-            )
-            if has_articles:
-                ok(f"  조문 조회 성공 (OC={oc})")
-                return root
-            else:
-                # 조문은 없지만 법령 정보는 있을 수 있음
-                all_tags = [e.tag for e in root.iter()]
-                if len(all_tags) > 5:
-                    info(f"  OC={oc} → 응답 있으나 조문 태그 없음: {all_tags[:10]}")
-                continue
-                
-        except ET.ParseError:
-            continue
-        except Exception as e:
-            info(f"  OC={oc} → 오류: {e}")
-            continue
-    
-    fail("모든 OC 후보 실패 — open.law.go.kr 승인 대기 필요")
-    return None
+───────────────────────────────────────────────────────
+  📖 주세법 (3개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 주세법
+  ✅ 발견: 주세법 (MST: 267559, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (34개)
+  ✅   제1조  — 6자
+  ✅   제1조 목적 — 99자
+  ✅   제5조 주류의 종류 — 223자
+  ✅   제22조 납세보증주류의 주세 충당 — 124자
+  ℹ️  업데이트 2건 / 변경없음 2건
 
+───────────────────────────────────────────────────────
+  📖 상생협력법 (3개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 대ㆍ중소기업 상생협력 촉진에 관한 법률
+  ✅ 발견: 대ㆍ중소기업 상생협력 촉진에 관한 법률 (MST: 277113, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (80개)
+  ✅   제20조 대ㆍ중소기업ㆍ농어업협력재단의 설립 — 807자
+  ✅   제20조 동반성장위원회의 설치 등 — 588자
+  ✅   제20조 동반성장 주간 — 108자
+  ✅   제20조 적합업종 합의 신청 등 — 693자
+  ✅   제20조 대ㆍ중소기업상생협력기금의 설치 등 — 552자
+  ✅   제21조  — 31자
+  ✅   제21조 약정서의 발급 — 998자
+  ✅   제21조 비밀유지계약의 체결 — 414자
+  ✅   제21조 표준약정서의 제정ㆍ개정 등 — 550자
+  ✅   제25조 준수사항 — 1934자
+  ✅   제25조 위탁기업의 입증책임 — 100자
+  ℹ️  업데이트 11건 / 변경없음 0건
 
-# ── 조문 추출 ─────────────────────────────────────────────
-def extract_articles(law_root, target_articles):
-    results = []
-    
-    # 조문 태그 탐색 (다양한 XML 구조 대응)
-    article_elems = []
-    for tag in ['조문단위', '조문', 'Article', 'Jo', '조']:
-        article_elems = law_root.findall(f'.//{tag}')
-        if article_elems:
-            info(f"  조문 태그: <{tag}> ({len(article_elems)}개)")
-            break
-    
-    # 2차 탐색: 자식 중 '조문번호'를 가진 요소
-    if not article_elems:
-        for elem in law_root.iter():
-            for c in elem:
-                if '조문번호' in c.tag or '조번호' in c.tag:
-                    article_elems.append(elem)
-                    break
-        if article_elems:
-            info(f"  2차 탐색으로 {len(article_elems)}개 조문 발견")
-    
-    # 3차 탐색: 조문내용을 직접 가진 요소 (독점규제법 등 대형 법령)
-    if not article_elems:
-        for elem in law_root.iter():
-            if elem.find('조문내용') is not None or elem.find('조내용') is not None:
-                article_elems.append(elem)
-        if article_elems:
-            info(f"  3차 탐색(조문내용 기반) {len(article_elems)}개 발견")
-    
-    if not article_elems:
-        tags = sorted(set(e.tag for e in law_root.iter()))
-        warn(f"조문 태그 미발견. 전체 태그({len(tags)}개): {tags[:25]}")
-        # 대상 조문 번호와 일치하는 텍스트가 있는지 힌트
-        for t_art in target_articles:
-            for elem in law_root.iter():
-                if elem.text and t_art in (elem.text or ""):
-                    info(f"  힌트: '{t_art}' 텍스트 발견 — 부모 태그: <{elem.tag}>")
-                    break
-        return results
-    
-    for art in article_elems:
-        # 번호
-        raw_no = ""
-        for t in ['조문번호', '조번호', '조문키']:
-            e = art.find(t)
-            if e is not None and e.text:
-                raw_no = e.text.strip()
-                break
-        if not raw_no:
-            continue
-        
-        # 정규화
-        no = raw_no
-        if not no.startswith("제"):
-            no = f"제{no}"
-        if not no.endswith("조") and not re.search(r'조의\d+$', no):
-            no = f"{no}조"
-        
-        if no not in target_articles:
-            continue
-        
-        # 제목
-        title = ""
-        for t in ['조문제목', '조제목']:
-            e = art.find(t)
-            if e is not None and e.text:
-                title = e.text.strip()
-                break
-        
-        # 내용
-        parts = []
-        for t in ['조문내용', '조내용']:
-            e = art.find(t)
-            if e is not None and e.text:
-                parts.append(e.text.strip())
-        
-        for hang in art.findall('.//항'):
-            ce = hang.find('항내용')
-            ce = ce if ce is not None else hang
-            if ce is not None and ce.text:
-                parts.append(ce.text.strip())
-            for ho in hang.findall('.//호'):
-                he = ho.find('호내용')
-                he = he if he is not None else ho
-                if he is not None and he.text:
-                    parts.append("  " + he.text.strip())
-                for mok in ho.findall('.//목'):
-                    me = mok.find('목내용')
-                    me = me if me is not None else mok
-                    if me is not None and me.text:
-                        parts.append("    " + me.text.strip())
-        
-        content = "\n".join(parts)
-        if content:
-            results.append({"article_no": no, "article_title": title, "content": content})
-            ok(f"  {no} {title} — {len(content)}자")
-        else:
-            warn(f"  {no} — 내용 비어있음")
-    
-    return results
+───────────────────────────────────────────────────────
+  📖 대외무역법 (4개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 대외무역법
+  ✅ 발견: 대외무역법 (MST: 276491, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (88개)
+  ✅   제2조 정의 — 672자
+  ✅   제11조 수출입의 제한 등 — 1376자
+  ✅   제19조  — 13자
+  ✅   제19조 전략물자 — 224자
+  ✅   제19조 수출허가 — 610자
+  ✅   제19조 상황허가 — 960자
+  ✅   제19조 경유 또는 환적허가 — 176자
+  ✅   제19조 중개허가 — 206자
+  ✅   제19조 허가 심사 등 — 731자
+  ✅   제19조 허가 취소 — 340자
+  ✅   제33조  — 29자
+  ✅   제33조 수출입 물품등의 원산지의 표시 — 1148자
+  ✅   제33조 원산지의 표시 위반에 대한 시정명령 등 — 593자
+  ℹ️  업데이트 11건 / 변경없음 2건
 
+───────────────────────────────────────────────────────
+  📖 외국환거래법 (4개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 외국환거래법
+  ✅ 발견: 외국환거래법 (MST: 276137, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (43개)
+  ✅   제3조 정의 — 2774자
+  ✅   제8조  — 30자
+  ✅   제8조 외국환업무의 등록 등 — 1386자
+  ✅   제15조  — 25자
+  ✅   제15조 지급절차 등 — 376자
+  ✅   제16조 지급 또는 수령의 방법의 신고 — 535자
+  ℹ️  업데이트 4건 / 변경없음 2건
 
-# ── Supabase 저장 ─────────────────────────────────────────
-def _generate_law_id(law_short, article_no):
-    """기존 DB의 ID 패턴에 맞춰 ID 생성.
-    예: 대규모유통업법 + 제6조 → retail_act_06
-    """
-    prefix_map = {
-        "대규모유통업법": "retail_act",
-        "대규모유통업법 시행령": "retail_decree",
-        "공정거래법": "fair_trade_act",
-        "하도급법": "subcontract_act",
-        "관세법": "customs_act",
-        "소비자기본법": "consumer_act",
-        "표시광고법": "ads_act",
-        "건강기능식품법": "health_food_act",
-        "식품위생법": "food_safety_act",
-        "부가가치세법": "vat_act",
-        "개별소비세법": "excise_act",
-        "주세법": "liquor_tax_act",
-        "상생협력법": "coexist_act",
-        "대외무역법": "trade_act",
-        "외국환거래법": "forex_act",
-        "환급특례법": "refund_act",
-        "유통산업발전법": "distribution_act",
-        "보세판매장고시": "bonded_shop_notice",
-    }
-    prefix = prefix_map.get(law_short, law_short.replace(" ", "_"))
-    # 제6조 → 06, 제45조 → 45
-    num = re.sub(r'[^0-9]', '', article_no)
-    if num and len(num) == 1:
-        num = "0" + num
-    return f"{prefix}_{num}"
+───────────────────────────────────────────────────────
+  📖 환급특례법 (3개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 수출용 원재료에 대한 관세 등 환급에 관한 특례법
+  ✅ 발견: 수출용 원재료에 대한 관세 등 환급에 관한 특례법 (MST: 276131, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (29개)
+  ✅   제3조 환급대상 원재료 — 487자
+  ✅   제4조 환급대상 수출등 — 344자
+  ✅   제10조 환급금의 산출 등 — 911자
+  ✅   제10조 소요량 사전심사의 신청 등 — 822자
+  ℹ️  업데이트 2건 / 변경없음 2건
 
-def update_supabase(sb, law_short, law_name, articles):
-    updated = unchanged = 0
-    for art in articles:
-        try:
-            # 기존 데이터 조회
-            existing = sb.table("laws").select("id, content").eq("law_short", law_short).eq("article_no", art["article_no"]).execute()
-            
-            if existing.data:
-                # 기존 레코드 있음 → 내용 비교 후 변경 시만 업데이트
-                if existing.data[0].get("content", "").strip() == art["content"].strip():
-                    unchanged += 1
-                    continue
-                # 변경됨 → 기존 ID로 업데이트
-                sb.table("laws").update({
-                    "content": art["content"],
-                    "article_title": art["article_title"],
-                    "last_updated": datetime.now().isoformat(),
-                }).eq("id", existing.data[0]["id"]).execute()
-                updated += 1
-            else:
-                # 새 레코드 → id 생성 + 전체 컬럼 insert
-                new_id = _generate_law_id(law_short, art["article_no"])
-                sb.table("laws").insert({
-                    "id": new_id,
-                    "law_name": law_name,
-                    "law_short": law_short,
-                    "article_no": art["article_no"],
-                    "article_title": art["article_title"],
-                    "content": art["content"],
-                    "last_updated": datetime.now().isoformat(),
-                }).execute()
-                updated += 1
-                
-        except Exception as e:
-            fail(f"  DB 오류 ({law_short} {art['article_no']}): {e}")
-    return updated, unchanged
+───────────────────────────────────────────────────────
+  📖 유통산업발전법 (4개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  검색: 유통산업발전법
+  ✅ 발견: 유통산업발전법 (MST: 283979, 현행: True)
+  ✅   조문 조회 성공 (OC=sapphire_5)
+  ℹ️    조문 태그: <조문단위> (80개)
+  ✅   제2조 정의 — 2623자
+  ✅   제8조  — 11자
+  ✅   제8조 대규모점포등의 개설등록 및 변경등록 — 1048자
+  ✅   제8조 지역협력계획서의 내용 및 이행실적 평가ㆍ점검 — 173자
+  ✅   제8조 대규모점포등의 개설계획 예고 — 179자
+  ✅   제12조 대규모점포등개설자의 업무 등 — 1170자
+  ✅   제12조 대규모점포등에 대한 영업시간의 제한 등 — 635자
+  ✅   제12조 대규모점포등의 관리비 등 — 692자
+  ✅   제12조 회계서류의 작성ㆍ보관 — 531자
+  ✅   제12조 대규모점포등관리자의 회계감사 — 533자
+  ✅   제12조 관리규정 — 302자
+  ⚠️  미발견: 제12조의2
+  ℹ️  업데이트 10건 / 변경없음 1건
 
+───────────────────────────────────────────────────────
+  📜 보세판매장고시 (9개 조문)
+───────────────────────────────────────────────────────
+  ℹ️  행정규칙 검색: 보세판매장 특허 및 운영에 관한 고시
+  ✅ 발견: 보세판매장 특허 및 운영에 관한 고시 (ID: 2100000263374, 현행: True)
+  ✅   행정규칙 조문 조회 성공 (OC=sapphire_5)
+  ℹ️    행정규칙 모드: <조문내용> 66개에서 조문 추출
+  ✅   제3조 특허의 요건 — 280자
+  ✅   제4조 시설요건 — 1101자
+  ✅   제5조 특허신청의 공고 — 873자
+  ✅   제7조 특허의 갱신 — 380자
+  ✅   제8조 검토의견서 제출 — 461자
+  ✅   제10조 특허 및 특허갱신 여부 결정 등 — 994자
+  ✅   제15조 특허심사위원회 구성 — 128자
+  ✅   제18조 특허심사위원회 진행 — 296자
+  ✅   제20조 신분 보장 — 302자
+  ℹ️  업데이트 9건 / 변경없음 0건
 
-# ── 메인 ─────────────────────────────────────────────────
-def main():
-    header("📚 법령 DB 자동 업데이트 (data.go.kr)")
-    print(f"  실행: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"  대상: {sum(len(l['articles']) for l in TARGET_LAWS)}개 조문 / {len(TARGET_LAWS)}개 법령")
-    
-    header("1. 설정 확인")
-    
-    key = load_secret("DATA_GO_KR_KEY")
-    if not key:
-        fail("DATA_GO_KR_KEY 없음")
-        print(f"\n  {C.BOLD}설정 방법:{C.END}")
-        print(f"  1. https://www.data.go.kr 회원가입 (일반인 OK)")
-        print(f"  2. 아래 URL에서 '활용신청' 클릭 → 즉시 키 발급")
-        print(f"     https://www.data.go.kr/data/15000115/openapi.do")
-        print(f"  3. 마이페이지 → 인증키 발급현황 → '인코딩' 키 복사")
-        print(f"  4. .streamlit/secrets.toml 에 추가:")
-        print(f'     DATA_GO_KR_KEY = "복사한인코딩키"')
-        sys.exit(1)
-    ok(f"DATA_GO_KR_KEY: {key[:12]}...")
-    
-    sb_url = load_secret("SUPABASE_URL")
-    sb_key = load_secret("SUPABASE_KEY")
-    if not sb_url or not sb_key:
-        fail("SUPABASE 설정 없음")
-        sys.exit(1)
-    
-    try:
-        from supabase import create_client
-        sb = create_client(sb_url, sb_key)
-        ok("Supabase OK")
-    except Exception as e:
-        fail(f"Supabase 실패: {e}")
-        sys.exit(1)
-    
-    import requests
-    
-    total_up = total_unch = total_fail = 0
-    
-    for law in TARGET_LAWS:
-        header(f"📖 {law['law_short']} ({len(law['articles'])}개 조문)")
-        
-        law_id, detail_link = search_law_id(key, law["law_name"])
-        if not law_id:
-            total_fail += len(law["articles"])
-            continue
-        time.sleep(0.5)
-        
-        root = fetch_law_articles(key, law_id, detail_link)
-        if root is None:
-            total_fail += len(law["articles"])
-            continue
-        
-        arts = extract_articles(root, law["articles"])
-        if not arts:
-            warn("추출 실패")
-            total_fail += len(law["articles"])
-            continue
-        
-        missing = set(law["articles"]) - {a["article_no"] for a in arts}
-        if missing:
-            warn(f"미발견: {', '.join(sorted(missing))}")
-            total_fail += len(missing)
-        
-        u, uc = update_supabase(sb, law["law_short"], law["law_name"], arts)
-        total_up += u
-        total_unch += uc
-        info(f"업데이트 {u}건 / 변경없음 {uc}건")
-        time.sleep(1)
-    
-    # ── 행정규칙 처리 ──
-    for admrul in TARGET_ADMRULS:
-        header(f"📜 {admrul['law_short']} ({len(admrul['articles'])}개 조문)")
-        
-        admrul_id, detail_link = search_admrul_id(key, admrul["admrul_name"])
-        if not admrul_id:
-            total_fail += len(admrul["articles"])
-            continue
-        time.sleep(0.5)
-        
-        root = fetch_admrul_articles(key, admrul_id, detail_link)
-        if root is None:
-            total_fail += len(admrul["articles"])
-            continue
-        
-        arts = extract_articles(root, admrul["articles"])
-        if not arts:
-            warn("추출 실패")
-            total_fail += len(admrul["articles"])
-            continue
-        
-        missing = set(admrul["articles"]) - {a["article_no"] for a in arts}
-        if missing:
-            warn(f"미발견: {', '.join(sorted(missing))}")
-            total_fail += len(missing)
-        
-        u, uc = update_supabase(sb, admrul["law_short"], admrul["admrul_name"], arts)
-        total_up += u
-        total_unch += uc
-        info(f"업데이트 {u}건 / 변경없음 {uc}건")
-        time.sleep(1)
-    
-    header("📊 최종 결과")
-    print(f"  {C.OK}✅ 업데이트: {total_up}건{C.END}")
-    print(f"  {C.DIM}⏸️  변경없음: {total_unch}건{C.END}")
-    print(f"  {C.FAIL}❌ 실패:     {total_fail}건{C.END}")
-    print(f"  {'─'*30}")
-    
-    if total_fail == 0:
-        print(f"  {C.OK}{C.BOLD}🎉 모든 조문 최신 상태!{C.END}")
-    elif total_up > 0:
-        print(f"  {C.WARN}{C.BOLD}⚠️ 일부 실패, {total_up}건 업데이트 완료{C.END}")
-    else:
-        print(f"  {C.FAIL}{C.BOLD}⛔ 실패 — API키/네트워크 확인{C.END}")
-    
-    print()
-    sys.exit(1 if total_fail > 0 and total_up == 0 else 0)
-
-if __name__ == "__main__":
-    main()
+───────────────────────────────────────────────────────
+  📊 최종 결과
+───────────────────────────────────────────────────────
+  ✅ 업데이트: 93건
+  ⏸️  변경없음: 31건
+  ❌ 실패:     1건
+  ──────────────────────────────
+  ⚠️ 일부 실패, 93건 업데이트 완료
