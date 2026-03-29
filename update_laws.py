@@ -51,7 +51,9 @@ def load_secret(key):
     return os.environ.get(key)
 
 # ── 관리 대상 법령 및 조문 ─────────────────────────────────
+# 면세점(보세판매장) MD/바이어 실무에 필요한 법령 + 핵심 조문
 TARGET_LAWS = [
+    # ━━━ 공정거래 관련 ━━━
     {
         "law_name": "대규모유통업에서의 거래 공정화에 관한 법률",
         "law_short": "대규모유통업법",
@@ -71,6 +73,56 @@ TARGET_LAWS = [
         "law_name": "하도급거래 공정화에 관한 법률",
         "law_short": "하도급법",
         "articles": ["제3조", "제4조", "제8조"],
+    },
+    # ━━━ 관세/면세점 관련 ━━━
+    {
+        "law_name": "관세법",
+        "law_short": "관세법",
+        "articles": ["제176조", "제177조", "제196조", "제197조", "제198조", "제199조"],
+    },
+    # ━━━ 소비자/표시광고 관련 ━━━
+    {
+        "law_name": "소비자기본법",
+        "law_short": "소비자기본법",
+        "articles": ["제4조", "제19조", "제20조"],
+    },
+    {
+        "law_name": "표시·광고의 공정화에 관한 법률",
+        "law_short": "표시광고법",
+        "articles": ["제3조", "제4조", "제5조"],
+    },
+    # ━━━ 식품/건강기능식품 관련 ━━━
+    {
+        "law_name": "건강기능식품에 관한 법률",
+        "law_short": "건강기능식품법",
+        "articles": ["제6조", "제18조", "제44조"],
+    },
+    {
+        "law_name": "식품위생법",
+        "law_short": "식품위생법",
+        "articles": ["제10조", "제12조", "제13조"],
+    },
+    # ━━━ 세법 관련 ━━━
+    {
+        "law_name": "부가가치세법",
+        "law_short": "부가가치세법",
+        "articles": ["제11조", "제12조", "제24조", "제26조"],
+    },
+    {
+        "law_name": "개별소비세법",
+        "law_short": "개별소비세법",
+        "articles": ["제1조", "제4조", "제18조"],
+    },
+    {
+        "law_name": "주세법",
+        "law_short": "주세법",
+        "articles": ["제1조", "제5조", "제22조"],
+    },
+    # ━━━ 상생협력 관련 ━━━
+    {
+        "law_name": "대·중소기업 상생협력 촉진에 관한 법률",
+        "law_short": "상생협력법",
+        "articles": ["제20조", "제21조", "제25조"],
     },
 ]
 
@@ -342,6 +394,15 @@ def _generate_law_id(law_short, article_no):
         "대규모유통업법 시행령": "retail_decree",
         "공정거래법": "fair_trade_act",
         "하도급법": "subcontract_act",
+        "관세법": "customs_act",
+        "소비자기본법": "consumer_act",
+        "표시광고법": "ads_act",
+        "건강기능식품법": "health_food_act",
+        "식품위생법": "food_safety_act",
+        "부가가치세법": "vat_act",
+        "개별소비세법": "excise_act",
+        "주세법": "liquor_tax_act",
+        "상생협력법": "coexist_act",
     }
     prefix = prefix_map.get(law_short, law_short.replace(" ", "_"))
     # 제6조 → 06, 제45조 → 45
