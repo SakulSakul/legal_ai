@@ -138,7 +138,7 @@ TARGET_LAWS = [
         # 3: 정의, 8: 신고, 15: 자본거래 신고, 16: 지급수단 수출입
     },
     {
-        "law_name": "수출용원재료에 대한 관세 등 환급에 관한 특례법",
+        "law_name": "수출용 원재료에 대한 관세 등 환급에 관한 특례법",
         "law_short": "환급특례법",
         "articles": ["제3조", "제4조", "제10조"],
         # 3: 환급대상, 4: 환급방법, 10: 간이정액환급
@@ -148,9 +148,168 @@ TARGET_LAWS = [
         "law_name": "유통산업발전법",
         "law_short": "유통산업발전법",
         "articles": ["제2조", "제8조", "제12조", "제12조의2"],
-        # 2: 정의, 8: 대규모점포 개설등록, 12: 영업시간 제한, 12의2: 의무휴업일
     },
 ]
+
+# ── 관리 대상 행정규칙 (고시 등) ─────────────────────────────
+TARGET_ADMRULS = [
+    {
+        "admrul_name": "보세판매장 특허 및 운영에 관한 고시",
+        "law_short": "보세판매장고시",
+        "articles": ["제3조", "제4조", "제5조", "제7조", "제8조", "제10조", "제15조", "제18조", "제20조"],
+        # 3: 특허요건, 4: 특허심사, 5: 특허갱신, 7: 물품반입, 8: 판매/인도
+        # 10: 판촉사원, 15: 재고관리, 18: 행정처분, 20: 제도운영위
+    },
+]
+
+# 행정규칙 ID prefix
+ADMRUL_ID_PREFIX = {
+    "보세판매장고시": "bonded_shop_notice",
+}
+
+
+# ── 행정규칙 검색 → 행정규칙ID ────────────────────────────────
+def search_admrul_id(service_key, admrul_name):
+    """data.go.kr 행정규칙 목록 API로 검색"""
+    import requests
+    
+    url = "http://apis.data.go.kr/1170000/law/admrulSearchList.do"
+    params = {
+        "serviceKey": service_key,
+        "target": "admrul",
+        "query": admrul_name,
+        "numOfRows": "10",
+        "pageNo": "1",
+    }
+    
+    info(f"행정규칙 검색: {admrul_name}")
+    try:
+        res = requests.get(url, params=params, timeout=30)
+        res.raise_for_status()
+    except Exception as e:
+        fail(f"행정규칙 검색 API 실패: {e}")
+        return None, None
+    
+    try:
+        root = ET.fromstring(res.text)
+    except ET.ParseError:
+        fail(f"XML 파싱 실패")
+        return None, None
+    
+    err = root.findtext('.//resultCode')
+    if err and err not in ("00", "0"):
+        msg = root.findtext('.//resultMsg') or ""
+        fail(f"API 오류 ({err}): {msg}")
+        return None, None
+    
+    # 행정규칙 ID 탐색 (현행 우선)
+    candidates = []
+    for item in root.iter():
+        children = list(item)
+        if len(children) < 2:
+            continue
+        
+        name_val = ""
+        serial_no = ""
+        admrul_id = ""
+        detail_link = ""
+        is_current = False
+        
+        for child in children:
+            tag = child.tag or ""
+            text = (child.text or "").strip()
+            if not text:
+                continue
+            if '행정규칙명' in tag:
+                name_val = text
+            if '행정규칙일련번호' in tag:
+                serial_no = text
+            if '행정규칙ID' in tag or tag == 'admRulId':
+                admrul_id = text
+            if '행정규칙상세링크' in tag:
+                detail_link = text
+            if '현행연혁구분' in tag and '현행' in text:
+                is_current = True
+        
+        if name_val and (serial_no or admrul_id):
+            if admrul_name in name_val or name_val in admrul_name:
+                mst = serial_no or admrul_id
+                candidates.append({
+                    "name": name_val, "mst": mst, "link": detail_link,
+                    "is_current": is_current
+                })
+    
+    if candidates:
+        current = [c for c in candidates if c["is_current"]]
+        chosen = current[0] if current else candidates[0]
+        ok(f"발견: {chosen['name']} (ID: {chosen['mst']}, 현행: {chosen['is_current']})")
+        return chosen["mst"], chosen["link"]
+    
+    warn("행정규칙ID 미발견")
+    tags = [(e.tag, (e.text or "")[:25]) for e in root.iter() if e.text and e.text.strip()]
+    info(f"응답 샘플: {tags[:15]}")
+    return None, None
+
+
+def fetch_admrul_articles(service_key, admrul_id, detail_link=""):
+    """행정규칙 본문 조회 — law.go.kr DRF 사용"""
+    import requests
+    
+    oc_candidates = []
+    if detail_link:
+        import re as _re
+        oc_match = _re.search(r'OC=([^&]+)', detail_link)
+        if oc_match:
+            oc_candidates.append(oc_match.group(1))
+    oc_candidates.extend(["sapphire_5", "test"])
+    seen = set()
+    oc_candidates = [x for x in oc_candidates if not (x in seen or seen.add(x))]
+    
+    for oc in oc_candidates:
+        url = "http://www.law.go.kr/DRF/lawService.do"
+        params = {
+            "OC": oc,
+            "target": "admrul",
+            "ID": admrul_id,
+            "type": "XML",
+        }
+        try:
+            res = requests.get(url, params=params, timeout=60)
+            if res.status_code != 200:
+                info(f"  OC={oc} → HTTP {res.status_code}")
+                continue
+            root = ET.fromstring(res.text)
+            if root.tag == "Response" or root.findtext('.//msg'):
+                info(f"  OC={oc} → 인증 실패")
+                continue
+            
+            # 조문 태그 확인 (행정규칙은 다양한 구조)
+            has_articles = bool(
+                root.findall('.//조문단위') or root.findall('.//조문') or
+                root.findall('.//본문') or root.findall('.//조') or
+                root.findall('.//조문내용')
+            )
+            if has_articles:
+                ok(f"  행정규칙 조문 조회 성공 (OC={oc})")
+                return root
+            
+            # 조문 태그는 없지만 응답이 있는 경우 — 태그 구조 로그
+            all_tags = sorted(set(e.tag for e in root.iter()))
+            info(f"  OC={oc} → 조문 태그 없음. 태그: {all_tags[:20]}")
+            
+            # 본문 텍스트가 있으면 일단 반환 (extract_articles에서 처리)
+            if len(all_tags) > 3:
+                return root
+                
+        except ET.ParseError:
+            info(f"  OC={oc} → XML 파싱 실패")
+            continue
+        except Exception as e:
+            info(f"  OC={oc} → 오류: {e}")
+            continue
+    
+    fail("행정규칙 조문 조회 실패 — 모든 OC 후보 소진")
+    return None
 
 # ── API: 법령 검색 → 법령ID + 상세링크 ─────────────────────────
 def search_law_id(service_key, law_name):
@@ -217,8 +376,11 @@ def search_law_id(service_key, law_name):
             if '현행연혁코드' in tag and '현행' in text:
                 is_current = True
         
-        # 이름 매칭 체크
-        if name_val and (law_name in name_val or name_val in law_name):
+        # 이름 매칭 체크 (정확 매칭 + 부분 매칭 + 잘린 이름 대응)
+        if name_val and (
+            law_name in name_val or name_val in law_name or
+            name_val[:10] in law_name or law_name[:10] in name_val
+        ):
             mst = serial_no or law_id_val
             if mst:
                 candidates.append({
@@ -433,6 +595,7 @@ def _generate_law_id(law_short, article_no):
         "외국환거래법": "forex_act",
         "환급특례법": "refund_act",
         "유통산업발전법": "distribution_act",
+        "보세판매장고시": "bonded_shop_notice",
     }
     prefix = prefix_map.get(law_short, law_short.replace(" ", "_"))
     # 제6조 → 06, 제45조 → 45
@@ -544,6 +707,38 @@ def main():
             total_fail += len(missing)
         
         u, uc = update_supabase(sb, law["law_short"], law["law_name"], arts)
+        total_up += u
+        total_unch += uc
+        info(f"업데이트 {u}건 / 변경없음 {uc}건")
+        time.sleep(1)
+    
+    # ── 행정규칙 처리 ──
+    for admrul in TARGET_ADMRULS:
+        header(f"📜 {admrul['law_short']} ({len(admrul['articles'])}개 조문)")
+        
+        admrul_id, detail_link = search_admrul_id(key, admrul["admrul_name"])
+        if not admrul_id:
+            total_fail += len(admrul["articles"])
+            continue
+        time.sleep(0.5)
+        
+        root = fetch_admrul_articles(key, admrul_id, detail_link)
+        if root is None:
+            total_fail += len(admrul["articles"])
+            continue
+        
+        arts = extract_articles(root, admrul["articles"])
+        if not arts:
+            warn("추출 실패")
+            total_fail += len(admrul["articles"])
+            continue
+        
+        missing = set(admrul["articles"]) - {a["article_no"] for a in arts}
+        if missing:
+            warn(f"미발견: {', '.join(sorted(missing))}")
+            total_fail += len(missing)
+        
+        u, uc = update_supabase(sb, admrul["law_short"], admrul["admrul_name"], arts)
         total_up += u
         total_unch += uc
         info(f"업데이트 {u}건 / 변경없음 {uc}건")
