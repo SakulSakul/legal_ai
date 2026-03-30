@@ -2,7 +2,7 @@
 #  🤝 공정거래 실무 어시스턴트 v2.1 — 면세점 MD/바이어용
 #  이중 모델: Gemini(문서/검색) + Claude(법률검토) + 고가용성 우회
 #  보안: 자동 DLP(개인/기업정보) + 협력사명 지정 마스킹 탑재
-#  디자인: 신세계그룹 뉴스룸 테마 적용 (Pretendard, Corporate Red)
+#  디자인: 신세계그룹 뉴스룸 테마 적용 (Noto Sans KR, #E02B20)
 #
 #  v2.1 변경사항:
 #  - Claude 모델 버전 설정값 외부화 (Secrets 지원)
@@ -366,6 +366,22 @@ def build_system_claude(docs, laws_db):
         "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "[답변 형식 — 엄격 준수]\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+
+        "**[중요: 검토 범위 포괄성 원칙]**\n"
+        "심층 검토 시, 관련될 수 있는 모든 법적 리스크를 빠짐없이 제시하세요.\n"
+        "비법률가(MD/바이어)는 AI가 지적하지 않은 사항을 '문제없음'으로 오인합니다.\n"
+        "따라서 아래 체크리스트를 반드시 전수 점검하고, 해당되는 모든 쟁점을 issues 배열에 포함하세요:\n"
+        "- 대규모유통업법상 금지행위 (서면교부, 감액, 반품, 판촉비, 종업원사용, 배타적거래)\n"
+        "- 하도급법상 금지행위 (부당단가결정, 위탁취소, 부당특약)\n"
+        "- 관세법/보세판매장고시 위반 여부 (특허요건, 물품반입, 판매인도)\n"
+        "- 대외무역법/외국환거래법 (원산지표시, 외화결제)\n"
+        "- 세법상 면세 요건 충족 여부\n"
+        "- 소비자기본법/표시광고법/식품관련법 위반 여부\n"
+        "- 상생협력법 준수사항\n"
+        "- 유통산업발전법 (영업시간, 의무휴업 등)\n"
+        "단, 토큰 효율을 위해: high/medium 리스크는 상세히, low 리스크는 1~2문장으로 간결하게 기술하세요.\n"
+        "해당 없는 항목은 생략하되, 경계선상(gray area) 이슈는 low로라도 반드시 포함하세요.\n\n"
+
         "반드시 아래 형식의 ```json``` 블록 하나와 상세 설명 텍스트를 출력하세요.\n\n"
 
         "**[PART 1: JSON 블록]**\n"
@@ -825,89 +841,109 @@ def main():
 
     st.markdown("""
     <style>
-    /* 1. 최고급 웹 폰트 'Pretendard' 불러오기 */
-    @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css");
+    /* ━━━ 신세계그룹 뉴스룸 디자인 시스템 ━━━
+       배경: #FFFFFF (화이트)
+       텍스트: #000000 (진한 검정)
+       액센트: #E02B20 (밝은 빨강)
+       폰트: Noto Sans KR
+       제목: 데스크탑 40px / 모바일 8.57vw
+       본문: 데스크탑 18px / 모바일 4.29vw
+       심플하고 화려함 배제, 뉴스 웹사이트 스타일
+    */
 
-    /* 2. 전체 폰트 및 기본 타이포그래피 (신세계 뉴스룸 스타일의 정갈한 자간) */
+    /* 1. 웹 폰트: Noto Sans KR (뉴스룸 공식 폰트) */
+    @import url("https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap");
+
+    /* 2. 전체 타이포그래피 */
     html, body, [class*="css"] { 
-        font-family: 'Pretendard Variable', Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif !important; 
+        font-family: 'Noto Sans KR', -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif !important; 
         letter-spacing: -0.02em; 
-        color: #222222;
+        color: #000000;
+        font-size: 16px;
+        line-height: 1.7;
     }
 
-    /* 앱 배경: 아주 연한 라이트 그레이로 깔끔하게 */
-    .stApp { background-color: #F8F9FA !important; }
+    /* 앱 배경: 화이트 (뉴스룸 동일) */
+    .stApp { background-color: #FFFFFF !important; }
 
-    /* 3. 채팅 메시지 블록 (기업형 UI에 맞게 굴곡 축소 및 깔끔한 보더) */
+    /* 3. 채팅 메시지 블록 */
     .stChatMessage { 
-        border-radius: 12px; 
-        padding: 24px 32px; 
-        box-shadow: 0 2px 10px rgba(0,0,0,0.03); 
-        margin-bottom: 20px; 
-        border: 1px solid #EAECEF; 
+        border-radius: 4px; 
+        padding: 24px 28px; 
+        margin-bottom: 16px; 
+        border: 1px solid #E8E8E8; 
         background-color: #FFFFFF !important; 
-        line-height: 1.6;
+        line-height: 1.7;
+        font-size: 16px;
     }
 
-    /* 📱 4. 모바일 반응형 처리 (스마트폰 환경 최적화) */
+    /* 📱 4. 모바일 반응형 */
     @media (max-width: 768px) {
         .stChatMessage {
-            padding: 16px 20px;
-            border-radius: 8px;
+            padding: 16px 18px;
+            font-size: 15px;
+        }
+        html, body, [class*="css"] {
+            font-size: 15px;
         }
     }
 
-    /* 5. 버튼 공통 스타일 (뉴스룸 스타일의 단정한 버튼) */
+    /* 5. 버튼 공통 (뉴스룸 — 심플, 직선적) */
     div.stButton > button:first-child { 
-        border-radius: 6px; 
-        font-weight: 600; 
-        transition: all 0.2s ease-in-out; 
+        border-radius: 2px; 
+        font-weight: 500; 
+        font-family: 'Noto Sans KR', sans-serif !important;
+        transition: all 0.15s ease; 
     }
 
-    /* 🔴 프라이머리 버튼 (신세계 딥 레드 #E3000F) */
+    /* 🔴 프라이머리 버튼 (신세계 밝은 빨강 #E02B20) */
     button[kind="primary"] { 
-        background-color: #E3000F !important; 
+        background-color: #E02B20 !important; 
         color: #FFFFFF !important; 
         border: none !important; 
     }
     button[kind="primary"]:hover {
-        background-color: #C0000C !important; 
-        transform: translateY(-1px);
-        box-shadow: 0 4px 8px rgba(227, 0, 15, 0.2) !important;
+        background-color: #C41E15 !important; 
+        box-shadow: none !important;
     }
 
-    /* ⚪ 세컨더리 버튼 (깔끔한 다크 그레이 아웃라인) */
+    /* ⚪ 세컨더리 버튼 (블랙 아웃라인) */
     button[kind="secondary"] { 
         background-color: #FFFFFF !important; 
-        color: #444444 !important; 
-        border: 1px solid #DDDDDD !important; 
+        color: #000000 !important; 
+        border: 1px solid #000000 !important; 
     }
     button[kind="secondary"]:hover {
-        border-color: #222222 !important;
-        color: #222222 !important;
+        background-color: #000000 !important;
+        color: #FFFFFF !important;
     }
 
-    /* 6. 사이드바 및 코드 블록 스타일링 */
+    /* 6. 사이드바 */
     [data-testid="stSidebar"] { 
-        background-color: #FFFFFF !important;
-        border-right: 1px solid #EAECEF; 
+        background-color: #FAFAFA !important;
+        border-right: 1px solid #E8E8E8; 
     }
     
-    /* 법령/사규 인용구 하이라이트 (신세계 레드 톤으로 맞춤) */
+    /* 인라인 코드 (뉴스룸 레드 톤) */
     code { 
-        color: #E3000F; 
-        background-color: #FCE6E7; 
-        border-radius: 4px; 
-        padding: 0.2em 0.4em;
+        color: #E02B20; 
+        background-color: #FFF5F5; 
+        border-radius: 2px; 
+        padding: 0.15em 0.4em;
         font-size: 0.9em;
     }
     pre { 
-        border-radius: 8px; 
-        background-color: #F8F9FA !important; 
-        border: 1px solid #EAECEF; 
+        border-radius: 2px; 
+        background-color: #F5F5F5 !important; 
+        border: 1px solid #E8E8E8; 
     }
 
-    /* 7. 헤딩 앵커 링크 완전 제거 (마우스 오버 시 클립 버튼 + 복사 시 코드 유출 방지) */
+    /* 헤딩 스타일 (뉴스룸 — 굵고 깔끔) */
+    h1 { font-weight: 900 !important; color: #000000 !important; }
+    h2 { font-weight: 700 !important; color: #000000 !important; }
+    h3 { font-weight: 700 !important; color: #333333 !important; }
+
+    /* 7. 헤딩 앵커 링크 제거 */
     .stMarkdown a[href^="#"],
     [data-testid="stHeaderActionElements"] {
         display: none !important;
@@ -915,6 +951,22 @@ def main():
     h1 a, h2 a, h3 a, h4 a, h5 a, h6 a {
         display: none !important;
         pointer-events: none !important;
+    }
+
+    /* 8. Expander 스타일 (심플) */
+    .streamlit-expanderHeader {
+        font-weight: 500 !important;
+        font-size: 15px !important;
+        color: #000000 !important;
+    }
+
+    /* 9. 구분선 */
+    hr { border-color: #E8E8E8 !important; }
+
+    /* 10. success/info/warning 박스 톤 다운 */
+    [data-testid="stAlert"] {
+        border-radius: 2px !important;
+        font-size: 15px;
     }
     </style>
     """, unsafe_allow_html=True)
