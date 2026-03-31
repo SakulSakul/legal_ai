@@ -253,6 +253,11 @@ def route_query(query, has_attachment):
         return "claude"
     if any(kw in query for kw in REVIEW_KEYWORDS):
         return "claude"
+    # 이전 대화에 검토 결과(json_data)가 있으면 → 후속 질문도 claude로 유지
+    # (검토 결과에 대한 추가 질문/대화 연속성 보장)
+    for msg in st.session_state.get("messages", []):
+        if msg.get("json_data"):
+            return "claude"
     return "gemini"
 
 def verify_citations(cited_laws, laws_db):
@@ -434,7 +439,14 @@ def build_system_claude(docs, laws_db):
         "**[PART 2: 상세 설명]**\n"
         "JSON 아래에 마크다운 형식으로 작성.\n"
         "- 서두: **문의사항:** [요약]\n"
-        "- 위험: 🔴 위반 내용, 적법: 🔵 통과 내용 형태로 이모지를 사용하세요. Streamlit 색상 단축코드(:red[], :blue[], :blue_circle: 등)는 절대 사용하지 마세요.\n"
+        "- 위험: 🔴 위반 내용, 적법: 🔵 통과 내용 형태로 이모지를 사용하세요. Streamlit 색상 단축코드(:red[], :blue[], :blue_circle: 등)는 절대 사용하지 마세요.\n\n"
+
+        "**[후속 대화 규칙]**\n"
+        "사용자가 이전 검토 결과에 대해 추가 질문하면 (예: '이 부분 더 설명해줘', '제3조가 왜 위반이야?', '수정안을 다시 만들어줘'):\n"
+        "- JSON 블록 없이 마크다운으로 자연스럽게 답변하세요.\n"
+        "- 이전 검토 맥락(대화 히스토리)을 참조하여 일관성 있게 답변하세요.\n"
+        "- 새로운 법령 쟁점이 발견되면 추가로 알려주세요.\n"
+        "- 사용자가 명시적으로 새로운 문서/조항의 검토를 요청할 때만 JSON 블록을 다시 출력하세요.\n"
     )
 
 def build_system_gemini(docs):
