@@ -993,9 +993,17 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
             logger.warning("Gemini가 JSON 미출력 — 텍스트 기반으로 진행")
             gemini_json = {"query_summary": "JSON 파싱 실패", "saryu_findings": [], "law_findings": [], "precedent_findings": [], "risk_areas": []}
         
-        # Stage 2: Gatekeeper — DB 원문 대조 + 정제
-        st.caption("🛡️ Stage 2: DB 원문 대조 및 팩트체크 중...")
+        # Stage 2: Gatekeeper — DB 원문 대조 + API 실시간 검증
+        st.caption("🛡️ Stage 2: DB 원문 대조 + law.go.kr API 팩트체크 중...")
         gatekeeper_meta, gatekeeper_text = gatekeeper_process(gemini_json, laws_db)
+        
+        # Gatekeeper 결과 요약 표시
+        if gatekeeper_meta and not gatekeeper_meta.get("error"):
+            v_laws = len(gatekeeper_meta.get("verified_laws", []))
+            u_laws = len(gatekeeper_meta.get("unverified_laws", []))
+            v_prec = len(gatekeeper_meta.get("verified_precedents", []))
+            d_prec = len(gatekeeper_meta.get("dropped_precedents", []))
+            st.caption(f"  📊 법령: ✅{v_laws} ⚠️{u_laws} | 판례: ✅{v_prec} 🚨{d_prec}건 차단")
         
         if not gatekeeper_text:
             gatekeeper_text = f"Gemini 수집 결과:\n{gemini_reply[:3000]}"
@@ -1630,6 +1638,46 @@ def main():
             st.caption(f"🤖 Claude: `{CLAUDE_MODEL}`")
             st.caption(f"🤖 Gemini: `{GEMINI_MODELS[0]}` → `{GEMINI_MODELS[1]}`")
 
+            # law.go.kr API 연결 상태 확인 + 법령 DB 수동 업데이트
+            st.markdown("**🔗 law.go.kr API 상태**")
+            col_api1, col_api2 = st.columns(2)
+            with col_api1:
+                if st.button("🔍 API 연결 테스트", use_container_width=True, key="api_test"):
+                    with st.spinner("law.go.kr 연결 테스트 중..."):
+                        try:
+                            import requests as _req
+                            test_res = _req.get("http://www.law.go.kr/DRF/lawSearch.do?OC=sapphire_5&target=law&type=XML&query=관세법", timeout=5)
+                            if test_res.status_code == 200 and "totalCnt" in test_res.text:
+                                st.success("✅ API 연결 정상")
+                            else:
+                                st.error(f"❌ API 응답 이상 (HTTP {test_res.status_code})")
+                        except Exception as api_err:
+                            st.error(f"❌ 연결 실패: {api_err}")
+            with col_api2:
+                if st.button("🔄 법령 DB 업데이트", use_container_width=True, key="update_laws"):
+                    with st.spinner("법령 DB 업데이트 중... (1~2분 소요)"):
+                        try:
+                            import subprocess
+                            result = subprocess.run(
+                                ["python", "update_laws.py"],
+                                capture_output=True, text=True, timeout=300
+                            )
+                            if result.returncode == 0:
+                                st.success("✅ 법령 DB 업데이트 완료!")
+                                st.caption(result.stdout[-500:] if len(result.stdout) > 500 else result.stdout)
+                                # DB 리로드
+                                st.session_state.laws_db = load_laws()
+                                st.rerun()
+                            else:
+                                st.error(f"❌ 업데이트 실패")
+                                st.caption(result.stderr[-300:] if result.stderr else result.stdout[-300:])
+                        except FileNotFoundError:
+                            st.error("❌ update_laws.py 파일을 찾을 수 없습니다. 같은 디렉토리에 있는지 확인하세요.")
+                        except Exception as upd_err:
+                            st.error(f"❌ 실행 오류: {upd_err}")
+
+            st.markdown("---")
+
             doc_cat = st.selectbox("문서 유형", options=list(DOC_CATS.keys()), format_func=lambda x: DOC_CATS[x]["icon"] + " " + DOC_CATS[x]["label"])
             contract_type = st.selectbox("거래 유형", CONTRACT_TYPES) if doc_cat == "contract" else None
             yakjeong_type = st.selectbox("약정서 유형", YAKJEONG_TYPES) if doc_cat == "yakjeong" else None
@@ -1857,13 +1905,17 @@ def main():
                             dropped = gk_meta.get("dropped_precedents", [])
                             v_prec = gk_meta.get("verified_precedents", [])
                             if dropped:
-                                st.error(f"🚨 AI 할루시네이션 {len(dropped)}건 감지 — 허위 판례가 시스템에 의해 강제 삭제되었습니다.")
-                                for dp in dropped:
-                                    st.caption(f"  ❌ {dp['case_no']} — {dp.get('reason', '국가법령정보센터 미존재')}")
+                                with st.expander(f"🚨 AI 할루시네이션 {len(dropped)}건 감지 — 시스템이 자동 차단", expanded=True):
+                                    for dp in dropped:
+                                        reason = dp.get('reason', '국가법령정보센터 미존재')
+                                        st.markdown(f"~~{dp['case_no']}~~ → **차단 사유:** {reason}")
+                                    st.caption("위 판례는 AI가 생성한 허위 정보로, 검토의견서에서 자동 제거되었습니다.")
                             if v_prec:
                                 with st.expander(f"✅ API 검증 완료 판례 ({len(v_prec)}건)", expanded=False):
                                     for vp in v_prec:
-                                        st.markdown(f"- ✅ {vp['case_no']}: {vp.get('summary', '')[:100]}")
+                                        title = vp.get('title', '')
+                                        title_str = f" ({title})" if title else ""
+                                        st.markdown(f"- ✅ {vp['case_no']}{title_str}: {vp.get('summary', '')[:100]}")
                         elif precedent_results:
                             unverified_prec = [p for p in precedent_results if not p["verified"]]
                             if unverified_prec:
