@@ -1675,6 +1675,73 @@ def main():
 
             st.markdown("---")
 
+            # DB 원문 검증
+            if st.button("🔬 DB 원문 검증 (핵심 법령)", use_container_width=True, key="check_db"):
+                with st.spinner("DB 원문 검증 중..."):
+                    check_targets = [
+                        ("부정경쟁방지법", "제2조", ["부정경쟁행위"]),
+                        ("부정경쟁방지법", "제4조", ["금지"]),
+                        ("부정경쟁방지법", "제18조", ["벌"]),
+                        ("형법", "제347조", ["사기", "기망", "편취"]),
+                        ("상표법", "제230조", ["침해", "징역"]),
+                        ("상표법", "제235조", ["양벌", "법인"]),
+                        ("관세법", "제178조", ["취소"]),
+                        ("관세법", "제269조", ["밀수", "수출입"]),
+                        ("보세판매장고시", "제3조", []),
+                        ("보세판매장고시", "제18조", []),
+                    ]
+                    
+                    ok_count = 0
+                    err_count = 0
+                    missing_count = 0
+                    results_text = []
+                    
+                    for law_short, article, keywords in check_targets:
+                        matches = [l for l in st.session_state.laws_db 
+                                   if l.get("law_short") == law_short and l.get("article_no") == article]
+                        if not matches:
+                            results_text.append(f"❌ {law_short} {article} — DB에 없음!")
+                            missing_count += 1
+                            continue
+                        
+                        row = matches[0]
+                        content = row.get("content", "")[:300]
+                        title = row.get("article_title", "")
+                        
+                        if keywords:
+                            has_kw = any(kw in content for kw in keywords)
+                            if has_kw:
+                                results_text.append(f"✅ {law_short} {article} ({title}) — 정상")
+                                ok_count += 1
+                            else:
+                                results_text.append(f"🚨 {law_short} {article} ({title}) — 내용 불일치!")
+                                results_text.append(f"   기대 키워드: {keywords}")
+                                results_text.append(f"   실제 내용: {content[:150]}...")
+                                err_count += 1
+                        else:
+                            results_text.append(f"✅ {law_short} {article} ({title}) — DB 존재 확인")
+                            ok_count += 1
+                    
+                    # 결과 표시
+                    if err_count > 0:
+                        st.error(f"🚨 검증 실패 {err_count}건 발견!")
+                    if missing_count > 0:
+                        st.warning(f"❌ DB 미등록 {missing_count}건")
+                    if ok_count > 0:
+                        st.success(f"✅ 정상 {ok_count}건")
+                    
+                    for line in results_text:
+                        st.caption(line)
+                    
+                    # 전체 현황
+                    from collections import Counter
+                    counts = Counter(l.get("law_short", "?") for l in st.session_state.laws_db)
+                    st.caption(f"\n📊 DB 총 {len(st.session_state.laws_db)}건")
+                    for name, cnt in sorted(counts.items()):
+                        st.caption(f"  - {name}: {cnt}건")
+
+            st.markdown("---")
+
             doc_cat = st.selectbox("문서 유형", options=list(DOC_CATS.keys()), format_func=lambda x: DOC_CATS[x]["icon"] + " " + DOC_CATS[x]["label"])
             contract_type = st.selectbox("거래 유형", CONTRACT_TYPES) if doc_cat == "contract" else None
             yakjeong_type = st.selectbox("약정서 유형", YAKJEONG_TYPES) if doc_cat == "yakjeong" else None
