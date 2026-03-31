@@ -1756,10 +1756,24 @@ def main():
                                     params={"OC": "sapphire_5", "target": "law", "type": "XML", "query": manual_law}, timeout=10)
                                 search_root = ET.fromstring(search_res.text)
                                 mst = None
+                                # 법령명 정확 매칭으로 MST 찾기 (군형법 vs 형법 혼동 방지)
                                 for item in search_root.iter():
-                                    if '법령일련번호' in item.tag and item.text:
-                                        mst = item.text.strip()
+                                    children = {c.tag: (c.text or "").strip() for c in item}
+                                    name_val = children.get("법령명한글", "")
+                                    serial = children.get("법령일련번호", "")
+                                    current = children.get("현행연혁코드", "")
+                                    if name_val == manual_law and serial and "현행" in current:
+                                        mst = serial
                                         break
+                                # 정확 매칭 실패 시 부분 매칭 폴백
+                                if not mst:
+                                    for item in search_root.iter():
+                                        children = {c.tag: (c.text or "").strip() for c in item}
+                                        name_val = children.get("법령명한글", "")
+                                        serial = children.get("법령일련번호", "")
+                                        if name_val and manual_law in name_val and serial:
+                                            mst = serial
+                                            break
                                 if not mst:
                                     st.error(f"❌ '{manual_law}' 법령을 찾을 수 없습니다.")
                                 else:
