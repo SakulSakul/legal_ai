@@ -324,24 +324,22 @@ def build_system_claude(docs, laws_db):
         if not ds: return "(등록 없음)"
         return "\n\n---\n\n".join(["[" + d["label"] + "]\n" + d["text"] for d in ds])
 
-    saryu_text    = truncate_at_boundary(fmt_docs(by_cat("saryu")), 25000)
-    contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 35000)
-    yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 20000)
+    saryu_text    = truncate_at_boundary(fmt_docs(by_cat("saryu")), 15000)
+    contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 20000)
+    yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 10000)
 
-    # 핵심 법령/행정규칙: 시스템 프롬프트에 원문 포함 (면세점/유통 직결)
+    # 핵심 법령/행정규칙: 시스템 프롬프트에 원문 포함 (면세점 직결만)
     CORE_LAWS = {
-        "대규모유통업법", "대규모유통업법 시행령", "공정거래법", "하도급법",
-        "관세법", "상생협력법", "유통산업발전법",
-        "대외무역법", "외국환거래법", "환급특례법",
-        "보세판매장고시",
+        "보세판매장고시", "관세법",
+        "대규모유통업법", "대규모유통업법 시행령",
+        "공정거래법", "하도급법",
     }
     
     laws_text = ""
     if laws_db:
         # 핵심 법령/행정규칙: 원문 전체 포함 (면세점 직결 우선 정렬)
         CORE_PRIORITY = ["보세판매장고시", "관세법", "대규모유통업법", "대규모유통업법 시행령",
-                         "공정거래법", "하도급법", "상생협력법", "유통산업발전법",
-                         "대외무역법", "외국환거래법", "환급특례법"]
+                         "공정거래법", "하도급법"]
         
         core_entries = []
         # 우선순위 순서대로 추가
@@ -356,7 +354,7 @@ def build_system_claude(docs, laws_db):
                 core_entries.append(f"[{law['law_short']} {law['article_no']}] {law.get('article_title','')}\n{law['content']}")
         
         core_text = "\n\n---\n\n".join(core_entries) if core_entries else ""
-        core_text = truncate_at_boundary(core_text, 55000)
+        core_text = truncate_at_boundary(core_text, 35000)
         
         # 보조 법령: 조문 제목만 목록으로 (AI 자체 지식 + DB 사후검증)
         aux_entries = []
