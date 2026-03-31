@@ -1740,7 +1740,62 @@ def main():
                     for name, cnt in sorted(counts.items()):
                         st.caption(f"  - {name}: {cnt}건")
 
-            st.markdown("---")
+            # 수동 법령 조문 추가 (law.go.kr API 직접 조회)
+            with st.expander("🔧 수동 법령 조문 추가", expanded=False):
+                manual_law = st.text_input("법령명 (예: 형법)", key="manual_law_name")
+                manual_art = st.text_input("조문번호 (예: 제347조)", key="manual_art_no")
+                manual_short = st.text_input("약칭 (예: 형법)", key="manual_short")
+                
+                if st.button("📥 API에서 조문 가져오기", key="manual_fetch"):
+                    if manual_law and manual_art and manual_short:
+                        with st.spinner(f"{manual_law} {manual_art} 조회 중..."):
+                            try:
+                                import requests as _req
+                                search_res = _req.get("http://www.law.go.kr/DRF/lawSearch.do",
+                                    params={"OC": "sapphire_5", "target": "law", "type": "XML", "query": manual_law}, timeout=10)
+                                search_root = ET.fromstring(search_res.text)
+                                mst = None
+                                for item in search_root.iter():
+                                    if '법령일련번호' in item.tag and item.text:
+                                        mst = item.text.strip()
+                                        break
+                                if not mst:
+                                    st.error(f"❌ '{manual_law}' 법령을 찾을 수 없습니다.")
+                                else:
+                                    detail_res = _req.get(f"http://www.law.go.kr/DRF/lawService.do?OC=sapphire_5&target=law&MST={mst}&type=XML", timeout=15)
+                                    detail_root = ET.fromstring(detail_res.text)
+                                    found = False
+                                    for art_elem in detail_root.iter():
+                                        if art_elem.tag in ('조문단위', '조문'):
+                                            no_elem = art_elem.find('조문번호')
+                                            if no_elem is not None and no_elem.text:
+                                                raw_no = no_elem.text.strip()
+                                                no = raw_no if raw_no.startswith("제") else f"제{raw_no}"
+                                                if not no.endswith("조") and "조의" not in no:
+                                                    no += "조"
+                                                if no == manual_art:
+                                                    title_elem = art_elem.find('조문제목')
+                                                    title = title_elem.text.strip() if title_elem is not None and title_elem.text else ""
+                                                    content_elem = art_elem.find('조문내용')
+                                                    content = content_elem.text.strip() if content_elem is not None and content_elem.text else ""
+                                                    if content:
+                                                        law_id = f"{manual_short}_{manual_art.replace('제','').replace('조','')}"
+                                                        row = {"id": law_id, "law_name": manual_law, "law_short": manual_short,
+                                                               "article_no": manual_art, "article_title": title, "content": content,
+                                                               "last_updated": datetime.now().isoformat()}
+                                                        sb = init_supabase()
+                                                        sb.table("laws").upsert(row).execute()
+                                                        st.success(f"✅ {manual_short} {manual_art} ({title}) — {len(content)}자 저장!")
+                                                        st.caption(content[:200])
+                                                        st.session_state.laws_db = load_laws()
+                                                        found = True
+                                                        break
+                                    if not found:
+                                        st.error(f"❌ {manual_law}에서 {manual_art}를 찾을 수 없습니다.")
+                            except Exception as e:
+                                st.error(f"❌ 오류: {e}")
+
+            st.markdown("─" * 30)
 
             doc_cat = st.selectbox("문서 유형", options=list(DOC_CATS.keys()), format_func=lambda x: DOC_CATS[x]["icon"] + " " + DOC_CATS[x]["label"])
             contract_type = st.selectbox("거래 유형", CONTRACT_TYPES) if doc_cat == "contract" else None
