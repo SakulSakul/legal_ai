@@ -516,7 +516,19 @@ def build_system_gemini_stage1(docs, laws_db):
         "검토 범위: 대규모유통업법, 관세법, 공정거래법, 하도급법, 상생협력법, "
         "유통산업발전법, 대외무역법, 외국환거래법, 환급특례법, 소비자기본법, "
         "표시광고법, 건강기능식품법, 식품위생법, 부가가치세법, 개별소비세법, 주세법, "
+        "상표법, 부정경쟁방지법, 형법, "
         "보세판매장 특허 및 운영에 관한 고시 등\n\n"
+
+        "██ 특별 검토 규칙 ██\n"
+        "- 【필수】 면세점/보세판매장/면세 관련 모든 질의에는 반드시 다음을 검토할 것:\n"
+        "  ① 「보세판매장 특허 및 운영에 관한 고시」(관세청고시) — 특허요건(제3조), 시설요건(제4조), "
+        "물품반입(제7조), 판매/인도(제8조), 특허심사(제15조), 행정처분(제18조) 등\n"
+        "  ② 「관세법」 — 보세판매장(제196조), 특허취소(제178조), 밀수출입(제269조)\n"
+        "  ③ 위 고시/법령을 Google Search로 law.go.kr에서 현행 조문을 반드시 확인할 것\n\n"
+        "- 모조품/가품/위조품 관련 이슈 검토 시: 상표법(침해죄 제230조) 뿐만 아니라 "
+        "형법상 기망행위(사기죄 제347조), 관세법(밀수입죄 제269조), "
+        "부정경쟁방지법(부정경쟁행위 제2조)도 반드시 병행 검색·검토할 것.\n"
+        "- 관세법 위반: 특허취소(제178조), 밀수출입(제269조), 관세포탈(제270조) 포함.\n\n"
 
         "━━━ [당사 사규] ━━━\n" + saryu_text +
         "\n\n━━━ [당사 표준 계약서] ━━━\n" + contract_text +
@@ -639,6 +651,8 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "당신은 면세점 전문 시니어 변호사 AI입니다.\n"
         "아래 데이터는 Gemini(리서처)가 수집하고, 시스템(게이트키퍼)이 DB 원문과 대조하여 검증한 결과입니다.\n"
         "당신은 이 정제된 데이터만을 기반으로 최종 법리 해석과 실무 권고를 작성하세요.\n\n"
+        "⚠️ 면세점 관련 질의인데 검증 데이터에 '보세판매장고시' 또는 '보세판매장 특허 및 운영에 관한 고시'가 "
+        "누락되어 있다면, issues에 '보세판매장고시 검토 누락 — 별도 확인 필요' 쟁점을 반드시 추가하세요.\n\n"
         
         "━━━ [검증 데이터] ━━━\n" + gatekeeper_text +
         
@@ -749,22 +763,27 @@ def call_claude(system_prompt, messages):
     except Exception as e:
         err_type, err_msg = classify_api_error(e)
         
-        # overloaded → 10초 대기 후 1회 재시도
-        if err_type == "overloaded":
-            logger.info("Claude 과부하 — 10초 대기 후 재시도...")
-            time.sleep(10)
-            try:
-                response = client.messages.create(
-                    model=CLAUDE_MODEL,
-                    max_tokens=8192,
-                    system=system_prompt,
-                    messages=claude_messages,
-                )
-                return response.content[0].text
-            except Exception as e2:
-                err_type, err_msg = classify_api_error(e2)
+        # overloaded/server → 최대 3회 재시도 (3초→6초→12초)
+        if err_type in ("overloaded", "server"):
+            for retry in range(3):
+                wait = 3 * (2 ** retry)  # 3, 6, 12초
+                logger.info(f"Claude {err_type} — {wait}초 대기 후 재시도 {retry+1}/3...")
+                time.sleep(wait)
+                try:
+                    response = client.messages.create(
+                        model=CLAUDE_MODEL,
+                        max_tokens=8192,
+                        system=system_prompt,
+                        messages=claude_messages,
+                    )
+                    logger.info(f"Claude 재시도 {retry+1} 성공!")
+                    return response.content[0].text
+                except Exception as retry_e:
+                    err_type, err_msg = classify_api_error(retry_e)
+                    if err_type not in ("overloaded", "server"):
+                        break  # 다른 종류 에러면 재시도 중단
         
-        logger.error(f"Claude API 오류: {err_type} — {str(e)[:200]}")
+        logger.error(f"Claude API 최종 실패: {err_type} — {str(e)[:200]}")
         label_map = {
             "rate_limit": "API 한도 초과",
             "auth": "API 인증 오류",
