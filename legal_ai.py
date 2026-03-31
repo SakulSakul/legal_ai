@@ -261,30 +261,96 @@ def route_query(query, has_attachment):
     return "gemini"
 
 def verify_citations(cited_laws, laws_db):
+    """법령 인용 검증 — 새 JSON 구조(dict 또는 string) 모두 대응 + 시행일자 체크.
+    cited_laws 형식:
+      기존: ["대규모유통업법 제11조", ...]
+      신규: [{"law_name": "대규모유통업법", "article": "제11조", "verified": true}, ...]
+    """
     results = []
     if not cited_laws:
         return results
+    
     for cite in cited_laws:
+        # 새 형식(dict) vs 기존 형식(string) 모두 처리
+        if isinstance(cite, dict):
+            law_name_cite = cite.get("law_name", "")
+            article_cite = cite.get("article", "")
+            ai_verified = cite.get("verified", False)
+            cite_str = f"{law_name_cite} {article_cite}"
+        else:
+            cite_str = str(cite)
+            law_name_cite = ""
+            article_cite = ""
+            ai_verified = True  # 기존 형식은 검증 가정
+        
         found = False
         matched_content = ""
+        is_current = True
+        last_updated = ""
+        
         for law in laws_db:
-            # 조문번호 매칭 체크
-            if law["article_no"] not in cite:
-                continue
-            # 법령명 매칭: law_short, law_name, 또는 부분 매칭
             law_short = law.get("law_short", "")
-            law_name = law.get("law_name", "")
-            if (law_short and law_short in cite) or \
-               (law_name and law_name in cite) or \
-               (law_short and cite_partial_match(law_short, cite)) or \
-               (law_name and cite_partial_match(law_name, cite)):
+            law_name_db = law.get("law_name", "")
+            article_no = law.get("article_no", "")
+            
+            # 조문번호 매칭
+            art_match = False
+            if article_cite and article_cite == article_no:
+                art_match = True
+            elif article_no in cite_str:
+                art_match = True
+            if not art_match:
+                continue
+            
+            # 법령명 매칭
+            name_match = False
+            if law_name_cite:
+                if (law_name_cite == law_short or law_name_cite == law_name_db or
+                    cite_partial_match(law_short, law_name_cite) or
+                    cite_partial_match(law_name_db, law_name_cite)):
+                    name_match = True
+            else:
+                if (law_short in cite_str or law_name_db in cite_str or
+                    cite_partial_match(law_short, cite_str) or
+                    cite_partial_match(law_name_db, cite_str)):
+                    name_match = True
+            
+            if name_match:
                 found = True
                 matched_content = law["content"][:100] + "..."
+                last_updated = law.get("last_updated", "")
                 break
+        
         results.append({
-            "citation": cite,
+            "citation": cite_str,
             "verified": found,
-            "preview": matched_content if found else ""
+            "ai_verified": ai_verified,
+            "preview": matched_content if found else "",
+            "last_updated": last_updated,
+            "db_registered": found,
+        })
+    
+    return results
+
+def verify_precedents(cited_precedents):
+    """판례 인용 검증 — AI가 verified=false로 표시한 판례 감지."""
+    results = []
+    if not cited_precedents:
+        return results
+    for prec in cited_precedents:
+        if isinstance(prec, dict):
+            case_no = prec.get("case_no", "미확인")
+            verified = prec.get("verified", False)
+            summary = prec.get("summary", "")
+        else:
+            case_no = str(prec)
+            verified = True
+            summary = ""
+        
+        results.append({
+            "case_no": case_no,
+            "verified": verified,
+            "summary": summary,
         })
     return results
 
@@ -388,9 +454,9 @@ def build_system_claude(docs, laws_db, gemini_analysis=""):
     logger.info(f"Claude 시스템프롬프트: {len(result):,}자 (추정 {int(len(result)/1.5):,} 토큰)")
     return result
 
-def build_system_gemini_stage1(docs):
-    """Stage 1: Gemini — 사규 분석 + Google Search로 최신 법령/판례 검색.
-    Gemini는 1M 토큰 + Google Search 실시간 검색 가능.
+def build_system_gemini_stage1(docs, laws_db):
+    """Stage 1: Gemini Researcher — 사규 분석 + Google Search로 법령/판례 수집.
+    최종 보고서가 아닌 '구조화된 Raw Data'를 추출하는 역할.
     """
     def by_cat(cat):
         return [d for d in docs if d["cat"] == cat]
@@ -402,36 +468,205 @@ def build_system_gemini_stage1(docs):
     contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 60000)
     yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 30000)
 
+    laws_list = ""
+    if laws_db:
+        law_groups = {}
+        for law in laws_db:
+            short = law.get("law_short", "기타")
+            if short not in law_groups:
+                law_groups[short] = []
+            law_groups[short].append(law.get("article_no", ""))
+        lines = [f"- {ls}: " + ", ".join(arts) for ls, arts in sorted(law_groups.items())]
+        laws_list = "\n".join(lines)
+
     return (
-        "당신은 면세점 공정거래 실무 전문가입니다. 2단계 분석을 수행하세요.\n\n"
-        
-        "**[PART A: 사규/표준계약서 기준 분석]**\n"
-        "사용자의 질문/첨부 문서를 아래 사규/계약서/약정서와 대조하여:\n"
-        "- 위반 또는 불일치 조항 (사규 원문 인용)\n"
-        "- 부합 조항\n"
-        "- 사규에 명시되지 않은 규정 공백\n\n"
-        
-        "**[PART B: 법령/행정규칙/판례 검색 (Google Search 활용)]**\n"
-        "반드시 Google Search를 사용하여 아래를 실시간 검색하세요:\n"
-        "- 관련 법령의 **현행 최신 조문** (law.go.kr 국가법령정보센터에서 확인)\n"
-        "- 관련 **판례/법령해석례** (대법원 판례, 공정위 의결, 관세청 해석례)\n"
-        "- 보세판매장 특허 및 운영에 관한 고시 (관세청 행정규칙)\n\n"
-        "⚠️ 중요: 법령 조문번호와 판례번호는 반드시 Google Search로 확인한 것만 인용하세요.\n"
-        "검색하지 않은 조문번호나 판례번호를 절대 추측하여 기재하지 마세요.\n"
-        "판례를 인용할 때는 '대법원 20XX.XX.XX. 선고 20XXdaXXXXX 판결' 형식으로, 실제 검색 결과에서 확인된 것만 기재하세요.\n\n"
-        
-        "**[출력 형식]**\n"
-        "===== PART A: 사규 분석 결과 =====\n"
-        "(사규/계약서 위반사항, 부합사항, 규정 공백)\n\n"
-        "===== PART B: 법령/판례 검색 결과 =====\n"
-        "(각 법령은 '법령명 제X조 (조문 제목) - 검색 출처 URL' 형식)\n"
-        "(판례는 '대법원 XXXX.XX.XX. 선고 XXXXdaXXXXX 판결 - 핵심 판시사항' 형식)\n"
-        "(검색하지 못한 항목은 '미확인'으로 표시)\n\n"
-        
+        "██ 최우선 규칙 — 절대 위반 금지 ██\n"
+        "1. 사규 DB에 명확한 근거가 없으면 '해당 규정 없음'으로 표시할 것.\n"
+        "2. 법령 조문은 반드시 Google Search로 law.go.kr에서 확인한 것만 기재할 것.\n"
+        "3. 판례는 반드시 Google Search 결과에서 확인된 것만 기재할 것.\n"
+        "4. 확인 안 된 법령/판례는 절대 지어내지 말고 목록에서 제외할 것.\n"
+        "5. 구법(폐지/개정)이 아닌 현행 법령만 인용할 것.\n\n"
+
+        "당신은 면세점 공정거래 법률 리서처입니다.\n"
+        "당신의 역할은 '최종 판단'이 아니라 '정확한 데이터 수집'입니다.\n"
+        "사용자의 질문을 분석하여 관련 사규 조항과 법령/판례를 수집하고,\n"
+        "반드시 아래 JSON 형식으로만 출력하세요. 마크다운 설명은 작성하지 마세요.\n\n"
+
+        "```json\n"
+        "{\n"
+        '  "query_summary": "사용자 질문 1줄 요약",\n'
+        '  "saryu_findings": [\n'
+        '    {"source": "사규/계약서 문서명", "clause": "조항번호/제목", "content": "해당 원문 발췌", "relevance": "위반|부합|공백"}\n'
+        '  ],\n'
+        '  "law_findings": [\n'
+        '    {"law_name": "대규모유통업법", "article": "제11조", "title": "조문 제목", "content": "Google Search로 확인한 조문 핵심 내용 요약", "effective_date": "시행일자", "search_confirmed": true}\n'
+        '  ],\n'
+        '  "precedent_findings": [\n'
+        '    {"case_no": "대법원 2019.11.14. 선고 2019다12345 판결", "summary": "핵심 판시사항", "search_confirmed": true}\n'
+        '  ],\n'
+        '  "risk_areas": ["대규모유통업법 위반 가능성", "보세판매장고시 미준수 등 발견된 리스크 영역 나열"]\n'
+        "}\n"
+        "```\n\n"
+        "⚠️ search_confirmed: true는 Google Search로 확인한 것, false는 미확인.\n"
+        "⚠️ 미확인 항목도 목록에 포함하되 search_confirmed: false로 표시.\n\n"
+
+        "검토 범위: 대규모유통업법, 관세법, 공정거래법, 하도급법, 상생협력법, "
+        "유통산업발전법, 대외무역법, 외국환거래법, 환급특례법, 소비자기본법, "
+        "표시광고법, 건강기능식품법, 식품위생법, 부가가치세법, 개별소비세법, 주세법, "
+        "보세판매장 특허 및 운영에 관한 고시 등\n\n"
+
         "━━━ [당사 사규] ━━━\n" + saryu_text +
         "\n\n━━━ [당사 표준 계약서] ━━━\n" + contract_text +
-        "\n\n━━━ [당사 표준 약정서] ━━━\n" + yakjeong_text
+        "\n\n━━━ [당사 표준 약정서] ━━━\n" + yakjeong_text +
+        "\n\n━━━ [법령 DB 등록 목록 (참고)] ━━━\n" + laws_list
     )
+
+def gatekeeper_process(gemini_raw_json, laws_db):
+    """Stage 2: Gatekeeper — Gemini의 Raw Data를 DB 원문과 대조하여 정제.
+    DB에 있는 법령은 원문으로 교체(정확도 100%), 없으면 '확인필요' 플래그.
+    결과: Claude에게 전달할 정제된 텍스트 (2~5k 토큰).
+    """
+    if not gemini_raw_json:
+        return {"error": "Gemini 결과 없음"}, ""
+    
+    refined_parts = []
+    verified_laws = []
+    unverified_laws = []
+    verified_precedents = []
+    unverified_precedents = []
+    
+    # 1. 사규 분석 결과 → 그대로 전달 (Gemini가 원문 대조한 결과)
+    saryu_findings = gemini_raw_json.get("saryu_findings", [])
+    if saryu_findings:
+        refined_parts.append("━━━ [사규 분석 결과 (Gemini 확인)] ━━━")
+        for sf in saryu_findings:
+            refined_parts.append(f"- [{sf.get('relevance','?')}] {sf.get('source','?')} {sf.get('clause','')}: {sf.get('content','')[:200]}")
+    
+    # 2. 법령 → DB 원문과 대조
+    law_findings = gemini_raw_json.get("law_findings", [])
+    refined_parts.append("\n━━━ [법령 검증 결과 (DB 대조)] ━━━")
+    
+    for lf in law_findings:
+        law_name = lf.get("law_name", "")
+        article = lf.get("article", "")
+        search_confirmed = lf.get("search_confirmed", False)
+        
+        # DB에서 매칭 검색
+        db_match = None
+        for db_law in laws_db:
+            db_short = db_law.get("law_short", "")
+            db_name = db_law.get("law_name", "")
+            db_article = db_law.get("article_no", "")
+            
+            if article != db_article:
+                continue
+            if (law_name == db_short or law_name == db_name or
+                cite_partial_match(db_short, law_name) or
+                cite_partial_match(db_name, law_name)):
+                db_match = db_law
+                break
+        
+        if db_match:
+            # ✅ DB에 있음 → 원문으로 교체 (정확도 100%)
+            db_content = db_match["content"][:500]
+            last_updated = db_match.get("last_updated", "")[:10]
+            refined_parts.append(
+                f"✅ [{law_name} {article}] (DB 검증 완료, 업데이트: {last_updated})\n"
+                f"   원문: {db_content}"
+            )
+            verified_laws.append({"law_name": law_name, "article": article, "db_verified": True, "last_updated": last_updated})
+        else:
+            # ⚠️ DB에 없음 → Gemini 검색 결과 + 확인필요 플래그
+            flag = "🔍 검색확인" if search_confirmed else "❓ 미확인"
+            refined_parts.append(
+                f"⚠️ [{law_name} {article}] (DB 미등록 — {flag})\n"
+                f"   Gemini 요약: {lf.get('content', '내용 없음')[:200]}"
+            )
+            unverified_laws.append({"law_name": law_name, "article": article, "db_verified": False, "search_confirmed": search_confirmed})
+    
+    # 3. 판례 → 전부 '미검증' 플래그 (판례 DB가 없으므로)
+    precedent_findings = gemini_raw_json.get("precedent_findings", [])
+    if precedent_findings:
+        refined_parts.append("\n━━━ [판례 (시스템 검증 불가 — Gemini 검색 기반)] ━━━")
+        for pf in precedent_findings:
+            confirmed = pf.get("search_confirmed", False)
+            flag = "🔍 검색확인" if confirmed else "❓ 미확인"
+            case_no = pf.get("case_no", "미확인")
+            refined_parts.append(f"- [{flag}] {case_no}: {pf.get('summary', '')[:150]}")
+            if confirmed:
+                verified_precedents.append(pf)
+            else:
+                unverified_precedents.append(pf)
+    
+    # 4. 리스크 영역
+    risk_areas = gemini_raw_json.get("risk_areas", [])
+    if risk_areas:
+        refined_parts.append("\n━━━ [발견된 리스크 영역] ━━━")
+        for ra in risk_areas:
+            refined_parts.append(f"- {ra}")
+    
+    refined_text = "\n".join(refined_parts)
+    
+    # 메타데이터
+    meta = {
+        "query_summary": gemini_raw_json.get("query_summary", ""),
+        "verified_laws": verified_laws,
+        "unverified_laws": unverified_laws,
+        "verified_precedents": verified_precedents,
+        "unverified_precedents": unverified_precedents,
+        "total_laws": len(verified_laws) + len(unverified_laws),
+        "total_precedents": len(verified_precedents) + len(unverified_precedents),
+    }
+    
+    logger.info(f"Gatekeeper: 법령 {meta['total_laws']}건(DB검증 {len(verified_laws)}), 판례 {meta['total_precedents']}건, 정제 텍스트 {len(refined_text)}자")
+    return meta, refined_text
+
+
+def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
+    """Stage 3: Claude Senior Lawyer — 정제된 데이터만으로 법리 해석 + 최종 보고서.
+    외부 지식 사용 금지 — 오직 전달된 텍스트 안에서만 추론.
+    """
+    return (
+        "██ 최우선 규칙 — 절대 위반 금지 ██\n"
+        "1. 오직 아래 전달된 '[검증 데이터]' 안에서만 추론하라. 외부 지식을 절대 사용하지 마라.\n"
+        "2. 새로운 법령 조문이나 판례를 추가로 인용하지 마라. 전달된 것만 사용하라.\n"
+        "3. '⚠️ DB 미등록' 또는 '❓ 미확인' 항목은 반드시 해당 사실을 명시하라.\n"
+        "4. 불확실한 사항은 '확인 필요'로 표시하라. 절대 추측하지 마라.\n\n"
+        
+        "당신은 면세점 전문 시니어 변호사 AI입니다.\n"
+        "아래 데이터는 Gemini(리서처)가 수집하고, 시스템(게이트키퍼)이 DB 원문과 대조하여 검증한 결과입니다.\n"
+        "당신은 이 정제된 데이터만을 기반으로 최종 법리 해석과 실무 권고를 작성하세요.\n\n"
+        
+        "━━━ [검증 데이터] ━━━\n" + gatekeeper_text +
+        
+        "\n\n━━━ [답변 형식] ━━━\n"
+        "반드시 아래 JSON + 마크다운 상세 설명을 출력하세요.\n\n"
+        "```json\n"
+        "{\n"
+        '  "summary": "1줄 요약",\n'
+        '  "verdict": "approved | conditional | rejected",\n'
+        '  "verdict_reason": "종합 판단 근거 (전달된 데이터에 근거하여)",\n'
+        '  "issues": [\n'
+        '    {\n'
+        '      "issue_no": 1, "title": "쟁점 제목", "risk_level": "high|medium|low",\n'
+        '      "target_clause": "검토 대상 원문",\n'
+        '      "applicable_law": "법령/고시명 제X조",\n'
+        '      "law_analysis": "법령·행정규칙 관점 (DB 검증 여부 명시)",\n'
+        '      "applicable_rule": "사규 조항",\n'
+        '      "rule_analysis": "사규 관점",\n'
+        '      "recommendation": "종합 권고안"\n'
+        '    }\n'
+        '  ],\n'
+        '  "action_plan": "MD 실무 액션 (단계별)",\n'
+        '  "alternative_clause": "수정 대안 (없으면 null)",\n'
+        '  "cited_laws": [{"law_name": "법령명", "article": "제X조"}],\n'
+        '  "cited_precedents": [{"case_no": "판례번호", "summary": "판시사항"}]\n'
+        "}\n"
+        "```\n"
+        "JSON 아래 마크다운 상세 설명. 🔴 위반, 🔵 통과.\n\n"
+        "후속 질문에는 JSON 없이 마크다운. 새 검토 요청 시만 JSON 출력.\n"
+    )
+
 
 def build_system_gemini(docs):
     def by_cat(cat):
@@ -576,41 +811,66 @@ def call_gemini(system_prompt, messages):
 
 def dispatch_with_fallback(model_choice, messages, docs, laws_db):
     if model_choice == "claude":
-        # ━━━ 2단계 파이프라인: Gemini(사규) → Claude(법령) ━━━
+        # ━━━ 3단계 하이브리드 파이프라인 ━━━
         
-        # Stage 1: Gemini — 사규/계약서/약정서 기준 분석
-        gemini_system = build_system_gemini_stage1(docs)
-        st.caption("📋 Stage 1: 사규/계약서 기준 분석 중 (Gemini)...")
-        gemini_analysis = call_gemini(gemini_system, messages)
+        # Stage 1: Gemini Researcher — 사규 분석 + 법령/판례 수집
+        gemini_system = build_system_gemini_stage1(docs, laws_db)
+        st.caption("🔍 Stage 1: 사규 분석 + 법령·판례 수집 중 (Gemini + Google Search)...")
+        gemini_reply = call_gemini(gemini_system, messages)
         
-        if gemini_analysis.startswith("⚠️"):
-            # Gemini 실패 시 Claude 단독 진행 (사규 분석 없이)
-            logger.warning(f"Stage 1 Gemini 실패: {gemini_analysis}")
-            gemini_analysis = ""
+        if gemini_reply.startswith("⚠️"):
+            st.warning(f"Stage 1 실패: {gemini_reply}")
+            return gemini_reply, "Gemini (Failed)"
         
-        # Stage 2: Claude — 법령/행정규칙 검토 + 최종 종합
-        system = build_system_claude(docs, laws_db, gemini_analysis)
-        st.caption("⚖️ Stage 2: 법령·행정규칙·판례 교차 검토 중 (Claude)...")
-        reply = call_claude(system, messages)
+        # Gemini 응답에서 JSON 파싱
+        gemini_json = None
+        json_match = re.search(r'```json\s*\n(.*?)\n```', gemini_reply, re.DOTALL)
+        if json_match:
+            try:
+                gemini_json = json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                logger.warning("Stage 1 JSON 파싱 실패 — Gemini 응답을 텍스트로 전달")
+        
+        if not gemini_json:
+            # JSON 파싱 실패 시 텍스트 그대로 전달
+            logger.warning("Gemini가 JSON 미출력 — 텍스트 기반으로 진행")
+            gemini_json = {"query_summary": "JSON 파싱 실패", "saryu_findings": [], "law_findings": [], "precedent_findings": [], "risk_areas": []}
+        
+        # Stage 2: Gatekeeper — DB 원문 대조 + 정제
+        st.caption("🛡️ Stage 2: DB 원문 대조 및 팩트체크 중...")
+        gatekeeper_meta, gatekeeper_text = gatekeeper_process(gemini_json, laws_db)
+        
+        if not gatekeeper_text:
+            gatekeeper_text = f"Gemini 수집 결과:\n{gemini_reply[:3000]}"
+        
+        # Stage 3: Claude Senior Lawyer — 최종 법리 해석
+        claude_system = build_system_claude_v3(gatekeeper_text, gatekeeper_meta)
+        st.caption("⚖️ Stage 3: 최종 법리 해석 및 보고서 작성 중 (Claude)...")
+        
+        # Claude에게는 원래 사용자 질문만 전달 (정제 데이터는 system에)
+        claude_messages = [messages[-1]] if messages else [{"role": "user", "content": "검토해주세요."}]
+        reply = call_claude(claude_system, claude_messages)
         
         if reply.startswith("⚠️"):
-            # Claude도 실패 시 Gemini 단독으로 폴백
-            st.warning(f"🔄 {reply}\n→ Gemini 단독으로 검토를 진행합니다.")
-            fallback_system = build_system_gemini(docs)
-            fallback_reply = call_gemini(fallback_system, messages)
-            if not fallback_reply.startswith("⚠️"):
-                return fallback_reply, "Gemini (Fallback)"
-            return reply, "Claude (Failed)"
+            # Claude 실패 시 → Gemini 결과 + Gatekeeper 정보를 직접 표시
+            st.warning(f"🔄 Claude 실패: {reply}\n→ Gemini 검토 결과를 직접 표시합니다.")
+            # Gemini 응답에서 JSON 이후 마크다운 부분 추출
+            fallback_text = gemini_reply
+            if json_match:
+                fallback_text = gemini_reply[json_match.end():].strip() or gemini_reply
+            return fallback_text, "Gemini (Claude 우회)"
         
-        model_label = f"Gemini+Claude ({CLAUDE_MODEL})"
-        return reply, model_label
+        # 성공 — gatekeeper_meta를 반환에 포함 (검증 결과 UI 표시용)
+        # reply에 gatekeeper 정보를 메타데이터로 전달하기 위해 세션에 저장
+        st.session_state["_gatekeeper_meta"] = gatekeeper_meta
+        
+        return reply, "Gemini→Gatekeeper→Claude"
     else:
         # 일반 Q&A는 Gemini 단독
         system = build_system_gemini(docs)
         reply = call_gemini(system, messages)
         if reply.startswith("⚠️"):
-            st.warning(f"🔄 {reply}\n→ Claude로 자동 우회합니다.")
-            fallback_reply = call_claude(build_system_claude(docs, laws_db), messages)
+            fallback_reply = call_claude(build_system_claude(docs, laws_db), [messages[-1]] if messages else [])
             if not fallback_reply.startswith("⚠️"):
                 return fallback_reply, f"Claude ({CLAUDE_MODEL}, Fallback)"
             return reply, "Gemini (Failed)"
@@ -1384,7 +1644,7 @@ def main():
 
             with st.chat_message("assistant", avatar="🤝"):
                 if model_choice == "claude":
-                    spinner_msg = "⚖ 법령·행정규칙·사규 기준으로 교차 검토 중..."
+                    spinner_msg = "⚖ 3단계 하이브리드 검토 중 (Gemini→DB검증→Claude)..."
                 else:
                     spinner_msg = "💬 당사 사내 기준을 검색 및 분석 중..."
 
@@ -1399,23 +1659,51 @@ def main():
                     json_data, detail_text = parse_review_response(reply)
                     if json_data:
                         citation_results = verify_citations(json_data.get("cited_laws", []), st.session_state.laws_db)
+                        precedent_results = verify_precedents(json_data.get("cited_precedents", []))
                         msg_data["json_data"] = json_data
                         msg_data["detail_text"] = detail_text
                         msg_data["citation_results"] = citation_results
+                        msg_data["precedent_results"] = precedent_results
 
                         render_verdict_badge(json_data.get("verdict", ""))
                         st.markdown(f"**📋 {json_data.get('summary', '')}**")
-                        # 4번: 인용 검증 실패 경고
-                        if citation_results and not all(cr["verified"] for cr in citation_results):
-                            unverified = [cr["citation"] for cr in citation_results if not cr["verified"]]
+                        
+                        # 법령 인용 검증 결과
+                        db_verified = [cr for cr in citation_results if cr["verified"]]
+                        db_unverified = [cr for cr in citation_results if not cr["verified"]]
+                        
+                        if db_verified:
+                            verified_items = []
+                            for cr in db_verified:
+                                date_info = ""
+                                if cr.get("last_updated"):
+                                    try:
+                                        date_info = f" (DB: {cr['last_updated'][:10]})"
+                                    except Exception:
+                                        pass
+                                verified_items.append(f"✅ {cr['citation']}{date_info}")
+                            with st.expander(f"📚 DB 검증 완료 법령 ({len(db_verified)}건)", expanded=False):
+                                st.markdown("\n".join(verified_items))
+                        
+                        if db_unverified:
                             unverified_links = []
-                            for uv in unverified:
-                                # 법령명에서 검색어 추출
-                                search_term = re.sub(r'\s*제\d+조.*', '', uv).strip()
+                            for cr in db_unverified:
+                                search_term = re.sub(r'\s*제\d+조.*', '', cr["citation"]).strip()
                                 link = f"https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={search_term}"
-                                unverified_links.append(f"[{uv}]({link})")
-                            st.warning(f"⚠️ 다음 법령 인용의 DB 검증이 완료되지 않았습니다.\n\n사내변호사에게 해당 조문의 현행 유효 여부를 반드시 확인받으세요.")
+                                unverified_links.append(f"[{cr['citation']}]({link})")
+                            st.warning(f"⚠️ DB 미등록 법령 {len(db_unverified)}건 — 국가법령정보센터에서 현행 여부를 확인하세요.")
                             st.markdown("🔗 " + " | ".join(unverified_links))
+                        
+                        # 판례 검증 결과
+                        if precedent_results:
+                            unverified_prec = [p for p in precedent_results if not p["verified"]]
+                            if unverified_prec:
+                                st.warning(f"⚠️ 미확인 판례 {len(unverified_prec)}건 — 대법원 판례검색에서 실재 여부를 확인하세요.")
+                                prec_links = []
+                                for p in unverified_prec:
+                                    prec_links.append(f"[{p['case_no']}](https://glaw.scourt.go.kr/wsjo/panre/sjo100.do)")
+                                st.markdown("🔗 " + " | ".join(prec_links))
+                        
                         render_issues_table(json_data.get("issues", []), citation_results)
                         if json_data.get("alternative_clause"): render_alternative_clause(json_data["alternative_clause"])
                         with st.expander("📄 상세 검토 의견 전문", expanded=False): st.markdown(detail_text)
