@@ -349,13 +349,21 @@ def build_system_claude(docs, laws_db, gemini_analysis=""):
         )
 
     result = (
-        "당신은 면세점 전문 법령/행정규칙 검토 AI입니다.\n"
-        "Stage 1에서 Gemini가 사규/표준계약서 기준으로 내부 위반사항을 분석했습니다.\n"
-        "당신은 법령·행정규칙·판례 관점에서 추가 리스크를 검토하고 최종 종합 판단을 내려주세요.\n\n"
-        "검토 시 유의사항:\n"
-        "- 보세판매장 관련: 「보세판매장 특허 및 운영에 관한 고시」, 「관세법」 필수 검토\n"
-        "- 행정규칙(고시)은 반드시 인용. 판례/법령해석례 있으면 사건번호 제시\n"
-        "- 인용 시 아래 DB 목록의 법령명+조문번호를 정확히 사용\n"
+        "당신은 면세점 전문 법령/행정규칙 검토 AI입니다. (Stage 2: 최종 종합 검토)\n\n"
+        "Stage 1에서 Gemini가 다음을 수행했습니다:\n"
+        "- PART A: 사규/표준계약서 기준 내부 위반사항 분석\n"
+        "- PART B: Google Search로 최신 법령 조문 및 판례/해석례 실시간 검색\n\n"
+        "당신의 역할:\n"
+        "1. Gemini의 사규 분석(PART A)을 사내 기준 관점으로 반영\n"
+        "2. Gemini의 법령/판례 검색 결과(PART B)를 **검증**하고 추가 리스크 발굴\n"
+        "3. 최종 종합 판단 (법령+사규+행정규칙 교차 검토)\n\n"
+        "⚠️ 검증 시 중요사항:\n"
+        "- Gemini가 인용한 조문번호/판례번호가 실제로 존재하는지 의심하세요\n"
+        "- '미확인' 표시된 항목은 인용하지 마세요\n"
+        "- 당신이 확실히 아는 법령만 인용하세요. 불확실하면 '확인 필요' 표시\n"
+        "- 판례는 Gemini가 검색으로 확인한 것만 인용하고, 새로 추가하지 마세요\n"
+        "- 보세판매장 관련: 「보세판매장 특허 및 운영에 관한 고시」, 「관세법」 필수\n"
+        "- 인용 시 아래 DB 목록의 법령명과 조문번호를 정확히 사용\n"
         + gemini_section +
         "\n\n━━━ [적용 법령·행정규칙 DB 목록] ━━━\n" + laws_text +
         "\n\n━━━ [답변 형식] ━━━\n"
@@ -367,8 +375,9 @@ def build_system_claude(docs, laws_db, gemini_analysis=""):
         '  "verdict_reason": "종합 판단 근거",\n'
         '  "issues": [{"issue_no":1,"title":"쟁점","risk_level":"high|medium|low",\n'
         '    "target_clause":"대상 원문","applicable_law":"법령/고시명 제X조",\n'
-        '    "law_analysis":"법령·판례 평가","applicable_rule":"사규 조항",\n'
-        '    "rule_analysis":"사규 평가(Stage1 인용)","recommendation":"권고안"}],\n'
+        '    "law_analysis":"법령·판례 평가 (Gemini 검색 결과 검증 포함)",\n'
+        '    "applicable_rule":"사규 조항 (Stage1 PART A 인용)",\n'
+        '    "rule_analysis":"사규 평가","recommendation":"권고안"}],\n'
         '  "action_plan":"액션 플랜","alternative_clause":"수정안 또는 null",\n'
         '  "cited_laws":["법령명 제X조"]\n'
         "}\n"
@@ -380,8 +389,8 @@ def build_system_claude(docs, laws_db, gemini_analysis=""):
     return result
 
 def build_system_gemini_stage1(docs):
-    """Stage 1: Gemini가 사규/계약서/약정서 기준으로 내부 기준 위반사항 분석.
-    Gemini는 컨텍스트 1M 토큰이라 사규 원문을 넉넉히 넣을 수 있음.
+    """Stage 1: Gemini — 사규 분석 + Google Search로 최신 법령/판례 검색.
+    Gemini는 1M 토큰 + Google Search 실시간 검색 가능.
     """
     def by_cat(cat):
         return [d for d in docs if d["cat"] == cat]
@@ -394,14 +403,31 @@ def build_system_gemini_stage1(docs):
     yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 30000)
 
     return (
-        "당신은 면세점 공정거래 실무의 사규/표준계약서 전문 분석가입니다.\n"
-        "사용자의 질문 또는 첨부 문서를 아래 당사 사규/계약서/약정서와 대조하여 분석하세요.\n\n"
-        "분석 결과를 아래 형식으로 간결하게 정리하세요:\n"
-        "- 위반 또는 불일치 조항: 사규/계약서 어떤 조항에 위배되는지\n"
-        "- 부합 조항: 문제없는 부분\n"
-        "- 사규에 명시되지 않은 사항: 규정 공백\n\n"
-        "법령/행정규칙 분석은 하지 마세요 (Stage 2에서 처리됩니다).\n"
-        "사규/계약서 원문 조항을 인용하여 근거를 명확히 하세요.\n\n"
+        "당신은 면세점 공정거래 실무 전문가입니다. 2단계 분석을 수행하세요.\n\n"
+        
+        "**[PART A: 사규/표준계약서 기준 분석]**\n"
+        "사용자의 질문/첨부 문서를 아래 사규/계약서/약정서와 대조하여:\n"
+        "- 위반 또는 불일치 조항 (사규 원문 인용)\n"
+        "- 부합 조항\n"
+        "- 사규에 명시되지 않은 규정 공백\n\n"
+        
+        "**[PART B: 법령/행정규칙/판례 검색 (Google Search 활용)]**\n"
+        "반드시 Google Search를 사용하여 아래를 실시간 검색하세요:\n"
+        "- 관련 법령의 **현행 최신 조문** (law.go.kr 국가법령정보센터에서 확인)\n"
+        "- 관련 **판례/법령해석례** (대법원 판례, 공정위 의결, 관세청 해석례)\n"
+        "- 보세판매장 특허 및 운영에 관한 고시 (관세청 행정규칙)\n\n"
+        "⚠️ 중요: 법령 조문번호와 판례번호는 반드시 Google Search로 확인한 것만 인용하세요.\n"
+        "검색하지 않은 조문번호나 판례번호를 절대 추측하여 기재하지 마세요.\n"
+        "판례를 인용할 때는 '대법원 20XX.XX.XX. 선고 20XXdaXXXXX 판결' 형식으로, 실제 검색 결과에서 확인된 것만 기재하세요.\n\n"
+        
+        "**[출력 형식]**\n"
+        "===== PART A: 사규 분석 결과 =====\n"
+        "(사규/계약서 위반사항, 부합사항, 규정 공백)\n\n"
+        "===== PART B: 법령/판례 검색 결과 =====\n"
+        "(각 법령은 '법령명 제X조 (조문 제목) - 검색 출처 URL' 형식)\n"
+        "(판례는 '대법원 XXXX.XX.XX. 선고 XXXXdaXXXXX 판결 - 핵심 판시사항' 형식)\n"
+        "(검색하지 못한 항목은 '미확인'으로 표시)\n\n"
+        
         "━━━ [당사 사규] ━━━\n" + saryu_text +
         "\n\n━━━ [당사 표준 계약서] ━━━\n" + contract_text +
         "\n\n━━━ [당사 표준 약정서] ━━━\n" + yakjeong_text
