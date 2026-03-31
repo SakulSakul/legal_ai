@@ -538,9 +538,67 @@ def build_system_gemini_stage1(docs, laws_db):
         "\n\n━━━ [법령 DB 등록 목록 (참고)] ━━━\n" + laws_list
     )
 
+def verify_precedent_via_api(case_no):
+    """law.go.kr API로 판례 실재 여부 검증.
+    Returns: (exists: bool, title: str)
+    """
+    import requests
+    
+    # 사건번호에서 숫자 부분 추출 (예: "대법원 2004도2269" → "2004도2269")
+    import re as _re
+    num_match = _re.search(r'(\d{4}[가-힣]+\d+)', case_no)
+    if not num_match:
+        return False, ""
+    
+    query = num_match.group(1)
+    try:
+        url = "http://www.law.go.kr/DRF/lawSearch.do"
+        params = {"OC": "sapphire_5", "target": "prec", "type": "XML", "query": query}
+        res = requests.get(url, params=params, timeout=10)
+        if res.status_code != 200:
+            return False, ""
+        
+        root = ET.fromstring(res.text)
+        # 검색 결과 건수 확인
+        total = root.findtext('.//totalCnt') or root.findtext('.//TotalCnt') or "0"
+        if int(total) > 0:
+            title = root.findtext('.//사건명') or root.findtext('.//prec') or ""
+            return True, title[:100]
+        return False, ""
+    except Exception as e:
+        logger.warning(f"판례 API 검증 실패 ({query}): {e}")
+        return False, ""
+
+
+def verify_law_via_api(law_name, article):
+    """law.go.kr API로 법령 조문 실재 여부 검증.
+    Returns: (exists: bool, content_preview: str)
+    """
+    import requests
+    
+    try:
+        # 법령 검색
+        url = "http://www.law.go.kr/DRF/lawSearch.do"
+        params = {"OC": "sapphire_5", "target": "law", "type": "XML", "query": law_name}
+        res = requests.get(url, params=params, timeout=10)
+        if res.status_code != 200:
+            return False, ""
+        
+        root = ET.fromstring(res.text)
+        total = root.findtext('.//totalCnt') or "0"
+        if int(total) > 0:
+            return True, f"{law_name} 법령 존재 확인"
+        return False, ""
+    except Exception as e:
+        logger.warning(f"법령 API 검증 실패 ({law_name}): {e}")
+        return False, ""
+
+
 def gatekeeper_process(gemini_raw_json, laws_db):
-    """Stage 2: Gatekeeper — Gemini의 Raw Data를 DB 원문과 대조하여 정제.
-    DB에 있는 법령은 원문으로 교체(정확도 100%), 없으면 '확인필요' 플래그.
+    """Stage 2: Gatekeeper — Gemini의 Raw Data를 3중 검증 후 정제.
+    1차: 사내 DB(124건+) 원문 대조
+    2차: law.go.kr API 실시간 판례 검증 (할루시네이션 차단)
+    3차: DB 미등록 법령도 API로 존재 여부 확인
     결과: Claude에게 전달할 정제된 텍스트 (2~5k 토큰).
     """
     if not gemini_raw_json:
@@ -550,31 +608,30 @@ def gatekeeper_process(gemini_raw_json, laws_db):
     verified_laws = []
     unverified_laws = []
     verified_precedents = []
-    unverified_precedents = []
+    dropped_precedents = []  # 할루시네이션으로 판정되어 삭제된 판례
     
-    # 1. 사규 분석 결과 → 그대로 전달 (Gemini가 원문 대조한 결과)
+    # 1. 사규 분석 결과 → 그대로 전달
     saryu_findings = gemini_raw_json.get("saryu_findings", [])
     if saryu_findings:
         refined_parts.append("━━━ [사규 분석 결과 (Gemini 확인)] ━━━")
         for sf in saryu_findings:
             refined_parts.append(f"- [{sf.get('relevance','?')}] {sf.get('source','?')} {sf.get('clause','')}: {sf.get('content','')[:200]}")
     
-    # 2. 법령 → DB 원문과 대조
+    # 2. 법령 → 사내 DB 대조 + API 보조 검증
     law_findings = gemini_raw_json.get("law_findings", [])
-    refined_parts.append("\n━━━ [법령 검증 결과 (DB 대조)] ━━━")
+    refined_parts.append("\n━━━ [법령 검증 결과] ━━━")
     
     for lf in law_findings:
         law_name = lf.get("law_name", "")
         article = lf.get("article", "")
         search_confirmed = lf.get("search_confirmed", False)
         
-        # DB에서 매칭 검색
+        # 1차: 사내 DB 매칭
         db_match = None
         for db_law in laws_db:
             db_short = db_law.get("law_short", "")
             db_name = db_law.get("law_name", "")
             db_article = db_law.get("article_no", "")
-            
             if article != db_article:
                 continue
             if (law_name == db_short or law_name == db_name or
@@ -584,7 +641,6 @@ def gatekeeper_process(gemini_raw_json, laws_db):
                 break
         
         if db_match:
-            # ✅ DB에 있음 → 원문으로 교체 (정확도 100%)
             db_content = db_match["content"][:500]
             last_updated = db_match.get("last_updated", "")[:10]
             refined_parts.append(
@@ -593,27 +649,45 @@ def gatekeeper_process(gemini_raw_json, laws_db):
             )
             verified_laws.append({"law_name": law_name, "article": article, "db_verified": True, "last_updated": last_updated})
         else:
-            # ⚠️ DB에 없음 → Gemini 검색 결과 + 확인필요 플래그
-            flag = "🔍 검색확인" if search_confirmed else "❓ 미확인"
-            refined_parts.append(
-                f"⚠️ [{law_name} {article}] (DB 미등록 — {flag})\n"
-                f"   Gemini 요약: {lf.get('content', '내용 없음')[:200]}"
-            )
-            unverified_laws.append({"law_name": law_name, "article": article, "db_verified": False, "search_confirmed": search_confirmed})
+            # 2차: law.go.kr API로 법령 존재 여부 확인
+            api_exists, api_info = verify_law_via_api(law_name, article)
+            time.sleep(0.5)  # Rate limit 방어
+            
+            if api_exists:
+                refined_parts.append(
+                    f"🔍 [{law_name} {article}] (DB 미등록, API 법령 존재 확인)\n"
+                    f"   Gemini 요약: {lf.get('content', '내용 없음')[:200]}"
+                )
+                unverified_laws.append({"law_name": law_name, "article": article, "db_verified": False, "api_verified": True})
+            else:
+                refined_parts.append(
+                    f"⚠️ [{law_name} {article}] (DB 미등록, API 미확인 — 존재 여부 불확실)\n"
+                    f"   Gemini 요약: {lf.get('content', '내용 없음')[:200]}"
+                )
+                unverified_laws.append({"law_name": law_name, "article": article, "db_verified": False, "api_verified": False})
     
-    # 3. 판례 → 전부 '미검증' 플래그 (판례 DB가 없으므로)
+    # 3. 판례 → law.go.kr API로 실시간 검증 (할루시네이션 차단)
     precedent_findings = gemini_raw_json.get("precedent_findings", [])
     if precedent_findings:
-        refined_parts.append("\n━━━ [판례 (시스템 검증 불가 — Gemini 검색 기반)] ━━━")
+        refined_parts.append("\n━━━ [판례 검증 결과 (law.go.kr API 대조)] ━━━")
         for pf in precedent_findings:
-            confirmed = pf.get("search_confirmed", False)
-            flag = "🔍 검색확인" if confirmed else "❓ 미확인"
             case_no = pf.get("case_no", "미확인")
-            refined_parts.append(f"- [{flag}] {case_no}: {pf.get('summary', '')[:150]}")
-            if confirmed:
-                verified_precedents.append(pf)
+            
+            if case_no == "미확인" or not case_no:
+                continue
+            
+            # law.go.kr API로 실시간 검증
+            exists, title = verify_precedent_via_api(case_no)
+            time.sleep(0.5)  # Rate limit 방어
+            
+            if exists:
+                refined_parts.append(f"✅ [{case_no}] (API 검증 완료): {pf.get('summary', '')[:150]}")
+                verified_precedents.append({"case_no": case_no, "summary": pf.get("summary", ""), "api_verified": True})
             else:
-                unverified_precedents.append(pf)
+                # 🚨 할루시네이션 감지 → 삭제(Drop)
+                logger.warning(f"🚨 할루시네이션 판례 감지 및 차단: {case_no}")
+                refined_parts.append(f"🚨 [{case_no}] → 국가법령정보센터에 존재하지 않음. 허위 판례로 판정하여 삭제됨.")
+                dropped_precedents.append({"case_no": case_no, "reason": "API 검증 실패 — 존재하지 않는 판례"})
     
     # 4. 리스크 영역
     risk_areas = gemini_raw_json.get("risk_areas", [])
@@ -624,18 +698,19 @@ def gatekeeper_process(gemini_raw_json, laws_db):
     
     refined_text = "\n".join(refined_parts)
     
-    # 메타데이터
     meta = {
         "query_summary": gemini_raw_json.get("query_summary", ""),
         "verified_laws": verified_laws,
         "unverified_laws": unverified_laws,
         "verified_precedents": verified_precedents,
-        "unverified_precedents": unverified_precedents,
+        "dropped_precedents": dropped_precedents,
         "total_laws": len(verified_laws) + len(unverified_laws),
-        "total_precedents": len(verified_precedents) + len(unverified_precedents),
+        "total_precedents": len(verified_precedents),
+        "total_dropped": len(dropped_precedents),
     }
     
-    logger.info(f"Gatekeeper: 법령 {meta['total_laws']}건(DB검증 {len(verified_laws)}), 판례 {meta['total_precedents']}건, 정제 텍스트 {len(refined_text)}자")
+    logger.info(f"Gatekeeper: 법령 {meta['total_laws']}건(DB검증 {len(verified_laws)}), "
+                f"판례 검증{len(verified_precedents)}/삭제{len(dropped_precedents)}, 정제 {len(refined_text)}자")
     return meta, refined_text
 
 
@@ -1732,14 +1807,24 @@ def main():
                             st.warning(f"⚠️ DB 미등록 법령 {len(db_unverified)}건 — 국가법령정보센터에서 현행 여부를 확인하세요.")
                             st.markdown("🔗 " + " | ".join(unverified_links))
                         
-                        # 판례 검증 결과
-                        if precedent_results:
+                        # 판례 검증 결과 + 할루시네이션 차단 표시
+                        gk_meta = st.session_state.get("_gatekeeper_meta", {})
+                        if gk_meta:
+                            dropped = gk_meta.get("dropped_precedents", [])
+                            v_prec = gk_meta.get("verified_precedents", [])
+                            if dropped:
+                                st.error(f"🚨 AI 할루시네이션 {len(dropped)}건 감지 — 허위 판례가 시스템에 의해 강제 삭제되었습니다.")
+                                for dp in dropped:
+                                    st.caption(f"  ❌ {dp['case_no']} — {dp.get('reason', '국가법령정보센터 미존재')}")
+                            if v_prec:
+                                with st.expander(f"✅ API 검증 완료 판례 ({len(v_prec)}건)", expanded=False):
+                                    for vp in v_prec:
+                                        st.markdown(f"- ✅ {vp['case_no']}: {vp.get('summary', '')[:100]}")
+                        elif precedent_results:
                             unverified_prec = [p for p in precedent_results if not p["verified"]]
                             if unverified_prec:
                                 st.warning(f"⚠️ 미확인 판례 {len(unverified_prec)}건 — 대법원 판례검색에서 실재 여부를 확인하세요.")
-                                prec_links = []
-                                for p in unverified_prec:
-                                    prec_links.append(f"[{p['case_no']}](https://glaw.scourt.go.kr/wsjo/panre/sjo100.do)")
+                                prec_links = [f"[{p['case_no']}](https://glaw.scourt.go.kr/wsjo/panre/sjo100.do)" for p in unverified_prec]
                                 st.markdown("🔗 " + " | ".join(prec_links))
                         
                         render_issues_table(json_data.get("issues", []), citation_results)
