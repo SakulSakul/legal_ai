@@ -303,14 +303,14 @@ def cite_partial_match(name, cite):
 
 # ── 에러 타입 분류 헬퍼 ──────────────────────────────────────
 def classify_api_error(error):
-    """API 에러를 분류하여 (에러유형, 메시지) 튜플 반환.
-    에러유형: 'rate_limit', 'auth', 'server', 'unknown'
-    """
+    """API 에러를 분류하여 (에러유형, 메시지) 튜플 반환."""
     error_msg = str(error).lower()
     if any(kw in error_msg for kw in ["rate", "quota", "429", "resource_exhausted"]):
         return "rate_limit", "API 사용 한도 또는 요금을 초과했습니다."
     elif any(kw in error_msg for kw in ["401", "403", "authentication", "api_key", "permission"]):
         return "auth", "API 키가 유효하지 않거나 만료되었습니다."
+    elif any(kw in error_msg for kw in ["400", "bad_request", "badrequesterror", "context_length", "too_long", "max_tokens"]):
+        return "context_overflow", "입력이 너무 길어 처리할 수 없습니다. '새 대화 시작'을 눌러주세요."
     elif any(kw in error_msg for kw in ["500", "502", "503", "504", "unavailable", "timeout"]):
         return "server", "서버가 일시적으로 응답하지 않습니다."
     else:
@@ -338,13 +338,25 @@ def build_system_claude(docs, laws_db):
     
     laws_text = ""
     if laws_db:
-        # 핵심 법령/행정규칙: 원문 전체 포함
+        # 핵심 법령/행정규칙: 원문 전체 포함 (면세점 직결 우선 정렬)
+        CORE_PRIORITY = ["보세판매장고시", "관세법", "대규모유통업법", "대규모유통업법 시행령",
+                         "공정거래법", "하도급법", "상생협력법", "유통산업발전법",
+                         "대외무역법", "외국환거래법", "환급특례법"]
+        
         core_entries = []
+        # 우선순위 순서대로 추가
+        for priority_law in CORE_PRIORITY:
+            for law in laws_db:
+                if law["law_short"] == priority_law:
+                    core_entries.append(f"[{law['law_short']} {law['article_no']}] {law.get('article_title','')}\n{law['content']}")
+        # 혹시 CORE_PRIORITY에 없지만 CORE_LAWS에 있는 것도 추가
+        added_shorts = set(CORE_PRIORITY)
         for law in laws_db:
-            if law["law_short"] in CORE_LAWS:
+            if law["law_short"] in CORE_LAWS and law["law_short"] not in added_shorts:
                 core_entries.append(f"[{law['law_short']} {law['article_no']}] {law.get('article_title','')}\n{law['content']}")
+        
         core_text = "\n\n---\n\n".join(core_entries) if core_entries else ""
-        core_text = truncate_at_boundary(core_text, 45000)
+        core_text = truncate_at_boundary(core_text, 55000)
         
         # 보조 법령: 조문 제목만 목록으로 (AI 자체 지식 + DB 사후검증)
         aux_entries = []
@@ -476,9 +488,26 @@ def call_claude(system_prompt, messages):
     claude_messages = []
     last_role = None
 
-    for m in messages:
+    # 대화 히스토리가 너무 길면 컨텍스트 초과 → 최근 N턴만 유지
+    recent_messages = messages
+    if len(messages) > 12:
+        # 첫 메시지(최초 질문) + 최근 10턴 유지
+        recent_messages = messages[:2] + messages[-10:]
+
+    for m in recent_messages:
         role = "assistant" if m["role"] == "assistant" else "user"
+        # assistant 메시지에서 JSON 블록은 제거하여 토큰 절약
         content = m["content"]
+        if role == "assistant" and "```json" in content:
+            # JSON 블록 뒤의 상세 설명만 유지 (요약)
+            import re as _re
+            json_end = content.find("```", content.find("```json") + 7)
+            if json_end > 0:
+                summary_part = content[json_end + 3:].strip()
+                content = summary_part[:2000] if len(summary_part) > 2000 else summary_part
+                if not content:
+                    content = "(이전 검토 결과 — 상세 내용은 위 검토의견서 참조)"
+
         if role == last_role:
             claude_messages[-1]["content"] += f"\n\n{content}"
         else:
@@ -491,7 +520,7 @@ def call_claude(system_prompt, messages):
     try:
         response = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=4096,
+            max_tokens=8192,
             system=system_prompt,
             messages=claude_messages,
         )
@@ -503,9 +532,10 @@ def call_claude(system_prompt, messages):
             "rate_limit": "API 한도 초과",
             "auth": "API 인증 오류",
             "server": "서버 통신 장애",
+            "context_overflow": "입력 초과",
             "unknown": "통신 오류",
         }
-        return f"⚠️ [{label_map[err_type]}] Claude: {err_msg}"
+        return f"⚠️ [{label_map.get(err_type, '오류')}] Claude: {err_msg}"
 
 def call_gemini(system_prompt, messages):
     from google.genai import types
@@ -1247,7 +1277,14 @@ def main():
                 cit_results = msg.get("citation_results", [])
                 if cit_results and not all(cr["verified"] for cr in cit_results):
                     unverified = [cr["citation"] for cr in cit_results if not cr["verified"]]
-                    st.warning(f"⚠️ 다음 법령 인용의 DB 검증이 완료되지 않았습니다: {', '.join(unverified)}\n\n사내변호사에게 해당 조문의 현행 유효 여부를 반드시 확인받으세요.")
+                    unverified_links = []
+                            for uv in unverified:
+                                # 법령명에서 검색어 추출
+                                search_term = re.sub(r'\s*제\d+조.*', '', uv).strip()
+                                link = f"https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={search_term}"
+                                unverified_links.append(f"[{uv}]({link})")
+                            st.warning(f"⚠️ 다음 법령 인용의 DB 검증이 완료되지 않았습니다.\n\n사내변호사에게 해당 조문의 현행 유효 여부를 반드시 확인받으세요.")
+                            st.markdown("🔗 " + " | ".join(unverified_links))
                 render_issues_table(jd.get("issues", []), msg.get("citation_results", []))
                 if jd.get("alternative_clause"):
                     render_alternative_clause(jd["alternative_clause"])
@@ -1363,7 +1400,14 @@ def main():
                         # 4번: 인용 검증 실패 경고
                         if citation_results and not all(cr["verified"] for cr in citation_results):
                             unverified = [cr["citation"] for cr in citation_results if not cr["verified"]]
-                            st.warning(f"⚠️ 다음 법령 인용의 DB 검증이 완료되지 않았습니다: {', '.join(unverified)}\n\n사내변호사에게 해당 조문의 현행 유효 여부를 반드시 확인받으세요.")
+                            unverified_links = []
+                            for uv in unverified:
+                                # 법령명에서 검색어 추출
+                                search_term = re.sub(r'\s*제\d+조.*', '', uv).strip()
+                                link = f"https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={search_term}"
+                                unverified_links.append(f"[{uv}]({link})")
+                            st.warning(f"⚠️ 다음 법령 인용의 DB 검증이 완료되지 않았습니다.\n\n사내변호사에게 해당 조문의 현행 유효 여부를 반드시 확인받으세요.")
+                            st.markdown("🔗 " + " | ".join(unverified_links))
                         render_issues_table(json_data.get("issues", []), citation_results)
                         if json_data.get("alternative_clause"): render_alternative_clause(json_data["alternative_clause"])
                         with st.expander("📄 상세 검토 의견 전문", expanded=False): st.markdown(detail_text)
