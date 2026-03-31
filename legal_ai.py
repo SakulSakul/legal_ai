@@ -1765,49 +1765,67 @@ def main():
                                 else:
                                     detail_res = _req.get(f"http://www.law.go.kr/DRF/lawService.do?OC=sapphire_5&target=law&MST={mst}&type=XML", timeout=15)
                                     detail_root = ET.fromstring(detail_res.text)
-                                    found = False
                                     best_match = None
                                     
+                                    # "제347조" → 가지번호 없는 것만, "제347조의2" → 가지번호 2
+                                    want_branch = ""
+                                    if "조의" in manual_art:
+                                        want_branch = manual_art.split("조의")[1]
+                                    
                                     for art_elem in detail_root.iter():
-                                        if art_elem.tag in ('조문단위', '조문'):
-                                            no_elem = art_elem.find('조문번호')
-                                            if no_elem is None or not no_elem.text:
-                                                continue
-                                            raw_no = no_elem.text.strip()
-                                            
-                                            # 정규화: "347" → "제347조"
-                                            no = raw_no if raw_no.startswith("제") else f"제{raw_no}"
-                                            if not no.endswith("조") and "조의" not in no:
-                                                no += "조"
-                                            
-                                            if no != manual_art:
-                                                continue
-                                            
-                                            title_elem = art_elem.find('조문제목')
-                                            title = title_elem.text.strip() if title_elem is not None and title_elem.text else ""
-                                            
-                                            # 내용: 조문내용 + 하위 항/호 모두 수집
-                                            parts = []
-                                            content_elem = art_elem.find('조문내용')
-                                            if content_elem is not None and content_elem.text:
-                                                parts.append(content_elem.text.strip())
-                                            for hang in art_elem.findall('.//항'):
-                                                he = hang.find('항내용') 
-                                                he = he if he is not None else hang
-                                                if he is not None and he.text:
-                                                    parts.append(he.text.strip())
-                                            content = "\n".join(parts)
-                                            
-                                            # 같은 번호가 여러 개면 제목+내용이 있는 것 우선
-                                            if content and title:
-                                                best_match = (title, content)
-                                                break
-                                            elif content and not best_match:
-                                                best_match = (title, content)
+                                        if art_elem.tag not in ('조문단위', '조문'):
+                                            continue
+                                        no_elem = art_elem.find('조문번호')
+                                        if no_elem is None or not no_elem.text:
+                                            continue
+                                        raw_no = no_elem.text.strip()
+                                        
+                                        # 정규화
+                                        no = raw_no if raw_no.startswith("제") else f"제{raw_no}"
+                                        if not no.endswith("조") and "조의" not in no:
+                                            no += "조"
+                                        
+                                        # 기본 번호 매칭 (제347조 입력 시 "347" 매칭)
+                                        base_art = manual_art.split("조의")[0] + "조" if "조의" in manual_art else manual_art
+                                        if no != base_art:
+                                            continue
+                                        
+                                        # 가지번호 체크 (제347조 vs 제347조의2)
+                                        branch_elem = art_elem.find('조문가지번호')
+                                        actual_branch = branch_elem.text.strip() if branch_elem is not None and branch_elem.text else ""
+                                        if want_branch != actual_branch:
+                                            continue
+                                        
+                                        # 장 제목 건너뛰기 (조문여부가 '전문'이면 스킵)
+                                        jo_type = art_elem.find('조문여부')
+                                        if jo_type is not None and jo_type.text and jo_type.text.strip() == '전문':
+                                            continue
+                                        
+                                        title_elem = art_elem.find('조문제목')
+                                        title = title_elem.text.strip() if title_elem is not None and title_elem.text else ""
+                                        
+                                        # 내용 수집: 조문내용 + 항내용
+                                        parts = []
+                                        content_elem = art_elem.find('조문내용')
+                                        if content_elem is not None and content_elem.text:
+                                            parts.append(content_elem.text.strip())
+                                        for hang in art_elem.findall('.//항'):
+                                            hang_content = hang.find('항내용')
+                                            if hang_content is not None and hang_content.text:
+                                                parts.append(hang_content.text.strip())
+                                            for ho in hang.findall('.//호'):
+                                                ho_content = ho.find('호내용')
+                                                if ho_content is not None and ho_content.text:
+                                                    parts.append("  " + ho_content.text.strip())
+                                        content = "\n".join(parts)
+                                        
+                                        if content:
+                                            best_match = (title, content)
+                                            break
                                     
                                     if best_match:
                                         title, content = best_match
-                                        law_id = f"{manual_short}_{manual_art.replace('제','').replace('조','')}"
+                                        law_id = f"{manual_short}_{manual_art.replace('제','').replace('조','').replace('의','_')}"
                                         row = {"id": law_id, "law_name": manual_law, "law_short": manual_short,
                                                "article_no": manual_art, "article_title": title, "content": content,
                                                "last_updated": datetime.now().isoformat()}
