@@ -1278,13 +1278,12 @@ def main():
                 if cit_results and not all(cr["verified"] for cr in cit_results):
                     unverified = [cr["citation"] for cr in cit_results if not cr["verified"]]
                     unverified_links = []
-                            for uv in unverified:
-                                # 법령명에서 검색어 추출
-                                search_term = re.sub(r'\s*제\d+조.*', '', uv).strip()
-                                link = f"https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={search_term}"
-                                unverified_links.append(f"[{uv}]({link})")
-                            st.warning(f"⚠️ 다음 법령 인용의 DB 검증이 완료되지 않았습니다.\n\n사내변호사에게 해당 조문의 현행 유효 여부를 반드시 확인받으세요.")
-                            st.markdown("🔗 " + " | ".join(unverified_links))
+                    for uv in unverified:
+                        search_term = re.sub(r'\s*제\d+조.*', '', uv).strip()
+                        link = f"https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={search_term}"
+                        unverified_links.append(f"[{uv}]({link})")
+                    st.warning("⚠️ 다음 법령 인용의 DB 검증이 완료되지 않았습니다.\n\n사내변호사에게 해당 조문의 현행 유효 여부를 반드시 확인받으세요.")
+                    st.markdown("🔗 " + " | ".join(unverified_links))
                 render_issues_table(jd.get("issues", []), msg.get("citation_results", []))
                 if jd.get("alternative_clause"):
                     render_alternative_clause(jd["alternative_clause"])
