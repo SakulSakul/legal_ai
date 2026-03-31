@@ -16,6 +16,7 @@
 
 import streamlit as st
 import os, io, json, re, time, logging, uuid
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 # ── 로깅 설정 ────────────────────────────────────────────────
