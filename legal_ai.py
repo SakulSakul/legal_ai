@@ -328,50 +328,24 @@ def build_system_claude(docs, laws_db):
     contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 20000)
     yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 10000)
 
-    # 핵심 법령/행정규칙: 시스템 프롬프트에 원문 포함 (면세점 직결만)
-    CORE_LAWS = {
-        "보세판매장고시", "관세법",
-        "대규모유통업법", "대규모유통업법 시행령",
-        "공정거래법", "하도급법",
-    }
-    
+    # ── 법령/행정규칙: 원문은 넣지 않음 → AI 자체 법률 지식으로 검토
+    #    DB는 인용 검증(사후 검증)용으로만 사용
+    #    시스템 프롬프트에는 "이런 법령들이 DB에 있다"는 목록만 전달
     laws_text = ""
     if laws_db:
-        # 핵심 법령/행정규칙: 원문 전체 포함 (면세점 직결 우선 정렬)
-        CORE_PRIORITY = ["보세판매장고시", "관세법", "대규모유통업법", "대규모유통업법 시행령",
-                         "공정거래법", "하도급법"]
-        
-        core_entries = []
-        # 우선순위 순서대로 추가
-        for priority_law in CORE_PRIORITY:
-            for law in laws_db:
-                if law["law_short"] == priority_law:
-                    core_entries.append(f"[{law['law_short']} {law['article_no']}] {law.get('article_title','')}\n{law['content']}")
-        # 혹시 CORE_PRIORITY에 없지만 CORE_LAWS에 있는 것도 추가
-        added_shorts = set(CORE_PRIORITY)
+        law_groups = {}
         for law in laws_db:
-            if law["law_short"] in CORE_LAWS and law["law_short"] not in added_shorts:
-                core_entries.append(f"[{law['law_short']} {law['article_no']}] {law.get('article_title','')}\n{law['content']}")
+            short = law.get("law_short", "기타")
+            if short not in law_groups:
+                law_groups[short] = []
+            title = law.get("article_title", "")
+            no = law.get("article_no", "")
+            law_groups[short].append(f"{no} {title}" if title else no)
         
-        core_text = "\n\n---\n\n".join(core_entries) if core_entries else ""
-        core_text = truncate_at_boundary(core_text, 35000)
-        
-        # 보조 법령: 조문 제목만 목록으로 (AI 자체 지식 + DB 사후검증)
-        aux_entries = []
-        for law in laws_db:
-            if law["law_short"] not in CORE_LAWS:
-                title = law.get('article_title', '')
-                aux_entries.append(f"- {law['law_short']} {law['article_no']} {title}")
-        aux_text = "\n".join(sorted(set(aux_entries))) if aux_entries else ""
-        
-        laws_text = core_text
-        if aux_text:
-            laws_text += (
-                "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                "[보조 법령 목록 (DB에 원문 보유 — 아래 법령은 당신의 법률 지식으로 답변하되, 인용 시 정확한 조문번호를 명시하세요)]\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
-                aux_text
-            )
+        list_lines = []
+        for law_short, articles in sorted(law_groups.items()):
+            list_lines.append(f"- {law_short}: {', '.join(articles)}")
+        laws_text = "\n".join(list_lines)
     else:
         laws_text = "(법령/행정규칙 DB 미등록 — 일반 법률 지식으로 판단)"
 
@@ -396,7 +370,10 @@ def build_system_claude(docs, laws_db):
         "\n\n③ 당사 표준 약정서:\n" + yakjeong_text +
 
         "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "[적용 법령·행정규칙 DB (현행 법령 및 고시 원문)]\n"
+        "[적용 법령·행정규칙 DB 목록 (사후 검증용)]\n"
+        "아래 법령/행정규칙이 최신 DB에 등록되어 있습니다.\n"
+        "당신의 법률 지식으로 검토하되, 인용 시 반드시 아래 목록에 있는 법령명과 조문번호를 정확히 사용하세요.\n"
+        "DB에 있는 법령을 인용하면 시스템이 자동으로 최신 여부를 검증합니다.\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
         laws_text +
 
