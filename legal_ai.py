@@ -1766,58 +1766,68 @@ def main():
                                     detail_res = _req.get(f"http://www.law.go.kr/DRF/lawService.do?OC=sapphire_5&target=law&MST={mst}&type=XML", timeout=15)
                                     detail_root = ET.fromstring(detail_res.text)
                                     best_match = None
+                                    debug_log = []
                                     
-                                    # "제347조" → 가지번호 없는 것만, "제347조의2" → 가지번호 2
-                                    want_branch = ""
-                                    if "조의" in manual_art:
-                                        want_branch = manual_art.split("조의")[1]
+                                    # 조문번호에서 숫자만 추출 (제347조 → 347)
+                                    import re as _re
+                                    art_num = _re.sub(r'[^0-9]', '', manual_art.split("조의")[0])  # "347"
+                                    want_branch = manual_art.split("조의")[1] if "조의" in manual_art else ""
                                     
-                                    for art_elem in detail_root.iter():
-                                        if art_elem.tag not in ('조문단위', '조문'):
-                                            continue
+                                    # 모든 조문단위/조문 태그 직접 수집 (iter 대신 findall)
+                                    art_elems = detail_root.findall('.//조문단위')
+                                    if not art_elems:
+                                        art_elems = detail_root.findall('.//조문')
+                                    
+                                    debug_log.append(f"조문 태그 수: {len(art_elems)}, 찾는 번호: {art_num}, 가지: '{want_branch}'")
+                                    
+                                    for art_elem in art_elems:
                                         no_elem = art_elem.find('조문번호')
                                         if no_elem is None or not no_elem.text:
                                             continue
                                         raw_no = no_elem.text.strip()
                                         
-                                        # 정규화
-                                        no = raw_no if raw_no.startswith("제") else f"제{raw_no}"
-                                        if not no.endswith("조") and "조의" not in no:
-                                            no += "조"
-                                        
-                                        # 기본 번호 매칭 (제347조 입력 시 "347" 매칭)
-                                        base_art = manual_art.split("조의")[0] + "조" if "조의" in manual_art else manual_art
-                                        if no != base_art:
+                                        if raw_no != art_num:
                                             continue
                                         
-                                        # 가지번호 체크 (제347조 vs 제347조의2)
+                                        # 가지번호 체크
                                         branch_elem = art_elem.find('조문가지번호')
                                         actual_branch = branch_elem.text.strip() if branch_elem is not None and branch_elem.text else ""
-                                        if want_branch != actual_branch:
-                                            continue
                                         
-                                        # 장 제목 건너뛰기 (조문여부가 '전문'이면 스킵)
-                                        jo_type = art_elem.find('조문여부')
-                                        if jo_type is not None and jo_type.text and jo_type.text.strip() == '전문':
-                                            continue
+                                        # 조문여부 체크
+                                        jo_type_elem = art_elem.find('조문여부')
+                                        jo_type = jo_type_elem.text.strip() if jo_type_elem is not None and jo_type_elem.text else ""
                                         
                                         title_elem = art_elem.find('조문제목')
                                         title = title_elem.text.strip() if title_elem is not None and title_elem.text else ""
                                         
-                                        # 내용 수집: 조문내용 + 항내용
+                                        debug_log.append(f"  매칭: raw={raw_no}, 가지={actual_branch}, 조문여부={jo_type}, 제목={title}")
+                                        
+                                        # 가지번호 필터
+                                        if want_branch != actual_branch:
+                                            debug_log.append(f"    → 가지번호 불일치 (원하는: '{want_branch}', 실제: '{actual_branch}')")
+                                            continue
+                                        
+                                        # 장/편 제목 스킵
+                                        if jo_type == '전문':
+                                            debug_log.append(f"    → 전문(장제목) 스킵")
+                                            continue
+                                        
+                                        # 내용 수집
                                         parts = []
                                         content_elem = art_elem.find('조문내용')
                                         if content_elem is not None and content_elem.text:
                                             parts.append(content_elem.text.strip())
-                                        for hang in art_elem.findall('.//항'):
-                                            hang_content = hang.find('항내용')
-                                            if hang_content is not None and hang_content.text:
-                                                parts.append(hang_content.text.strip())
-                                            for ho in hang.findall('.//호'):
-                                                ho_content = ho.find('호내용')
-                                                if ho_content is not None and ho_content.text:
-                                                    parts.append("  " + ho_content.text.strip())
+                                        for hang in art_elem.findall('항'):
+                                            hc = hang.find('항내용')
+                                            if hc is not None and hc.text:
+                                                parts.append(hc.text.strip())
+                                            for ho in hang.findall('호'):
+                                                hoc = ho.find('호내용')
+                                                if hoc is not None and hoc.text:
+                                                    parts.append("  " + hoc.text.strip())
                                         content = "\n".join(parts)
+                                        
+                                        debug_log.append(f"    → 내용 {len(content)}자")
                                         
                                         if content:
                                             best_match = (title, content)
@@ -1825,7 +1835,9 @@ def main():
                                     
                                     if best_match:
                                         title, content = best_match
-                                        law_id = f"{manual_short}_{manual_art.replace('제','').replace('조','').replace('의','_')}"
+                                        law_id = f"{manual_short}_{art_num}"
+                                        if want_branch:
+                                            law_id += f"_{want_branch}"
                                         row = {"id": law_id, "law_name": manual_law, "law_short": manual_short,
                                                "article_no": manual_art, "article_title": title, "content": content,
                                                "last_updated": datetime.now().isoformat()}
@@ -1836,6 +1848,9 @@ def main():
                                         st.session_state.laws_db = load_laws()
                                     else:
                                         st.error(f"❌ {manual_law}에서 {manual_art}를 찾을 수 없습니다.")
+                                        with st.expander("🔍 디버그 로그"):
+                                            for dl in debug_log:
+                                                st.caption(dl)
                             except Exception as e:
                                 st.error(f"❌ 오류: {e}")
 
