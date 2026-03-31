@@ -432,29 +432,26 @@ def call_claude(system_prompt, messages):
     claude_messages = []
     last_role = None
 
-    # 대화 히스토리 제한: 최근 N턴만
-    recent_messages = messages
-    if len(messages) > 10:
-        recent_messages = messages[:2] + messages[-8:]
+    # 대화 히스토리 극한 제한: 마지막 질문만
+    if len(messages) > 4:
+        recent_messages = [messages[-1]]
+    else:
+        recent_messages = messages
 
     for m in recent_messages:
         role = "assistant" if m["role"] == "assistant" else "user"
         content = m["content"]
         
-        # assistant의 긴 응답은 축소 (JSON 블록 제거, 2000자 제한)
+        # assistant 응답 극한 축소
         if role == "assistant":
-            if "```json" in content:
-                json_end = content.find("```", content.find("```json") + 7)
-                if json_end > 0:
-                    content = content[json_end + 3:].strip()
-            if len(content) > 2000:
-                content = content[:2000] + "...(이하 생략)"
+            if len(content) > 1000:
+                content = content[:1000]
             if not content.strip():
-                content = "(이전 검토 결과 참조)"
+                content = "(이전 결과 참조)"
         
-        # user 메시지도 너무 길면 축소 (첨부파일 텍스트가 거대할 수 있음)
-        if role == "user" and len(content) > 15000:
-            content = content[:15000] + "\n\n...(입력 텍스트가 길어 일부 생략됨)"
+        # user 메시지 극한 축소
+        if role == "user" and len(content) > 8000:
+            content = content[:8000] + "\n...(이하 생략)"
 
         if role == last_role:
             claude_messages[-1]["content"] += f"\n\n{content}"
@@ -464,12 +461,16 @@ def call_claude(system_prompt, messages):
             
     if claude_messages and claude_messages[0]["role"] == "assistant":
         claude_messages.pop(0)
+    
+    # 마지막 메시지가 user인지 확인
+    if not claude_messages or claude_messages[-1]["role"] != "user":
+        claude_messages.append({"role": "user", "content": "검토해주세요."})
 
-    # 토큰 크기 추정 로깅
+    # 크기 로깅
     sys_chars = len(system_prompt)
     msg_chars = sum(len(m["content"]) for m in claude_messages)
     total_chars = sys_chars + msg_chars
-    logger.info(f"Claude 호출: system={sys_chars:,}자, messages={msg_chars:,}자, total={total_chars:,}자 (추정 {int(total_chars/1.5):,} 토큰)")
+    logger.info(f"Claude 호출: system={sys_chars:,}자, msgs={msg_chars:,}자, total={total_chars:,}자 (~{int(total_chars/1.5):,}tok), msg수={len(claude_messages)}")
 
     try:
         response = client.messages.create(
@@ -480,7 +481,11 @@ def call_claude(system_prompt, messages):
         )
         return response.content[0].text
     except Exception as e:
-        logger.error(f"Claude API 오류: {e}")
+        # 에러 원문을 로그 + 사용자에게 모두 표시
+        error_str = str(e)
+        logger.error(f"Claude API 오류 원문: {error_str}")
+        logger.error(f"  system={sys_chars}자, msgs={msg_chars}자, total={total_chars}자")
+        
         err_type, err_msg = classify_api_error(e)
         label_map = {
             "rate_limit": "API 한도 초과",
@@ -489,7 +494,9 @@ def call_claude(system_prompt, messages):
             "context_overflow": "입력 초과",
             "unknown": "통신 오류",
         }
-        return f"⚠️ [{label_map.get(err_type, '오류')}] Claude: {err_msg}"
+        # 디버그 정보 포함
+        debug_info = f"(system={sys_chars:,}자, msg={msg_chars:,}자)"
+        return f"⚠️ [{label_map.get(err_type, '오류')}] Claude: {err_msg} {debug_info}"
 
 def call_gemini(system_prompt, messages):
     from google.genai import types
