@@ -841,7 +841,15 @@ def main():
         print(f"  {C.FAIL}{C.BOLD}⛔ 실패 — API키/네트워크 확인{C.END}")
     
     print()
-    sys.exit(1 if total_fail > 0 and total_up == 0 else 0)
+    return {"updated": total_up, "unchanged": total_unch, "failed": total_fail}
+
+
+def run_update():
+    """legal_ai.py에서 import하여 호출할 수 있는 래퍼 함수."""
+    return main()
+
 
 if __name__ == "__main__":
-    main()
+    result = main()
+    if result["failed"] > 0 and result["updated"] == 0:
+        sys.exit(1)
