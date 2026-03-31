@@ -538,17 +538,19 @@ def build_system_gemini_stage1(docs, laws_db):
         "\n\n━━━ [법령 DB 등록 목록 (참고)] ━━━\n" + laws_list
     )
 
-def verify_precedent_via_api(case_no):
-    """law.go.kr API로 판례 실재 여부 검증.
-    Returns: (exists: bool, title: str)
+def verify_precedent_via_api(case_no, context_keywords=None):
+    """law.go.kr API로 판례 검증.
+    1) 사건번호 존재 여부
+    2) 사건명이 인용 맥락과 관련 있는지 (할루시네이션 정밀 감지)
+    Returns: (status: str, title: str)
+      status: "verified" | "wrong_context" | "not_found" | "error"
     """
     import requests
     
-    # 사건번호에서 숫자 부분 추출 (예: "대법원 2004도2269" → "2004도2269")
     import re as _re
     num_match = _re.search(r'(\d{4}[가-힣]+\d+)', case_no)
     if not num_match:
-        return False, ""
+        return "not_found", ""
     
     query = num_match.group(1)
     try:
@@ -556,18 +558,33 @@ def verify_precedent_via_api(case_no):
         params = {"OC": "sapphire_5", "target": "prec", "type": "XML", "query": query}
         res = requests.get(url, params=params, timeout=10)
         if res.status_code != 200:
-            return False, ""
+            return "error", ""
         
         root = ET.fromstring(res.text)
-        # 검색 결과 건수 확인
         total = root.findtext('.//totalCnt') or root.findtext('.//TotalCnt') or "0"
-        if int(total) > 0:
-            title = root.findtext('.//사건명') or root.findtext('.//prec') or ""
-            return True, title[:100]
-        return False, ""
+        
+        if int(total) == 0:
+            return "not_found", ""
+        
+        # 사건명 추출
+        title = ""
+        for elem in root.iter():
+            if '사건명' in elem.tag and elem.text:
+                title = elem.text.strip()
+                break
+        
+        # 맥락 관련성 체크: Gemini가 어떤 맥락에서 인용했는지와 사건명 비교
+        if context_keywords:
+            title_lower = title.lower()
+            has_relevance = any(kw in title_lower for kw in context_keywords)
+            if not has_relevance:
+                # 사건번호는 존재하지만 맥락과 무관 → 할루시네이션
+                return "wrong_context", title
+        
+        return "verified", title
     except Exception as e:
         logger.warning(f"판례 API 검증 실패 ({query}): {e}")
-        return False, ""
+        return "error", ""
 
 
 def verify_law_via_api(law_name, article):
@@ -670,24 +687,51 @@ def gatekeeper_process(gemini_raw_json, laws_db):
     precedent_findings = gemini_raw_json.get("precedent_findings", [])
     if precedent_findings:
         refined_parts.append("\n━━━ [판례 검증 결과 (law.go.kr API 대조)] ━━━")
+        
+        # 리스크 영역에서 맥락 키워드 추출 (판례가 올바른 맥락인지 확인용)
+        risk_areas = gemini_raw_json.get("risk_areas", [])
+        context_kw = []
+        for ra in risk_areas:
+            for kw in ["상표", "위조", "모조", "가품", "사기", "관세", "밀수", "공정거래", "하도급", 
+                       "유통", "소비자", "광고", "식품", "세금", "면세", "보세", "부정경쟁",
+                       "횡령", "배임", "특허", "저작권", "영업비밀"]:
+                if kw in ra:
+                    context_kw.append(kw)
+        # Gemini의 판례 요약에서도 키워드 추출
+        for pf in precedent_findings:
+            summary = pf.get("summary", "")
+            for kw in ["상표", "위조", "모조", "사기", "관세", "밀수", "공정거래", "부정경쟁"]:
+                if kw in summary:
+                    context_kw.append(kw)
+        context_kw = list(set(context_kw)) if context_kw else None
+        
         for pf in precedent_findings:
             case_no = pf.get("case_no", "미확인")
-            
             if case_no == "미확인" or not case_no:
                 continue
             
-            # law.go.kr API로 실시간 검증
-            exists, title = verify_precedent_via_api(case_no)
-            time.sleep(0.5)  # Rate limit 방어
+            # law.go.kr API 3단계 검증
+            status, title = verify_precedent_via_api(case_no, context_kw)
+            time.sleep(0.5)
             
-            if exists:
-                refined_parts.append(f"✅ [{case_no}] (API 검증 완료): {pf.get('summary', '')[:150]}")
-                verified_precedents.append({"case_no": case_no, "summary": pf.get("summary", ""), "api_verified": True})
-            else:
-                # 🚨 할루시네이션 감지 → 삭제(Drop)
-                logger.warning(f"🚨 할루시네이션 판례 감지 및 차단: {case_no}")
+            if status == "verified":
+                refined_parts.append(f"✅ [{case_no}] (API 검증 완료, 사건명: {title}): {pf.get('summary', '')[:150]}")
+                verified_precedents.append({"case_no": case_no, "title": title, "summary": pf.get("summary", ""), "api_verified": True})
+            elif status == "wrong_context":
+                # 🚨 사건번호는 존재하지만 맥락과 무관 → 할루시네이션
+                logger.warning(f"🚨 맥락 불일치 판례 감지: {case_no} (실제: {title})")
+                refined_parts.append(
+                    f"🚨 [{case_no}] → 사건번호는 존재하나 실제 사건명은 '{title}'로, "
+                    f"AI가 인용한 맥락과 무관함. 허위 인용으로 판정하여 삭제됨."
+                )
+                dropped_precedents.append({"case_no": case_no, "reason": f"맥락 불일치 — 실제 사건: {title}"})
+            elif status == "not_found":
+                logger.warning(f"🚨 미존재 판례 감지: {case_no}")
                 refined_parts.append(f"🚨 [{case_no}] → 국가법령정보센터에 존재하지 않음. 허위 판례로 판정하여 삭제됨.")
                 dropped_precedents.append({"case_no": case_no, "reason": "API 검증 실패 — 존재하지 않는 판례"})
+            else:  # error
+                refined_parts.append(f"⚠️ [{case_no}] → API 검증 실패 (네트워크 오류). 수동 확인 필요.")
+                dropped_precedents.append({"case_no": case_no, "reason": "API 통신 오류 — 수동 확인 필요"})
     
     # 4. 리스크 영역
     risk_areas = gemini_raw_json.get("risk_areas", [])
