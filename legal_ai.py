@@ -263,7 +263,16 @@ def verify_citations(cited_laws, laws_db):
         found = False
         matched_content = ""
         for law in laws_db:
-            if law["law_short"] in cite and law["article_no"] in cite:
+            # 조문번호 매칭 체크
+            if law["article_no"] not in cite:
+                continue
+            # 법령명 매칭: law_short, law_name, 또는 부분 매칭
+            law_short = law.get("law_short", "")
+            law_name = law.get("law_name", "")
+            if (law_short and law_short in cite) or \
+               (law_name and law_name in cite) or \
+               (law_short and cite_partial_match(law_short, cite)) or \
+               (law_name and cite_partial_match(law_name, cite)):
                 found = True
                 matched_content = law["content"][:100] + "..."
                 break
@@ -273,6 +282,19 @@ def verify_citations(cited_laws, laws_db):
             "preview": matched_content if found else ""
         })
     return results
+
+def cite_partial_match(name, cite):
+    """부분 매칭 — 핵심 키워드가 인용문에 포함되는지 체크.
+    예: '보세판매장고시' → '보세판매장'이 cite에 있으면 매칭
+        '대규모유통업법' → '대규모유통업'이 cite에 있으면 매칭
+    """
+    # 법령명에서 '법', '고시', '시행령' 등 접미사 제거 → 핵심어 추출
+    core = name
+    for suffix in ["법", "고시", "시행령", "시행규칙"]:
+        if core.endswith(suffix):
+            core = core[:-len(suffix)]
+            break
+    return len(core) >= 3 and core in cite
 
 # ── 에러 타입 분류 헬퍼 ──────────────────────────────────────
 def classify_api_error(error):
