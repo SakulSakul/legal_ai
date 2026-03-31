@@ -317,20 +317,11 @@ def classify_api_error(error):
         return "unknown", f"알 수 없는 오류가 발생했습니다: {type(error).__name__}"
 
 # ── 시스템 프롬프트 ──────────────────────────────────────────
-def build_system_claude(docs, laws_db):
-    def by_cat(cat):
-        return [d for d in docs if d["cat"] == cat]
-    def fmt_docs(ds):
-        if not ds: return "(등록 없음)"
-        return "\n\n---\n\n".join(["[" + d["label"] + "]\n" + d["text"] for d in ds])
-
-    saryu_text    = truncate_at_boundary(fmt_docs(by_cat("saryu")), 15000)
-    contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 20000)
-    yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 10000)
-
-    # ── 법령/행정규칙: 원문은 넣지 않음 → AI 자체 법률 지식으로 검토
-    #    DB는 인용 검증(사후 검증)용으로만 사용
-    #    시스템 프롬프트에는 "이런 법령들이 DB에 있다"는 목록만 전달
+def build_system_claude(docs, laws_db, gemini_analysis=""):
+    """Claude용 시스템 프롬프트 — 법령/행정규칙 전문가.
+    사규 원문은 넣지 않음. Gemini의 사규 분석 결과를 받아서 법령 관점 추가.
+    """
+    # 법령 DB 목록만
     laws_text = ""
     if laws_db:
         law_groups = {}
@@ -341,99 +332,77 @@ def build_system_claude(docs, laws_db):
             title = law.get("article_title", "")
             no = law.get("article_no", "")
             law_groups[short].append(f"{no} {title}" if title else no)
-        
         list_lines = []
         for law_short, articles in sorted(law_groups.items()):
-            list_lines.append(f"- {law_short}: {', '.join(articles)}")
+            list_lines.append(f"- {law_short}: " + ", ".join(articles))
         laws_text = "\n".join(list_lines)
     else:
-        laws_text = "(법령/행정규칙 DB 미등록 — 일반 법률 지식으로 판단)"
+        laws_text = "(법령/행정규칙 DB 미등록)"
 
-    return (
-        "당신은 면세점 전문 공정거래 실무 어시스턴트 AI입니다.\n"
-        "단순한 법률 해석을 넘어, 아래 3가지 관점에서 교차 검토하여 실무 결단을 내려주세요:\n"
-        "① [외부 법령] — 법률, 시행령, 시행규칙의 조문 및 관련 판례·법령해석례\n"
-        "② [행정규칙] — 관세청 고시(보세판매장 특허 및 운영에 관한 고시 등), 공정위 고시 등 실무 세부 기준\n"
-        "③ [내부 사규/표준문서] — 당사 컴플라이언스 정책, 표준 계약서, 약정서\n\n"
+    gemini_section = ""
+    if gemini_analysis:
+        gemini_section = (
+            "\n\n━━━ [Stage 1 결과: 사규/표준계약서 분석 (Gemini)] ━━━\n" +
+            truncate_at_boundary(gemini_analysis, 8000)
+        )
+
+    result = (
+        "당신은 면세점 전문 법령/행정규칙 검토 AI입니다.\n"
+        "Stage 1에서 Gemini가 사규/표준계약서 기준으로 내부 위반사항을 분석했습니다.\n"
+        "당신은 법령·행정규칙·판례 관점에서 추가 리스크를 검토하고 최종 종합 판단을 내려주세요.\n\n"
         "검토 시 유의사항:\n"
-        "- 면세점(보세판매장) 관련 질의는 반드시 「보세판매장 특허 및 운영에 관한 고시」, 「관세법」 등 행정규칙과 법령을 함께 검토하세요.\n"
-        "- 행정규칙(고시)은 법령보다 구체적인 실무 기준을 담고 있으므로, DB에 원문이 없더라도 당신의 지식에서 해당 고시의 관련 조항을 인용하세요.\n"
-        "- 관련 판례나 법령해석례가 있으면 해당 사건번호 또는 해석례 번호를 함께 제시하세요.\n"
-        "- 법령·행정규칙 조문을 인용할 때는 정확한 법령/고시명과 조문번호를 명시하세요.\n"
-        "- 면세점 실무에서 자주 참조되는 행정규칙 예시: 보세판매장 특허 및 운영에 관한 고시, 특허보세구역 운영에 관한 고시, 수입물품 유통이력관리에 관한 고시 등\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "[기준 문서 (Ground Truth — 절대 자체를 검토하지 말 것)]\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "① 당사 사규 및 컴플라이언스 정책:\n" + saryu_text +
-        "\n\n② 거래유형별 당사 표준 계약서:\n" + contract_text +
-        "\n\n③ 당사 표준 약정서:\n" + yakjeong_text +
-
-        "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "[적용 법령·행정규칙 DB 목록 (사후 검증용)]\n"
-        "아래 법령/행정규칙이 최신 DB에 등록되어 있습니다.\n"
-        "당신의 법률 지식으로 검토하되, 인용 시 반드시 아래 목록에 있는 법령명과 조문번호를 정확히 사용하세요.\n"
-        "DB에 있는 법령을 인용하면 시스템이 자동으로 최신 여부를 검증합니다.\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
-        laws_text +
-
-        "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "[답변 형식 — 엄격 준수]\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-
-        "**[중요: 검토 범위 포괄성 원칙]**\n"
-        "심층 검토 시, 관련될 수 있는 모든 법적 리스크를 빠짐없이 제시하세요.\n"
-        "비법률가(MD/바이어)는 AI가 지적하지 않은 사항을 '문제없음'으로 오인합니다.\n"
-        "따라서 아래 체크리스트를 반드시 전수 점검하고, 해당되는 모든 쟁점을 issues 배열에 포함하세요:\n"
-        "- 대규모유통업법상 금지행위 (서면교부, 감액, 반품, 판촉비, 종업원사용, 배타적거래)\n"
-        "- 하도급법상 금지행위 (부당단가결정, 위탁취소, 부당특약)\n"
-        "- 관세법/보세판매장고시 위반 여부 (특허요건, 물품반입, 판매인도)\n"
-        "- 대외무역법/외국환거래법 (원산지표시, 외화결제)\n"
-        "- 세법상 면세 요건 충족 여부\n"
-        "- 소비자기본법/표시광고법/식품관련법 위반 여부\n"
-        "- 상생협력법 준수사항\n"
-        "- 유통산업발전법 (영업시간, 의무휴업 등)\n"
-        "단, 토큰 효율을 위해: high/medium 리스크는 상세히, low 리스크는 1~2문장으로 간결하게 기술하세요.\n"
-        "해당 없는 항목은 생략하되, 경계선상(gray area) 이슈는 low로라도 반드시 포함하세요.\n\n"
-
-        "반드시 아래 형식의 ```json``` 블록 하나와 상세 설명 텍스트를 출력하세요.\n\n"
-
-        "**[PART 1: JSON 블록]**\n"
+        "- 보세판매장 관련: 「보세판매장 특허 및 운영에 관한 고시」, 「관세법」 필수 검토\n"
+        "- 행정규칙(고시)은 반드시 인용. 판례/법령해석례 있으면 사건번호 제시\n"
+        "- 인용 시 아래 DB 목록의 법령명+조문번호를 정확히 사용\n"
+        + gemini_section +
+        "\n\n━━━ [적용 법령·행정규칙 DB 목록] ━━━\n" + laws_text +
+        "\n\n━━━ [답변 형식] ━━━\n"
+        "모든 법적 리스크를 빠짐없이. high/medium 상세, low 1~2문장. 해당없으면 생략.\n\n"
         "```json\n"
         "{\n"
-        '  "summary": "문의사항 1줄 요약",\n'
-        '  "verdict": "approved | conditional | rejected",\n'
-        '  "verdict_reason": "법령과 사내 기준을 종합한 최종 판단 근거",\n'
-        '  "issues": [\n'
-        '    {\n'
-        '      "issue_no": 1,\n'
-        '      "title": "쟁점 제목",\n'
-        '      "risk_level": "high | medium | low",\n'
-        '      "target_clause": "검토 대상 문서 원문 인용",\n'
-        '      "applicable_law": "적용 법령 또는 행정규칙 (예: 대규모유통업법 제11조, 보세판매장고시 제8조)",\n'
-        '      "law_analysis": "법령·행정규칙 관점 평가 (관련 판례·해석례가 있으면 함께 인용)",\n'
-        '      "applicable_rule": "적용 사규/표준계약서 조항",\n'
-        '      "rule_analysis": "사규 및 당사 기준 관점에서의 부합성 평가",\n'
-        '      "recommendation": "두 관점을 종합한 최종 권고안 및 실무 가이드"\n'
-        '    }\n'
-        '  ],\n'
-        '  "action_plan": "MD가 상대방에게 해야 할 구체적 액션 (단계별)",\n'
-        '  "alternative_clause": "수정 대안 조항 초안 (없으면 null)",\n'
-        '  "cited_laws": ["대규모유통업법 제11조"]\n'
+        '  "summary": "1줄 요약",\n'
+        '  "verdict": "approved|conditional|rejected",\n'
+        '  "verdict_reason": "종합 판단 근거",\n'
+        '  "issues": [{"issue_no":1,"title":"쟁점","risk_level":"high|medium|low",\n'
+        '    "target_clause":"대상 원문","applicable_law":"법령/고시명 제X조",\n'
+        '    "law_analysis":"법령·판례 평가","applicable_rule":"사규 조항",\n'
+        '    "rule_analysis":"사규 평가(Stage1 인용)","recommendation":"권고안"}],\n'
+        '  "action_plan":"액션 플랜","alternative_clause":"수정안 또는 null",\n'
+        '  "cited_laws":["법령명 제X조"]\n'
         "}\n"
-        "```\n\n"
+        "```\n"
+        "JSON 아래 마크다운 상세 설명. 🔴 위반, 🔵 통과.\n\n"
+        "후속 질문에는 JSON 없이 마크다운. 새 검토 요청 시만 JSON 출력.\n"
+    )
+    logger.info(f"Claude 시스템프롬프트: {len(result):,}자 (추정 {int(len(result)/1.5):,} 토큰)")
+    return result
 
-        "**[PART 2: 상세 설명]**\n"
-        "JSON 아래에 마크다운 형식으로 작성.\n"
-        "- 서두: **문의사항:** [요약]\n"
-        "- 위험: 🔴 위반 내용, 적법: 🔵 통과 내용 형태로 이모지를 사용하세요. Streamlit 색상 단축코드(:red[], :blue[], :blue_circle: 등)는 절대 사용하지 마세요.\n\n"
+def build_system_gemini_stage1(docs):
+    """Stage 1: Gemini가 사규/계약서/약정서 기준으로 내부 기준 위반사항 분석.
+    Gemini는 컨텍스트 1M 토큰이라 사규 원문을 넉넉히 넣을 수 있음.
+    """
+    def by_cat(cat):
+        return [d for d in docs if d["cat"] == cat]
+    def fmt_docs(ds):
+        if not ds: return "(등록 없음)"
+        return "\n\n---\n\n".join(["[" + d["label"] + "]\n" + d["text"] for d in ds])
 
-        "**[후속 대화 규칙]**\n"
-        "사용자가 이전 검토 결과에 대해 추가 질문하면 (예: '이 부분 더 설명해줘', '제3조가 왜 위반이야?', '수정안을 다시 만들어줘'):\n"
-        "- JSON 블록 없이 마크다운으로 자연스럽게 답변하세요.\n"
-        "- 이전 검토 맥락(대화 히스토리)을 참조하여 일관성 있게 답변하세요.\n"
-        "- 새로운 법령 쟁점이 발견되면 추가로 알려주세요.\n"
-        "- 사용자가 명시적으로 새로운 문서/조항의 검토를 요청할 때만 JSON 블록을 다시 출력하세요.\n"
+    saryu_text    = truncate_at_boundary(fmt_docs(by_cat("saryu")), 50000)
+    contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 60000)
+    yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 30000)
+
+    return (
+        "당신은 면세점 공정거래 실무의 사규/표준계약서 전문 분석가입니다.\n"
+        "사용자의 질문 또는 첨부 문서를 아래 당사 사규/계약서/약정서와 대조하여 분석하세요.\n\n"
+        "분석 결과를 아래 형식으로 간결하게 정리하세요:\n"
+        "- 위반 또는 불일치 조항: 사규/계약서 어떤 조항에 위배되는지\n"
+        "- 부합 조항: 문제없는 부분\n"
+        "- 사규에 명시되지 않은 사항: 규정 공백\n\n"
+        "법령/행정규칙 분석은 하지 마세요 (Stage 2에서 처리됩니다).\n"
+        "사규/계약서 원문 조항을 인용하여 근거를 명확히 하세요.\n\n"
+        "━━━ [당사 사규] ━━━\n" + saryu_text +
+        "\n\n━━━ [당사 표준 계약서] ━━━\n" + contract_text +
+        "\n\n━━━ [당사 표준 약정서] ━━━\n" + yakjeong_text
     )
 
 def build_system_gemini(docs):
@@ -463,25 +432,29 @@ def call_claude(system_prompt, messages):
     claude_messages = []
     last_role = None
 
-    # 대화 히스토리가 너무 길면 컨텍스트 초과 → 최근 N턴만 유지
+    # 대화 히스토리 제한: 최근 N턴만
     recent_messages = messages
-    if len(messages) > 12:
-        # 첫 메시지(최초 질문) + 최근 10턴 유지
-        recent_messages = messages[:2] + messages[-10:]
+    if len(messages) > 10:
+        recent_messages = messages[:2] + messages[-8:]
 
     for m in recent_messages:
         role = "assistant" if m["role"] == "assistant" else "user"
-        # assistant 메시지에서 JSON 블록은 제거하여 토큰 절약
         content = m["content"]
-        if role == "assistant" and "```json" in content:
-            # JSON 블록 뒤의 상세 설명만 유지 (요약)
-            import re as _re
-            json_end = content.find("```", content.find("```json") + 7)
-            if json_end > 0:
-                summary_part = content[json_end + 3:].strip()
-                content = summary_part[:2000] if len(summary_part) > 2000 else summary_part
-                if not content:
-                    content = "(이전 검토 결과 — 상세 내용은 위 검토의견서 참조)"
+        
+        # assistant의 긴 응답은 축소 (JSON 블록 제거, 2000자 제한)
+        if role == "assistant":
+            if "```json" in content:
+                json_end = content.find("```", content.find("```json") + 7)
+                if json_end > 0:
+                    content = content[json_end + 3:].strip()
+            if len(content) > 2000:
+                content = content[:2000] + "...(이하 생략)"
+            if not content.strip():
+                content = "(이전 검토 결과 참조)"
+        
+        # user 메시지도 너무 길면 축소 (첨부파일 텍스트가 거대할 수 있음)
+        if role == "user" and len(content) > 15000:
+            content = content[:15000] + "\n\n...(입력 텍스트가 길어 일부 생략됨)"
 
         if role == last_role:
             claude_messages[-1]["content"] += f"\n\n{content}"
@@ -491,6 +464,12 @@ def call_claude(system_prompt, messages):
             
     if claude_messages and claude_messages[0]["role"] == "assistant":
         claude_messages.pop(0)
+
+    # 토큰 크기 추정 로깅
+    sys_chars = len(system_prompt)
+    msg_chars = sum(len(m["content"]) for m in claude_messages)
+    total_chars = sys_chars + msg_chars
+    logger.info(f"Claude 호출: system={sys_chars:,}자, messages={msg_chars:,}자, total={total_chars:,}자 (추정 {int(total_chars/1.5):,} 토큰)")
 
     try:
         response = client.messages.create(
@@ -562,21 +541,41 @@ def call_gemini(system_prompt, messages):
 
 def dispatch_with_fallback(model_choice, messages, docs, laws_db):
     if model_choice == "claude":
-        system = build_system_claude(docs, laws_db)
+        # ━━━ 2단계 파이프라인: Gemini(사규) → Claude(법령) ━━━
+        
+        # Stage 1: Gemini — 사규/계약서/약정서 기준 분석
+        gemini_system = build_system_gemini_stage1(docs)
+        st.caption("📋 Stage 1: 사규/계약서 기준 분석 중 (Gemini)...")
+        gemini_analysis = call_gemini(gemini_system, messages)
+        
+        if gemini_analysis.startswith("⚠️"):
+            # Gemini 실패 시 Claude 단독 진행 (사규 분석 없이)
+            logger.warning(f"Stage 1 Gemini 실패: {gemini_analysis}")
+            gemini_analysis = ""
+        
+        # Stage 2: Claude — 법령/행정규칙 검토 + 최종 종합
+        system = build_system_claude(docs, laws_db, gemini_analysis)
+        st.caption("⚖️ Stage 2: 법령·행정규칙·판례 교차 검토 중 (Claude)...")
         reply = call_claude(system, messages)
+        
         if reply.startswith("⚠️"):
-            st.warning(f"🔄 {reply}\n→ 예비 시스템(Gemini)으로 자동 우회하여 검토를 진행합니다.")
-            fallback_reply = call_gemini(system, messages)
+            # Claude도 실패 시 Gemini 단독으로 폴백
+            st.warning(f"🔄 {reply}\n→ Gemini 단독으로 검토를 진행합니다.")
+            fallback_system = build_system_gemini(docs)
+            fallback_reply = call_gemini(fallback_system, messages)
             if not fallback_reply.startswith("⚠️"):
                 return fallback_reply, "Gemini (Fallback)"
             return reply, "Claude (Failed)"
-        return reply, f"Claude ({CLAUDE_MODEL})"
+        
+        model_label = f"Gemini+Claude ({CLAUDE_MODEL})"
+        return reply, model_label
     else:
+        # 일반 Q&A는 Gemini 단독
         system = build_system_gemini(docs)
         reply = call_gemini(system, messages)
         if reply.startswith("⚠️"):
-            st.warning(f"🔄 {reply}\n→ 예비 시스템(Claude)으로 자동 우회하여 답변을 생성합니다.")
-            fallback_reply = call_claude(system, messages)
+            st.warning(f"🔄 {reply}\n→ Claude로 자동 우회합니다.")
+            fallback_reply = call_claude(build_system_claude(docs, laws_db), messages)
             if not fallback_reply.startswith("⚠️"):
                 return fallback_reply, f"Claude ({CLAUDE_MODEL}, Fallback)"
             return reply, "Gemini (Failed)"
