@@ -1657,24 +1657,18 @@ def main():
                 if st.button("🔄 법령 DB 업데이트", use_container_width=True, key="update_laws"):
                     with st.spinner("법령 DB 업데이트 중... (1~2분 소요)"):
                         try:
-                            import subprocess
-                            result = subprocess.run(
-                                ["python", "update_laws.py"],
-                                capture_output=True, text=True, timeout=300
-                            )
-                            if result.returncode == 0:
-                                st.success("✅ 법령 DB 업데이트 완료!")
-                                st.caption(result.stdout[-500:] if len(result.stdout) > 500 else result.stdout)
-                                # DB 리로드
-                                st.session_state.laws_db = load_laws()
-                                st.rerun()
-                            else:
-                                st.error(f"❌ 업데이트 실패")
-                                st.caption(result.stderr[-300:] if result.stderr else result.stdout[-300:])
-                        except FileNotFoundError:
-                            st.error("❌ update_laws.py 파일을 찾을 수 없습니다. 같은 디렉토리에 있는지 확인하세요.")
+                            import update_laws
+                            import importlib
+                            importlib.reload(update_laws)
+                            stats = update_laws.run_update()
+                            st.success(f"✅ 법령 DB 업데이트 완료! (업데이트 {stats.get('updated', 0)}건, 변경없음 {stats.get('unchanged', 0)}건, 실패 {stats.get('failed', 0)}건)")
+                            st.session_state.laws_db = load_laws()
+                            st.rerun()
+                        except ImportError:
+                            st.error("❌ update_laws.py 파일을 찾을 수 없습니다. 같은 디렉토리에 배포했는지 확인하세요.")
                         except Exception as upd_err:
-                            st.error(f"❌ 실행 오류: {upd_err}")
+                            st.error(f"❌ 업데이트 오류: {upd_err}")
+                            logger.error(f"법령 DB 업데이트 실패: {upd_err}")
 
             st.markdown("---")
 
