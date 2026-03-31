@@ -662,11 +662,14 @@ def gatekeeper_process(gemini_raw_json, laws_db):
                 break
         
         if db_match:
-            db_content = db_match["content"][:500]
+            db_content = db_match["content"][:1000]  # 원문 충분히 전달
             last_updated = db_match.get("last_updated", "")[:10]
             refined_parts.append(
                 f"✅ [{law_name} {article}] (DB 검증 완료, 업데이트: {last_updated})\n"
-                f"   원문: {db_content}"
+                f"   ⚠️ 아래 원문의 수치(징역, 벌금 등)를 반드시 그대로 인용할 것.\n"
+                f"   【DB 원문 시작】\n"
+                f"   {db_content}\n"
+                f"   【DB 원문 끝】"
             )
             verified_laws.append({"law_name": law_name, "article": article, "db_verified": True, "last_updated": last_updated})
         else:
@@ -744,6 +747,47 @@ def gatekeeper_process(gemini_raw_json, laws_db):
         for ra in risk_areas:
             refined_parts.append(f"- {ra}")
     
+    # 5. ██ 보세판매장고시 강제 주입 ██
+    # 면세점 전용 앱이므로 모든 질의에 보세판매장고시를 무조건 포함
+    
+    # 이미 Gemini가 보세판매장고시를 수집했는지 확인
+    already_has_bonded = any(
+        "보세판매장" in lf.get("law_name", "") 
+        for lf in gemini_raw_json.get("law_findings", [])
+    )
+    
+    if not already_has_bonded:
+        bonded_articles = [db_law for db_law in laws_db 
+                          if db_law.get("law_short") in ("보세판매장고시", "보세판매장운영고시")]
+        
+        if bonded_articles:
+            refined_parts.append("\n━━━ [보세판매장고시 — 시스템 강제 주입 (면세점 필수)] ━━━")
+            refined_parts.append("⚠️ Gemini가 보세판매장고시를 누락하여 시스템이 DB에서 직접 주입합니다.")
+            
+            # 핵심 조문만 선별 (전부 넣으면 토큰 과다)
+            key_articles = {"제3조", "제4조", "제5조", "제7조", "제8조", "제10조", 
+                          "제15조", "제18조", "제19조", "제20조", "제21조", "제28조"}
+            
+            for ba in bonded_articles:
+                if ba["article_no"] not in key_articles:
+                    continue
+                content = ba["content"][:500]
+                art_title = ba.get("article_title", "")
+                refined_parts.append(
+                    f"✅ [{ba['law_short']} {ba['article_no']}] {art_title} (DB 강제 주입)\n"
+                    f"   【DB 원문 시작】\n"
+                    f"   {content}\n"
+                    f"   【DB 원문 끝】"
+                )
+                verified_laws.append({
+                    "law_name": ba.get("law_name", ba["law_short"]),
+                    "article": ba["article_no"],
+                    "db_verified": True,
+                    "last_updated": ba.get("last_updated", "")[:10],
+                    "forced_inject": True,
+                })
+            logger.info(f"Gatekeeper: 보세판매장고시 핵심 조문 강제 주입")
+    
     refined_text = "\n".join(refined_parts)
     
     meta = {
@@ -772,7 +816,12 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "2. 새로운 법령 조문이나 판례를 추가로 인용하지 마라. 전달된 것만 사용하라.\n"
         "3. '⚠️ DB 미등록' 또는 '❓ 미확인' 항목은 반드시 해당 사실을 명시하라.\n"
         "4. 불확실한 사항은 '확인 필요'로 표시하라. 절대 추측하지 마라.\n"
-        "5. 판례 인용 시 대법원 사건번호(예: 2011도6759)가 없으면 해당 판례를 아예 언급하지 마라.\n\n"
+        "5. 판례 인용 시 대법원 사건번호(예: 2011도6759)가 없으면 해당 판례를 아예 언급하지 마라.\n"
+        "6. ██ 법정형(징역·벌금 수치) 기재 규칙 ██\n"
+        "   - 【DB 원문 시작】~【DB 원문 끝】 안에 적힌 형량 수치만 그대로 복사하여 기재하라.\n"
+        "   - 원문에 '10년 이하의 징역'이라 적혀있으면 반드시 '10년 이하의 징역'으로 기재하라.\n"
+        "   - 절대 숫자를 과장·축소·변형하지 마라 (20년→10년 X, 2천만원→5천만원 X).\n"
+        "   - DB 원문에 형량이 없으면 형량을 기재하지 마라.\n\n"
         
         "당신은 면세점 전문 시니어 변호사 AI입니다.\n"
         "아래 데이터는 Gemini(리서처)가 수집하고, 시스템(게이트키퍼)이 DB 원문과 대조하여 검증한 결과입니다.\n"
