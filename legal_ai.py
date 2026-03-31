@@ -33,8 +33,8 @@ def get_secret(key, default=""):
 # 모델명 외부 설정 지원 (Secrets에 없으면 기본값 사용)
 CLAUDE_MODEL = get_secret("CLAUDE_MODEL", "claude-sonnet-4-20250514")
 GEMINI_MODELS = [
-    get_secret("GEMINI_MODEL_PRIMARY", "gemini-2.5-pro"),
-    get_secret("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash"),
+    get_secret("GEMINI_MODEL_PRIMARY", "gemini-3.1-pro-preview"),
+    get_secret("GEMINI_MODEL_FALLBACK", "gemini-3-flash-preview"),
 ]
 
 # ── Lazy 클라이언트 초기화 ────────────────────────────────────
