@@ -304,17 +304,19 @@ def cite_partial_match(name, cite):
 # ── 에러 타입 분류 헬퍼 ──────────────────────────────────────
 def classify_api_error(error):
     """API 에러를 분류하여 (에러유형, 메시지) 튜플 반환."""
-    error_msg = str(error).lower()
-    if any(kw in error_msg for kw in ["rate", "quota", "429", "resource_exhausted"]):
+    error_msg = str(error)
+    error_lower = error_msg.lower()
+    if any(kw in error_lower for kw in ["rate", "quota", "429", "resource_exhausted"]):
         return "rate_limit", "API 사용 한도 또는 요금을 초과했습니다."
-    elif any(kw in error_msg for kw in ["401", "403", "authentication", "api_key", "permission"]):
+    elif any(kw in error_lower for kw in ["401", "403", "authentication", "api_key", "permission"]):
         return "auth", "API 키가 유효하지 않거나 만료되었습니다."
-    elif any(kw in error_msg for kw in ["400", "bad_request", "badrequesterror", "context_length", "too_long", "max_tokens"]):
+    elif any(kw in error_lower for kw in ["context_length", "too many tokens", "maximum context"]):
         return "context_overflow", "입력이 너무 길어 처리할 수 없습니다. '새 대화 시작'을 눌러주세요."
-    elif any(kw in error_msg for kw in ["500", "502", "503", "504", "unavailable", "timeout"]):
+    elif any(kw in error_lower for kw in ["500", "502", "503", "504", "unavailable", "timeout"]):
         return "server", "서버가 일시적으로 응답하지 않습니다."
     else:
-        return "unknown", f"알 수 없는 오류가 발생했습니다: {type(error).__name__}"
+        # 원문 그대로 표시 — 디버깅용
+        return "unknown", f"{type(error).__name__}: {error_msg[:300]}"
 
 # ── 시스템 프롬프트 ──────────────────────────────────────────
 def build_system_claude(docs, laws_db, gemini_analysis=""):
