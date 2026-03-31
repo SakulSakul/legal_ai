@@ -376,12 +376,15 @@ def classify_api_error(error):
         return "rate_limit", "API 사용 한도 또는 요금을 초과했습니다."
     elif any(kw in error_lower for kw in ["401", "403", "authentication", "api_key", "permission"]):
         return "auth", "API 키가 유효하지 않거나 만료되었습니다."
+    elif any(kw in error_lower for kw in ["credit balance"]):
+        return "credit", "API 크레딧 잔액이 부족합니다. 충전이 필요합니다."
+    elif any(kw in error_lower for kw in ["529", "overloaded", "overloadederr"]):
+        return "overloaded", "Claude 서버가 일시적으로 과부하입니다. 잠시 후 다시 시도해주세요."
     elif any(kw in error_lower for kw in ["context_length", "too many tokens", "maximum context"]):
-        return "context_overflow", "입력이 너무 길어 처리할 수 없습니다. '새 대화 시작'을 눌러주세요."
+        return "context_overflow", "입력이 너무 길어 처리할 수 없습니다."
     elif any(kw in error_lower for kw in ["500", "502", "503", "504", "unavailable", "timeout"]):
         return "server", "서버가 일시적으로 응답하지 않습니다."
     else:
-        # 원문 그대로 표시 — 디버깅용
         return "unknown", f"{type(error).__name__}: {error_msg[:300]}"
 
 # ── 시스템 프롬프트 ──────────────────────────────────────────
@@ -744,20 +747,33 @@ def call_claude(system_prompt, messages):
         )
         return response.content[0].text
     except Exception as e:
-        # 에러 원문을 로그 + 사용자에게 모두 표시
-        error_str = str(e)
-        logger.error(f"Claude API 오류 원문: {error_str}")
-        logger.error(f"  system={sys_chars}자, msgs={msg_chars}자, total={total_chars}자")
-        
         err_type, err_msg = classify_api_error(e)
+        
+        # overloaded → 10초 대기 후 1회 재시도
+        if err_type == "overloaded":
+            logger.info("Claude 과부하 — 10초 대기 후 재시도...")
+            time.sleep(10)
+            try:
+                response = client.messages.create(
+                    model=CLAUDE_MODEL,
+                    max_tokens=8192,
+                    system=system_prompt,
+                    messages=claude_messages,
+                )
+                return response.content[0].text
+            except Exception as e2:
+                err_type, err_msg = classify_api_error(e2)
+        
+        logger.error(f"Claude API 오류: {err_type} — {str(e)[:200]}")
         label_map = {
             "rate_limit": "API 한도 초과",
             "auth": "API 인증 오류",
+            "credit": "크레딧 부족",
+            "overloaded": "서버 과부하",
             "server": "서버 통신 장애",
             "context_overflow": "입력 초과",
             "unknown": "통신 오류",
         }
-        # 디버그 정보 포함
         debug_info = f"(system={sys_chars:,}자, msg={msg_chars:,}자)"
         return f"⚠️ [{label_map.get(err_type, '오류')}] Claude: {err_msg} {debug_info}"
 
