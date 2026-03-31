@@ -747,46 +747,37 @@ def gatekeeper_process(gemini_raw_json, laws_db):
         for ra in risk_areas:
             refined_parts.append(f"- {ra}")
     
-    # 5. ██ 보세판매장고시 강제 주입 ██
-    # 면세점 전용 앱이므로 모든 질의에 보세판매장고시를 무조건 포함
+    # 5. ██ 보세판매장고시 무조건 강제 주입 ██
+    # 면세점 전용 앱 — Gemini 수집 여부와 무관하게 항상 DB 원문 주입
+    bonded_articles = [db_law for db_law in laws_db 
+                      if db_law.get("law_short") in ("보세판매장고시", "보세판매장운영고시")]
     
-    # 이미 Gemini가 보세판매장고시를 수집했는지 확인
-    already_has_bonded = any(
-        "보세판매장" in lf.get("law_name", "") 
-        for lf in gemini_raw_json.get("law_findings", [])
-    )
-    
-    if not already_has_bonded:
-        bonded_articles = [db_law for db_law in laws_db 
-                          if db_law.get("law_short") in ("보세판매장고시", "보세판매장운영고시")]
+    if bonded_articles:
+        refined_parts.append("\n━━━ [보세판매장고시 — 필수 검토 (DB 원문)] ━━━")
+        refined_parts.append("██ 아래 보세판매장고시 조문은 면세점 모든 검토에 필수 적용 대상입니다. 반드시 검토 결과에 반영하세요. ██")
         
-        if bonded_articles:
-            refined_parts.append("\n━━━ [보세판매장고시 — 시스템 강제 주입 (면세점 필수)] ━━━")
-            refined_parts.append("⚠️ Gemini가 보세판매장고시를 누락하여 시스템이 DB에서 직접 주입합니다.")
-            
-            # 핵심 조문만 선별 (전부 넣으면 토큰 과다)
-            key_articles = {"제3조", "제4조", "제5조", "제7조", "제8조", "제10조", 
-                          "제15조", "제18조", "제19조", "제20조", "제21조", "제28조"}
-            
-            for ba in bonded_articles:
-                if ba["article_no"] not in key_articles:
-                    continue
-                content = ba["content"][:500]
-                art_title = ba.get("article_title", "")
-                refined_parts.append(
-                    f"✅ [{ba['law_short']} {ba['article_no']}] {art_title} (DB 강제 주입)\n"
-                    f"   【DB 원문 시작】\n"
-                    f"   {content}\n"
-                    f"   【DB 원문 끝】"
-                )
-                verified_laws.append({
-                    "law_name": ba.get("law_name", ba["law_short"]),
-                    "article": ba["article_no"],
-                    "db_verified": True,
-                    "last_updated": ba.get("last_updated", "")[:10],
-                    "forced_inject": True,
-                })
-            logger.info(f"Gatekeeper: 보세판매장고시 핵심 조문 강제 주입")
+        key_articles = {"제3조", "제4조", "제5조", "제7조", "제8조", "제10조", 
+                      "제15조", "제18조", "제19조", "제20조", "제21조", "제28조"}
+        injected = 0
+        for ba in bonded_articles:
+            if ba["article_no"] not in key_articles:
+                continue
+            content = ba["content"][:500]
+            art_title = ba.get("article_title", "")
+            refined_parts.append(
+                f"✅ [{ba['law_short']} {ba['article_no']}] {art_title}\n"
+                f"   【DB 원문 시작】\n"
+                f"   {content}\n"
+                f"   【DB 원문 끝】"
+            )
+            verified_laws.append({
+                "law_name": ba.get("law_name", ba["law_short"]),
+                "article": ba["article_no"],
+                "db_verified": True,
+                "last_updated": ba.get("last_updated", "")[:10],
+            })
+            injected += 1
+        logger.info(f"Gatekeeper: 보세판매장고시 {injected}건 강제 주입 완료")
     
     refined_text = "\n".join(refined_parts)
     
@@ -827,7 +818,9 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "아래 데이터는 Gemini(리서처)가 수집하고, 시스템(게이트키퍼)이 DB 원문과 대조하여 검증한 결과입니다.\n"
         "당신은 이 정제된 데이터만을 기반으로 최종 법리 해석과 실무 권고를 작성하세요.\n\n"
         "⚠️ 면세점 관련 질의인데 검증 데이터에 '보세판매장고시' 또는 '보세판매장 특허 및 운영에 관한 고시'가 "
-        "누락되어 있다면, issues에 '보세판매장고시 검토 누락 — 별도 확인 필요' 쟁점을 반드시 추가하세요.\n\n"
+        "누락되어 있다면, issues에 '보세판매장고시 검토 누락 — 별도 확인 필요' 쟁점을 반드시 추가하세요.\n"
+        "██ 검증 데이터에 '보세판매장고시' 조문이 포함되어 있다면, 반드시 issues에 보세판매장고시 관련 쟁점을 "
+        "최소 1개 이상 포함하세요. 보세판매장고시가 포함된 데이터를 무시하는 것은 금지입니다. ██\n\n"
         
         "━━━ [검증 데이터] ━━━\n" + gatekeeper_text +
         
@@ -1019,6 +1012,31 @@ def call_gemini(system_prompt, messages):
     
     return "⚠️ Gemini 응답을 가져오지 못했습니다."
 
+def postprocess_reply(reply, laws_db):
+    """AI 출력물 후처리 — 전체 텍스트에서 가짜 판례 차단 + 형량 과장 경고.
+    Claude/Gemini 출력 후 마지막 방어선.
+    """
+    import re as _re
+    
+    # 1. 전체 텍스트에서 판례번호 패턴 추출 → API 검증
+    prec_pattern = _re.compile(r'(\d{4}[가-힣]{1,3}\d{2,6})')
+    found_cases = prec_pattern.findall(reply)
+    
+    if found_cases:
+        for case_query in set(found_cases):
+            status, title = verify_precedent_via_api(case_query)
+            time.sleep(0.3)
+            if status == "not_found":
+                # 해당 판례가 포함된 문장 전체를 취소선 처리
+                reply = reply.replace(case_query, f"~~{case_query}~~ [🚨 시스템 검증: 미존재 판례]")
+                logger.warning(f"후처리: 미존재 판례 차단 — {case_query}")
+            elif status == "wrong_context":
+                reply = reply.replace(case_query, f"~~{case_query}~~ [🚨 시스템 검증: 맥락 불일치 — 실제: {title}]")
+                logger.warning(f"후처리: 맥락 불일치 판례 차단 — {case_query} (실제: {title})")
+    
+    return reply
+
+
 def dispatch_with_fallback(model_choice, messages, docs, laws_db):
     if model_choice == "claude":
         # ━━━ 3단계 하이브리드 파이프라인 ━━━
@@ -1078,8 +1096,10 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
                 fallback_text = gemini_reply[json_match.end():].strip() or gemini_reply
             return fallback_text, "Gemini (Claude 우회)"
         
-        # 성공 — gatekeeper_meta를 반환에 포함 (검증 결과 UI 표시용)
-        # reply에 gatekeeper 정보를 메타데이터로 전달하기 위해 세션에 저장
+        # 성공 — 후처리: 가짜 판례 필터링
+        st.caption("🔍 후처리: 전체 텍스트 판례 검증 중...")
+        reply = postprocess_reply(reply, laws_db)
+        
         st.session_state["_gatekeeper_meta"] = gatekeeper_meta
         
         return reply, "Gemini→Gatekeeper→Claude"
