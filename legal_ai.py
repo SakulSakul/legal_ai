@@ -825,6 +825,10 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "3. 새로운 법령 조문이나 판례를 추가 인용하지 마라.\n"
         "4. 불확실한 사항은 '확인 필요'로 표시하라.\n"
         "5. 판례는 사건번호가 있는 것만 인용. 없으면 미인용.\n"
+        "   ██ 판례 내용 창작 금지 ██ 판례 번호만 알고 판결 요지(원문)를 정확히 확보하지 못한 경우,\n"
+        "   판례의 해석·결론·판시 내용을 절대 임의로 서술하지 마라.\n"
+        "   번호만 있고 내용이 불확실하면: '(판결 요지 — 원문 확인 필요)'로 표기하라.\n"
+        "   '~에 따르면', '~판결에 의하면' 뒤에 확인되지 않은 해석을 붙이는 것은 금지한다.\n"
         "6. ██ 법정형 Placeholder ██ 형량은 {{법령약칭_조문번호_형량}} 형태로만 작성.\n"
         "   예: {{형법_제347조_형량}}, {{관세법_제269조_형량}}, {{상표법_제230조_형량}}\n"
         "   DB 미등록 법령은 Placeholder도 쓰지 말고 '(형량 — 원문 확인 필요)'로 표기.\n"
@@ -1032,8 +1036,34 @@ def call_gemini(system_prompt, messages):
 def postprocess_reply(reply, laws_db):
     """AI 출력물 후처리 — Placeholder 치환 + 가짜 판례 차단.
     Claude/Gemini 출력 후 마지막 방어선.
+    주의: JSON 블록 내부는 건드리지 않음 (파싱 깨짐 방지).
     """
     import re as _re
+    
+    # JSON 블록 분리 (```json...``` 또는 맨 앞 {...})
+    json_block = ""
+    rest_text = reply
+    
+    json_code_match = _re.search(r'(```json\s*\n.*?\n```)', reply, _re.DOTALL)
+    if json_code_match:
+        json_block = json_code_match.group(1)
+        rest_text = reply[:json_code_match.start()] + "{{JSON_BLOCK}}" + reply[json_code_match.end():]
+    elif reply.strip().startswith("{"):
+        # 첫 번째 최상위 } 찾기
+        brace_count = 0
+        json_end = 0
+        for i, c in enumerate(reply):
+            if c == '{': brace_count += 1
+            elif c == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+        if json_end > 0:
+            json_block = reply[:json_end]
+            rest_text = "{{JSON_BLOCK}}" + reply[json_end:]
+    
+    # 후처리는 rest_text에만 적용 (JSON 보호)
     
     # 1. ██ Placeholder → DB 원문 치환 (형량 숫자 뻥튀기 영구 차단) ██
     # {{형법_제347조_형량}} → DB에서 형법 제347조 원문의 형량 부분 추출
@@ -1134,7 +1164,7 @@ def postprocess_reply(reply, laws_db):
     reply = _re.sub(r'벌금에\s*처한다\s*대상', '벌금 대상', reply)
     reply = _re.sub(r'벌금에\s*처한다([^."])', r'벌금\1', reply)  # 문장 중간의 "에 처한다" 제거
     
-    # 3. 전체 텍스트에서 판례번호 패턴 추출 → API 검증
+    # 3. 전체 텍스트에서 판례번호 패턴 추출 → API 검증 + 사건명 강제 표시
     prec_pattern = _re.compile(r'(\d{4}[가-힣]{1,3}\d{2,6})')
     found_cases = prec_pattern.findall(reply)
     
@@ -1146,8 +1176,13 @@ def postprocess_reply(reply, laws_db):
                 reply = reply.replace(case_query, f"~~{case_query}~~ [🚨 시스템 검증: 미존재 판례]")
                 logger.warning(f"후처리: 미존재 판례 차단 — {case_query}")
             elif status == "wrong_context":
-                reply = reply.replace(case_query, f"~~{case_query}~~ [🚨 시스템 검증: 맥락 불일치 — 실제: {title}]")
+                reply = reply.replace(case_query, f"~~{case_query}~~ [🚨 시스템 검증: 맥락 불일치 — 실제 사건: {title}]")
                 logger.warning(f"후처리: 맥락 불일치 판례 차단 — {case_query} (실제: {title})")
+            elif status == "verified" and title:
+                # verified여도 사건명을 강제 삽입 (AI의 해석 창작을 사건명으로 견제)
+                # "2018도14446 판결에 따르면..." → "2018도14446 [실제 사건: 상표권침해] 판결에 따르면..."
+                if title not in reply:
+                    reply = reply.replace(case_query, f"{case_query} [실제 사건: {title[:30]}]")
     
     # 4. 용어 치환: "~팀" → "~담당부서"
     team_replacements = {
@@ -1200,6 +1235,10 @@ def postprocess_reply(reply, laws_db):
                     return prefix + _correct
                 return m.group(0)
             reply = pattern.sub(_replace_alias, reply)
+    
+    # JSON 블록 복원
+    if json_block and "{{JSON_BLOCK}}" in reply:
+        reply = reply.replace("{{JSON_BLOCK}}", json_block)
     
     return reply
 
@@ -1285,14 +1324,47 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
 def parse_review_response(response_text):
     json_data = None
     detail_text = response_text
+    
+    # 패턴 1: ```json ... ``` 코드블록
     json_match = re.search(r'```json\s*\n(.*?)\n```', response_text, re.DOTALL)
     if json_match:
         try:
             json_data = json.loads(json_match.group(1))
             detail_text = response_text[json_match.end():].strip()
         except json.JSONDecodeError as e:
-            logger.error(f"JSON 파싱 실패: {e}")
-            detail_text = response_text
+            logger.error(f"JSON 파싱 실패 (코드블록): {e}")
+    
+    # 패턴 2: 코드블록 없이 바로 { ... } 형태
+    if not json_data:
+        json_match2 = re.search(r'(\{[^{]*?"summary".*?"verdict".*?\})\s*$', response_text, re.DOTALL)
+        if not json_match2:
+            json_match2 = re.search(r'(\{[^{]*?"summary".*?"issues".*?\})', response_text, re.DOTALL)
+        if json_match2:
+            try:
+                json_data = json.loads(json_match2.group(1))
+                detail_text = response_text[json_match2.end():].strip()
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON 파싱 실패 (raw): {e}")
+    
+    # 패턴 3: 전체 텍스트가 JSON인 경우
+    if not json_data and response_text.strip().startswith("{"):
+        try:
+            # JSON 뒤에 마크다운이 있을 수 있으므로 첫 번째 최상위 } 까지만 파싱
+            brace_count = 0
+            json_end = 0
+            for i, c in enumerate(response_text):
+                if c == '{': brace_count += 1
+                elif c == '}': 
+                    brace_count -= 1
+                    if brace_count == 0:
+                        json_end = i + 1
+                        break
+            if json_end > 0:
+                json_data = json.loads(response_text[:json_end])
+                detail_text = response_text[json_end:].strip()
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON 파싱 실패 (전체): {e}")
+    
     return json_data, detail_text
 
 def render_verdict_badge(verdict):
