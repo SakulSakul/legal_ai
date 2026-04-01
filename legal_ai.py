@@ -1084,18 +1084,18 @@ def postprocess_reply(reply, laws_db):
         if db_law.get("law_short") not in penalty_law_shorts:
             continue
         content = db_law.get("content", "")
-        # 형량 패턴 추출
+        # 형량 패턴 추출 — "~에 처한다"까지 포함해서 캡처 후 제거
         penalty_match = _re.search(
-            r'(\d+년\s*이하의?\s*징역\s*(?:또는|이나)\s*\d[\d,]*만?원?\s*이하의?\s*벌금)', content)
+            r'(\d+년\s*이하의?\s*징역\s*(?:또는|이나)\s*\d[\d,]*만?원?\s*이하의?\s*벌금(?:\s*에\s*처한다)?)', content)
         if not penalty_match:
             penalty_match = _re.search(r'(\d+년\s*이하의?\s*징역[^.]{0,80})', content)
         if penalty_match:
             key = f"{db_law['law_short']} {db_law['article_no']}"
             raw_penalty = penalty_match.group(1).strip()
-            # 서술어 꼬리 제거 ("~에 처한다", "~에 처함" 등)
-            raw_penalty = _re.sub(r'\s*에\s*처한다.*$', '', raw_penalty)
-            raw_penalty = _re.sub(r'\s*에\s*처함.*$', '', raw_penalty)
-            raw_penalty = _re.sub(r'\s*에\s*처하[^가-힣]*$', '', raw_penalty)
+            # 서술어 꼬리 제거
+            raw_penalty = _re.sub(r'\s*에\s*처한다$', '', raw_penalty)
+            raw_penalty = _re.sub(r'\s*에\s*처함$', '', raw_penalty)
+            raw_penalty = _re.sub(r'\s*에\s*처하$', '', raw_penalty)
             penalty_map[key] = raw_penalty
     
     # AI 출력에서 형량 교체
