@@ -1063,14 +1063,44 @@ def postprocess_reply(reply, laws_db):
     
     reply = placeholder_pattern.sub(replace_placeholder, reply)
     
-    # 2. AI가 Placeholder를 안 쓰고 직접 숫자를 기재한 경우 경고 태그 추가
-    # "20년 이하의 징역" 같은 과장된 형량 패턴 감지
-    suspicious_penalties = _re.findall(r'(\d{2,})년\s*이하의?\s*징역', reply)
-    for sp in suspicious_penalties:
-        years = int(sp)
-        if years > 15:  # 15년 초과 징역은 일반 형법에서 드묾 → 과장 의심
-            reply = reply.replace(f"{sp}년 이하", f"{sp}년 이하 [⚠️ 형량 과장 의심 — DB 원문 확인 필요]")
-            logger.warning(f"후처리: 과장 형량 감지 — {sp}년 이하 징역")
+    # 2. ██ 형량 강제 치환 — AI가 Placeholder를 안 써도 DB 원문으로 교체 ██
+    # DB에서 벌칙 조문의 형량을 추출하여, AI 출력에서 해당 법령 근처 형량을 강제 치환
+    penalty_map = {}  # {"형법 제347조": "10년 이하의 징역 또는 2천만원 이하의 벌금", ...}
+    
+    penalty_law_shorts = {"형법", "상표법", "관세법", "부정경쟁방지법"}
+    for db_law in laws_db:
+        if db_law.get("law_short") not in penalty_law_shorts:
+            continue
+        content = db_law.get("content", "")
+        # 형량 패턴 추출
+        penalty_match = _re.search(
+            r'(\d+년\s*이하의?\s*징역\s*(?:또는|이나)\s*\d[\d,]*만?원?\s*이하의?\s*벌금)', content)
+        if not penalty_match:
+            penalty_match = _re.search(r'(\d+년\s*이하의?\s*징역[^.]{0,80})', content)
+        if penalty_match:
+            key = f"{db_law['law_short']} {db_law['article_no']}"
+            penalty_map[key] = penalty_match.group(1).strip()
+    
+    # AI 출력에서 형량 교체
+    for law_key, correct_penalty in penalty_map.items():
+        # "형법 제347조" 근처에 잘못된 형량이 있으면 교체
+        # 패턴: "법령명 제X조" 뒤에 나오는 "N년 이하... 벌금" 부분
+        law_name_pattern = _re.escape(law_key)
+        # 법령명 뒤 200자 이내에서 형량 패턴 찾기
+        nearby_pattern = _re.compile(
+            r'(' + law_name_pattern + r'[^.]*?)(\d+년\s*이하의?\s*징역\s*(?:또는|이나)\s*[\d,]+만?원?\s*이하의?\s*벌금)',
+            _re.DOTALL
+        )
+        
+        def replace_with_correct(m):
+            prefix = m.group(1)
+            wrong_penalty = m.group(2)
+            if wrong_penalty.strip() != correct_penalty:
+                logger.warning(f"형량 강제 치환: '{wrong_penalty.strip()}' → '{correct_penalty}' ({law_key})")
+                return prefix + correct_penalty
+            return m.group(0)
+        
+        reply = nearby_pattern.sub(replace_with_correct, reply)
     
     # 3. 전체 텍스트에서 판례번호 패턴 추출 → API 검증
     prec_pattern = _re.compile(r'(\d{4}[가-힣]{1,3}\d{2,6})')
