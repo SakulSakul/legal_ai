@@ -535,9 +535,15 @@ def build_system_gemini_stage1(docs, laws_db):
         "  ① 상표법 제230조 (침해죄) — 독립 쟁점 필수\n"
         "  ② 형법 제347조 (사기죄) — 독립 쟁점 필수\n"
         "  ③ 관세법 제269조 (밀수입죄) + 제178조 (특허취소) — 독립 쟁점 필수\n"
-        "  ④ 부정경쟁방지법 제2조 (부정경쟁행위) — 독립 쟁점 필수. 상표법과 별개로 반드시 포함.\n"
-        "     (상품 형태 모방, 혼동 야기 행위, 미등록 브랜드 디자인 도용 등 검토)\n"
-        "  ⚠️ '상표법으로 처벌되니 부정경쟁방지법은 생략'하는 것은 금지. 각 법령은 보호법익이 다름.\n"
+        "  ④ 부정경쟁방지법 제2조 (부정경쟁행위) + 제18조 (벌칙) — 독립 쟁점 필수.\n"
+        "     상표법과 별개. 상품 형태 모방, 혼동 야기, 미등록 브랜드 디자인 도용 등.\n"
+        "     ⚠️ '상표법으로 처벌되니 부정경쟁방지법 생략' 금지. 보호법익이 다름.\n"
+        "  ⑤ 보세판매장고시 — 독립 쟁점 필수 (면세점 핵심).\n"
+        "     판매대상 물품 제한(제28조), 행정처분(제18조 특허심사), 특허취소 사유 등\n"
+        "     구체적인 행정제재 수위(영업정지 6개월, 특허취소 등)까지 반드시 서술할 것.\n"
+        "  ⑥ 소비자기본법 — 독립 쟁점 필수.\n"
+        "     소비자의 안전권·알 권리 침해, 소비자분쟁해결기준, 징벌적 손해배상 가능성 검토.\n"
+        "  ⚠️ 위 6개 법령은 모두 독립 쟁점으로 포함. 최소 6개 쟁점(issues) 출력 필수.\n"
         "- 관세법 위반: 특허취소(제178조), 밀수출입(제269조), 관세포탈(제270조) 포함.\n\n"
 
         "━━━ [당사 사규] ━━━\n" + saryu_text +
@@ -760,20 +766,35 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None):
         for ra in risk_areas:
             refined_parts.append(f"- {ra}")
     
-    # 5. ██ 보세판매장고시 무조건 강제 주입 ██
+    # 5. ██ 보세판매장고시 + 소비자기본법 무조건 강제 주입 ██
     # 면세점 전용 앱 — Gemini 수집 여부와 무관하게 항상 DB 원문 주입
-    bonded_articles = [db_law for db_law in laws_db 
-                      if db_law.get("law_short") in ("보세판매장고시", "보세판매장운영고시")]
+    forced_law_shorts = {
+        "보세판매장고시": {"제3조", "제4조", "제5조", "제7조", "제8조", "제10조", 
+                        "제15조", "제18조", "제19조", "제20조", "제21조", "제28조"},
+        "보세판매장운영고시": {"제3조", "제7조", "제9조", "제14조", "제28조"},
+        "소비자기본법": {"제4조", "제19조", "제20조"},
+    }
     
-    if bonded_articles:
-        refined_parts.append("\n━━━ [보세판매장고시 — 필수 검토 (DB 원문)] ━━━")
-        refined_parts.append("██ 아래 보세판매장고시 조문은 면세점 모든 검토에 필수 적용 대상입니다. 반드시 검토 결과에 반영하세요. ██")
+    for force_short, force_articles in forced_law_shorts.items():
+        force_laws = [db_law for db_law in laws_db if db_law.get("law_short") == force_short]
+        if not force_laws:
+            continue
         
-        key_articles = {"제3조", "제4조", "제5조", "제7조", "제8조", "제10조", 
-                      "제15조", "제18조", "제19조", "제20조", "제21조", "제28조"}
+        # 이미 Gemini가 수집했는지 확인
+        already_found = any(
+            force_short in lf.get("law_name", "")
+            for lf in gemini_raw_json.get("law_findings", [])
+        )
+        if already_found:
+            continue
+        
+        section_name = force_short
+        refined_parts.append(f"\n━━━ [{section_name} — 필수 검토 (DB 원문)] ━━━")
+        refined_parts.append(f"██ {section_name} 조문은 면세점 모든 검토에 필수. 반드시 issues에 반영. ██")
+        
         injected = 0
-        for ba in bonded_articles:
-            if ba["article_no"] not in key_articles:
+        for ba in force_laws:
+            if ba["article_no"] not in force_articles:
                 continue
             content = ba["content"][:500]
             art_title = ba.get("article_title", "")
@@ -790,7 +811,8 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None):
                 "last_updated": ba.get("last_updated", "")[:10],
             })
             injected += 1
-        logger.info(f"Gatekeeper: 보세판매장고시 {injected}건 강제 주입 완료")
+        if injected > 0:
+            logger.info(f"Gatekeeper: {section_name} {injected}건 강제 주입")
     
     refined_text = "\n".join(refined_parts)
     
@@ -841,7 +863,9 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "⚠️ 면세점 관련 질의인데 검증 데이터에 '보세판매장고시' 또는 '보세판매장 특허 및 운영에 관한 고시'가 "
         "누락되어 있다면, issues에 '보세판매장고시 검토 누락 — 별도 확인 필요' 쟁점을 반드시 추가하세요.\n"
         "██ 검증 데이터에 '보세판매장고시' 조문이 포함되어 있다면, 반드시 issues에 보세판매장고시 관련 쟁점을 "
-        "최소 1개 이상 포함하세요. 보세판매장고시가 포함된 데이터를 무시하는 것은 금지입니다. ██\n\n"
+        "최소 1개 이상 포함하고, 행정처분 수위(영업정지, 특허취소)까지 구체적으로 서술하세요.\n"
+        "보세판매장고시가 포함된 데이터를 무시하거나 '추가 검토 필요'로만 처리하는 것은 금지입니다.\n"
+        "██ 소비자기본법 관련 소비자 피해(안전권, 알 권리, 피해구제)도 독립 쟁점으로 반드시 포함하세요. ██\n\n"
         
         "━━━ [검증 데이터] ━━━\n" + gatekeeper_text +
         
