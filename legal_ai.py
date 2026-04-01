@@ -1105,26 +1105,34 @@ def postprocess_reply(reply, laws_db):
             penalty_map[key] = raw_penalty
             logger.info(f"형량 추출: {key} → '{raw_penalty}'")
     
-    # AI 출력에서 형량 교체
+    # AI 출력에서 형량 교체 — 법령명 근처 + 전체 텍스트 서술어 정리
     for law_key, correct_penalty in penalty_map.items():
-        # "형법 제347조" 근처에 잘못된 형량이 있으면 교체
-        # 패턴: "법령명 제X조" 뒤에 나오는 "N년 이하... 벌금" 부분
         law_name_pattern = _re.escape(law_key)
-        # 법령명 뒤 200자 이내에서 형량 패턴 찾기
+        
+        # 법령명 뒤의 형량 교체 (기본)
         nearby_pattern = _re.compile(
-            r'(' + law_name_pattern + r'[^.]*?)(\d+년\s*이하의?\s*징역\s*(?:또는|이나)\s*[\d,]+만?원?\s*이하의?\s*벌금)',
+            r'(' + law_name_pattern + r'[^.]*?)(\d+년\s*이하의?\s*징역\s*(?:또는|이나)\s*[^.]{5,80}벌금)',
             _re.DOTALL
         )
         
-        def replace_with_correct(m):
+        _correct = correct_penalty  # 클로저용
+        def replace_with_correct(m, _cp=_correct, _lk=law_key):
             prefix = m.group(1)
             wrong_penalty = m.group(2)
-            if wrong_penalty.strip() != correct_penalty:
-                logger.warning(f"형량 강제 치환: '{wrong_penalty.strip()}' → '{correct_penalty}' ({law_key})")
-                return prefix + correct_penalty
+            if wrong_penalty.strip() != _cp:
+                logger.warning(f"형량 강제 치환: '{wrong_penalty.strip()}' → '{_cp}' ({_lk})")
+                return prefix + _cp
             return m.group(0)
         
         reply = nearby_pattern.sub(replace_with_correct, reply)
+    
+    # 전체 텍스트에서 "~에 처한다" 뒤 이상한 연결 정리
+    reply = _re.sub(r'에\s*처한다\s*처벌', '처벌', reply)
+    reply = _re.sub(r'에\s*처한다\s*에\s*처해[지질]', '에 처해질 수 있', reply)
+    reply = _re.sub(r'에\s*처한다\s*에\s*처', '에 처', reply)
+    reply = _re.sub(r'벌금에\s*처한다\s*[)）]', '벌금)', reply)
+    reply = _re.sub(r'벌금에\s*처한다\s*대상', '벌금 대상', reply)
+    reply = _re.sub(r'벌금에\s*처한다([^."])', r'벌금\1', reply)  # 문장 중간의 "에 처한다" 제거
     
     # 3. 전체 텍스트에서 판례번호 패턴 추출 → API 검증
     prec_pattern = _re.compile(r'(\d{4}[가-힣]{1,3}\d{2,6})')
@@ -1150,12 +1158,7 @@ def postprocess_reply(reply, laws_db):
     for old_term, new_term in team_replacements.items():
         reply = reply.replace(old_term, new_term)
     
-    # 5. "~에 처한다에 처해" 서술어 중복 정리
-    reply = _re.sub(r'에\s*처한다\s*에\s*처해[지질]', '에 처해질 수 있', reply)
-    reply = _re.sub(r'에\s*처한다\s*에\s*처', '에 처', reply)
-    reply = _re.sub(r'벌금에\s*처한다\s*[)）]', '벌금)', reply)
-    
-    # 6. DB 미등록 항목의 추측성 형량 제거
+    # 5. DB 미등록 항목의 추측성 형량 제거
     # "⚠️ DB 미등록" 뒤에 나오는 형량 숫자를 "(형량 — 원문 확인 필요)"로 교체
     reply = _re.sub(
         r'(⚠️\s*DB\s*미등록[^.]*?)\d+년\s*이하의?\s*징역[^.]*?벌금[^.]*',
