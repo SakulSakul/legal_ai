@@ -1216,13 +1216,26 @@ def postprocess_reply(reply, laws_db):
     # 2.7 DB에 있는 법령인데 Claude가 "DB 미등록"으로 잘못 표기한 경우 교체
     db_shorts = {d.get("law_short", "") for d in laws_db}
     db_law_names = {d.get("law_name", "") for d in laws_db}
-    for name in list(db_shorts) + list(db_law_names):
-        if not name:
-            continue
-        # "보세판매장고시" 앞에 "DB 미등록"이 있으면 "DB 검증 완료"로 교체
-        pattern = _re.compile(r'(【?)DB\s*미등록(】?)\s*([^.]*?' + _re.escape(name) + r')')
-        if pattern.search(reply):
-            reply = pattern.sub(r'\1DB 검증 완료\2 \3', reply)
+    all_db_names = {n for n in (db_shorts | db_law_names) if n}
+    
+    # 전체 텍스트에서 "DB 미등록" 패턴을 찾아 해당 법령이 실제 DB에 있는지 확인
+    for match in _re.finditer(r'【\s*DB\s*미등록[^】]*】', reply):
+        tag = match.group(0)
+        # 이 태그 뒤 100자 이내에서 법령명 검색
+        after_text = reply[match.end():match.end()+150]
+        before_text = reply[max(0, match.start()-150):match.start()]
+        context = before_text + after_text
+        
+        for db_name in all_db_names:
+            if db_name in context:
+                # DB에 있는 법령인데 "DB 미등록"으로 표기됨 → 교체
+                new_tag = tag.replace("DB 미등록", "DB 검증 완료").replace("API 미확인", "")
+                new_tag = new_tag.replace(", ,", ",").replace(",  ", "").rstrip(", ").rstrip(",")
+                # 빈 태그 정리: 【DB 검증 완료, 】 → 【DB 검증 완료】
+                new_tag = _re.sub(r',\s*】', '】', new_tag)
+                reply = reply.replace(tag, new_tag, 1)
+                logger.info(f"후처리: '{db_name}' DB 미등록 → DB 검증 완료 교체")
+                break
     
     # 3. 전체 텍스트에서 판례번호 패턴 추출 → API 검증 + 사건명 강제 표시
     prec_pattern = _re.compile(r'(\d{4}[가-힣]{1,3}\d{2,6})')
