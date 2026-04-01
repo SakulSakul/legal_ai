@@ -531,9 +531,13 @@ def build_system_gemini_stage1(docs, laws_db):
         "  ③ 「관세법」 — 보세판매장(제196조), 특허취소(제178조), 밀수출입(제269조)\n"
         "  ④ 위 고시/법령을 Google Search로 law.go.kr에서 현행 조문을 반드시 확인할 것\n"
         "  ⚠️ '보세판매장 특허 및 운영에 관한 고시'와 '보세판매장 운영에 관한 고시'는 별개의 행정규칙임. 혼동 금지.\n\n"
-        "- 모조품/가품/위조품 관련 이슈 검토 시: 상표법(침해죄 제230조) 뿐만 아니라 "
-        "형법상 기망행위(사기죄 제347조), 관세법(밀수입죄 제269조), "
-        "부정경쟁방지법(부정경쟁행위 제2조)도 반드시 병행 검색·검토할 것.\n"
+        "- 모조품/가품/위조품 관련 이슈 검토 시 아래 법령을 각각 독립된 쟁점으로 검토할 것 (흡수·생략 금지):\n"
+        "  ① 상표법 제230조 (침해죄) — 독립 쟁점 필수\n"
+        "  ② 형법 제347조 (사기죄) — 독립 쟁점 필수\n"
+        "  ③ 관세법 제269조 (밀수입죄) + 제178조 (특허취소) — 독립 쟁점 필수\n"
+        "  ④ 부정경쟁방지법 제2조 (부정경쟁행위) — 독립 쟁점 필수. 상표법과 별개로 반드시 포함.\n"
+        "     (상품 형태 모방, 혼동 야기 행위, 미등록 브랜드 디자인 도용 등 검토)\n"
+        "  ⚠️ '상표법으로 처벌되니 부정경쟁방지법은 생략'하는 것은 금지. 각 법령은 보호법익이 다름.\n"
         "- 관세법 위반: 특허취소(제178조), 밀수출입(제269조), 관세포탈(제270조) 포함.\n\n"
 
         "━━━ [당사 사규] ━━━\n" + saryu_text +
@@ -808,11 +812,12 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "3. '⚠️ DB 미등록' 또는 '❓ 미확인' 항목은 반드시 해당 사실을 명시하라.\n"
         "4. 불확실한 사항은 '확인 필요'로 표시하라. 절대 추측하지 마라.\n"
         "5. 판례 인용 시 대법원 사건번호(예: 2011도6759)가 없으면 해당 판례를 아예 언급하지 마라.\n"
-        "6. ██ 법정형(징역·벌금 수치) 기재 규칙 ██\n"
-        "   - 【DB 원문 시작】~【DB 원문 끝】 안에 적힌 형량 수치만 그대로 복사하여 기재하라.\n"
-        "   - 원문에 '10년 이하의 징역'이라 적혀있으면 반드시 '10년 이하의 징역'으로 기재하라.\n"
-        "   - 절대 숫자를 과장·축소·변형하지 마라 (20년→10년 X, 2천만원→5천만원 X).\n"
-        "   - DB 원문에 형량이 없으면 형량을 기재하지 마라.\n\n"
+        "6. ██ 법정형(징역·벌금) Placeholder 규칙 ██\n"
+        "   - 법정형(징역, 벌금 수치)을 기재해야 할 부분에는 절대 숫자를 직접 적지 마라.\n"
+        "   - 반드시 {{법령약칭_조문번호_형량}} 형태의 Placeholder로 작성하라.\n"
+        "   - 예시: {{형법_제347조_형량}}, {{관세법_제269조_형량}}, {{상표법_제230조_형량}}\n"
+        "   - 시스템이 Placeholder를 DB 원문의 정확한 수치로 자동 치환한다.\n"
+        "   - Placeholder 없이 직접 숫자를 기재하는 것은 금지한다.\n\n"
         
         "당신은 면세점 전문 시니어 변호사 AI입니다.\n"
         "아래 데이터는 Gemini(리서처)가 수집하고, 시스템(게이트키퍼)이 DB 원문과 대조하여 검증한 결과입니다.\n"
@@ -1013,12 +1018,61 @@ def call_gemini(system_prompt, messages):
     return "⚠️ Gemini 응답을 가져오지 못했습니다."
 
 def postprocess_reply(reply, laws_db):
-    """AI 출력물 후처리 — 전체 텍스트에서 가짜 판례 차단 + 형량 과장 경고.
+    """AI 출력물 후처리 — Placeholder 치환 + 가짜 판례 차단.
     Claude/Gemini 출력 후 마지막 방어선.
     """
     import re as _re
     
-    # 1. 전체 텍스트에서 판례번호 패턴 추출 → API 검증
+    # 1. ██ Placeholder → DB 원문 치환 (형량 숫자 뻥튀기 영구 차단) ██
+    # {{형법_제347조_형량}} → DB에서 형법 제347조 원문의 형량 부분 추출
+    placeholder_pattern = _re.compile(r'\{\{(.+?)_형량\}\}')
+    
+    def replace_placeholder(match):
+        """Placeholder를 DB 원문 형량으로 치환"""
+        key = match.group(1)  # "형법_제347조" 등
+        
+        # key에서 법령약칭과 조문번호 분리
+        parts = key.rsplit("_", 1)
+        if len(parts) != 2:
+            return f"[형량 확인 필요: {key}]"
+        
+        law_short_guess, article_guess = parts[0], parts[1]
+        
+        # DB에서 매칭
+        for db_law in laws_db:
+            db_short = db_law.get("law_short", "")
+            db_article = db_law.get("article_no", "")
+            
+            if db_article != article_guess:
+                continue
+            if db_short == law_short_guess or law_short_guess in db_short or db_short in law_short_guess:
+                content = db_law.get("content", "")
+                # 형량 패턴 추출: "X년 이하의 징역 또는 Y원 이하의 벌금" 등
+                penalty = _re.search(r'(\d+년\s*이하의?\s*징역[^.]*벌금[^.]*)', content)
+                if not penalty:
+                    penalty = _re.search(r'(\d+년\s*이하[^.]{0,50})', content)
+                if penalty:
+                    result = penalty.group(1).strip()
+                    logger.info(f"Placeholder 치환: {key} → {result}")
+                    return result
+                else:
+                    # 형량 패턴을 못 찾으면 원문 앞부분 반환
+                    return f"{content[:100]}..."
+        
+        return f"[DB 미등록 — {key} 형량 확인 필요]"
+    
+    reply = placeholder_pattern.sub(replace_placeholder, reply)
+    
+    # 2. AI가 Placeholder를 안 쓰고 직접 숫자를 기재한 경우 경고 태그 추가
+    # "20년 이하의 징역" 같은 과장된 형량 패턴 감지
+    suspicious_penalties = _re.findall(r'(\d{2,})년\s*이하의?\s*징역', reply)
+    for sp in suspicious_penalties:
+        years = int(sp)
+        if years > 15:  # 15년 초과 징역은 일반 형법에서 드묾 → 과장 의심
+            reply = reply.replace(f"{sp}년 이하", f"{sp}년 이하 [⚠️ 형량 과장 의심 — DB 원문 확인 필요]")
+            logger.warning(f"후처리: 과장 형량 감지 — {sp}년 이하 징역")
+    
+    # 3. 전체 텍스트에서 판례번호 패턴 추출 → API 검증
     prec_pattern = _re.compile(r'(\d{4}[가-힣]{1,3}\d{2,6})')
     found_cases = prec_pattern.findall(reply)
     
@@ -1027,7 +1081,6 @@ def postprocess_reply(reply, laws_db):
             status, title = verify_precedent_via_api(case_query)
             time.sleep(0.3)
             if status == "not_found":
-                # 해당 판례가 포함된 문장 전체를 취소선 처리
                 reply = reply.replace(case_query, f"~~{case_query}~~ [🚨 시스템 검증: 미존재 판례]")
                 logger.warning(f"후처리: 미존재 판례 차단 — {case_query}")
             elif status == "wrong_context":
