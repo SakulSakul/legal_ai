@@ -619,7 +619,7 @@ def verify_law_via_api(law_name, article):
         return False, ""
 
 
-def gatekeeper_process(gemini_raw_json, laws_db):
+def gatekeeper_process(gemini_raw_json, laws_db, docs=None):
     """Stage 2: Gatekeeper — Gemini의 Raw Data를 3중 검증 후 정제.
     1차: 사내 DB(124건+) 원문 대조
     2차: law.go.kr API 실시간 판례 검증 (할루시네이션 차단)
@@ -633,14 +633,23 @@ def gatekeeper_process(gemini_raw_json, laws_db):
     verified_laws = []
     unverified_laws = []
     verified_precedents = []
-    dropped_precedents = []  # 할루시네이션으로 판정되어 삭제된 판례
+    dropped_precedents = []
     
-    # 1. 사규 분석 결과 → 그대로 전달
+    # 1. 사규 분석 결과 → Gemini가 못 찾았으면 원문 직접 주입
     saryu_findings = gemini_raw_json.get("saryu_findings", [])
     if saryu_findings:
         refined_parts.append("━━━ [사규 분석 결과 (Gemini 확인)] ━━━")
         for sf in saryu_findings:
             refined_parts.append(f"- [{sf.get('relevance','?')}] {sf.get('source','?')} {sf.get('clause','')}: {sf.get('content','')[:200]}")
+    elif docs:
+        # Gemini가 사규를 못 찾았으면 원문 핵심 부분 직접 주입
+        refined_parts.append("━━━ [사규 원문 — 시스템 강제 주입 (Gemini 누락)] ━━━")
+        for doc in docs:
+            if doc.get("cat") in ("saryu", "contract", "yakjeong"):
+                label = doc.get("label", doc.get("name", ""))
+                text_preview = doc.get("text", "")[:500]
+                refined_parts.append(f"📄 [{label}]\n{text_preview}")
+        logger.info("Gatekeeper: Gemini 사규 누락 → 원문 강제 주입")
     
     # 2. 법령 → 사내 DB 대조 + API 보조 검증
     law_findings = gemini_raw_json.get("law_findings", [])
@@ -806,20 +815,21 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
     외부 지식 사용 금지 — 오직 전달된 텍스트 안에서만 추론.
     """
     return (
-        "██ 최우선 규칙 — 절대 위반 금지 ██\n"
-        "1. 오직 아래 전달된 '[검증 데이터]' 안에서만 추론하라. 외부 지식을 절대 사용하지 마라.\n"
-        "2. 새로운 법령 조문이나 판례를 추가로 인용하지 마라. 전달된 것만 사용하라.\n"
-        "3. '⚠️ DB 미등록' 또는 '❓ 미확인' 항목은 반드시 해당 사실을 명시하라.\n"
-        "4. 불확실한 사항은 '확인 필요'로 표시하라. 절대 추측하지 마라.\n"
-        "5. 판례 인용 시 대법원 사건번호(예: 2011도6759)가 없으면 해당 판례를 아예 언급하지 마라.\n"
-        "6. ██ 법정형(징역·벌금) Placeholder 규칙 ██\n"
-        "   - 법정형(징역, 벌금 수치)을 기재해야 할 부분에는 절대 숫자를 직접 적지 마라.\n"
-        "   - 반드시 {{법령약칭_조문번호_형량}} 형태의 Placeholder로 작성하라.\n"
-        "   - 예시: {{형법_제347조_형량}}, {{관세법_제269조_형량}}, {{상표법_제230조_형량}}\n"
-        "   - 시스템이 Placeholder를 DB 원문의 정확한 수치로 자동 치환한다.\n"
-        "   - Placeholder 없이 직접 숫자를 기재하는 것은 금지한다.\n"
-        "7. 용어 규칙: '법무팀', 'MD팀' 등 '~팀' 표현을 사용하지 마라. "
-        "반드시 '법무 담당부서', 'MD 담당부서', '컴플라이언스 담당부서' 등 '~담당부서'로 표기하라.\n\n"
+        "████████████████████████████████████████████████████████\n"
+        "██ 최우선 규칙 — 1개라도 위반 시 출력물 전체가 무효 ██\n"
+        "████████████████████████████████████████████████████████\n"
+        "1. ██ 추측 절대 금지 ██ DB 원문이 없는 법령의 형량, 벌금, 징역 수치를 절대 추측·추정하지 마라.\n"
+        "   '⚠️ DB 미등록' 항목에는 형량 숫자를 기재하지 마라. '원문 확인 필요'로만 표기하라.\n"
+        "   '추정', '추정되나', '것으로 보임' 같은 표현을 법정형에 사용하는 것은 금지한다.\n"
+        "2. 오직 아래 '[검증 데이터]'의 【DB 원문 시작】~【DB 원문 끝】 안에서만 추론하라.\n"
+        "3. 새로운 법령 조문이나 판례를 추가 인용하지 마라.\n"
+        "4. 불확실한 사항은 '확인 필요'로 표시하라.\n"
+        "5. 판례는 사건번호가 있는 것만 인용. 없으면 미인용.\n"
+        "6. ██ 법정형 Placeholder ██ 형량은 {{법령약칭_조문번호_형량}} 형태로만 작성.\n"
+        "   예: {{형법_제347조_형량}}, {{관세법_제269조_형량}}, {{상표법_제230조_형량}}\n"
+        "   DB 미등록 법령은 Placeholder도 쓰지 말고 '(형량 — 원문 확인 필요)'로 표기.\n"
+        "7. 용어: '~팀' 금지 → '~담당부서'로 표기.\n"
+        "████████████████████████████████████████████████████████\n\n"
         
         "당신은 면세점 전문 시니어 변호사 AI입니다.\n"
         "아래 데이터는 Gemini(리서처)가 수집하고, 시스템(게이트키퍼)이 DB 원문과 대조하여 검증한 결과입니다.\n"
@@ -1133,6 +1143,21 @@ def postprocess_reply(reply, laws_db):
     for old_term, new_term in team_replacements.items():
         reply = reply.replace(old_term, new_term)
     
+    # 5. "~에 처한다에 처해" 서술어 중복 정리
+    reply = _re.sub(r'에\s*처한다\s*에\s*처해[지질]', '에 처해질 수 있', reply)
+    reply = _re.sub(r'에\s*처한다\s*에\s*처', '에 처', reply)
+    reply = _re.sub(r'벌금에\s*처한다\s*[)）]', '벌금)', reply)
+    
+    # 6. DB 미등록 항목의 추측성 형량 제거
+    # "⚠️ DB 미등록" 뒤에 나오는 형량 숫자를 "(형량 — 원문 확인 필요)"로 교체
+    reply = _re.sub(
+        r'(⚠️\s*DB\s*미등록[^.]*?)\d+년\s*이하의?\s*징역[^.]*?벌금[^.]*',
+        r'\1(형량 — 원문 확인 필요)',
+        reply
+    )
+    # "추정되나", "추정됨", "적용 추정" 패턴 정리
+    reply = _re.sub(r'\d+년\s*이하[^.]*?적용\s*추정되나', '(형량 — 원문 확인 필요)', reply)
+    
     return reply
 
 
@@ -1165,7 +1190,7 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
         
         # Stage 2: Gatekeeper — DB 원문 대조 + API 실시간 검증
         st.caption("🛡️ Stage 2: DB 원문 대조 + law.go.kr API 팩트체크 중...")
-        gatekeeper_meta, gatekeeper_text = gatekeeper_process(gemini_json, laws_db)
+        gatekeeper_meta, gatekeeper_text = gatekeeper_process(gemini_json, laws_db, docs)
         
         # Gatekeeper 결과 요약 표시
         if gatekeeper_meta and not gatekeeper_meta.get("error"):
