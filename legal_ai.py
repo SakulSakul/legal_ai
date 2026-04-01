@@ -1159,14 +1159,47 @@ def postprocess_reply(reply, laws_db):
         reply = reply.replace(old_term, new_term)
     
     # 5. DB 미등록 항목의 추측성 형량 제거
-    # "⚠️ DB 미등록" 뒤에 나오는 형량 숫자를 "(형량 — 원문 확인 필요)"로 교체
     reply = _re.sub(
         r'(⚠️\s*DB\s*미등록[^.]*?)\d+년\s*이하의?\s*징역[^.]*?벌금[^.]*',
         r'\1(형량 — 원문 확인 필요)',
         reply
     )
-    # "추정되나", "추정됨", "적용 추정" 패턴 정리
     reply = _re.sub(r'\d+년\s*이하[^.]*?적용\s*추정되나', '(형량 — 원문 확인 필요)', reply)
+    
+    # 6. ██ 최종 방어선: penalty_map 기반 전체 텍스트 형량 강제 교체 ██
+    # penalty_map에서 추출한 정확한 형량과 다른 형량이 같은 법령명 근처에 있으면 교체
+    # 이건 법령명이 정확히 "관세법 제269조"가 아니라 "밀수입죄", "관세법" 등으로 쓰여도 잡음
+    for law_key, correct_penalty in penalty_map.items():
+        law_short = law_key.split(" ")[0]  # "관세법", "형법" 등
+        article = " ".join(law_key.split(" ")[1:])  # "제269조"
+        
+        # 법령약칭이 reply에 있으면, 그 근처의 잘못된 형량을 교체
+        # "관세법" 또는 "밀수입" 등이 같은 문장에 있는 형량 패턴
+        alias_map = {
+            "관세법": ["관세법", "밀수입", "밀수출입", "제269조"],
+            "형법": ["형법", "사기죄", "사기", "제347조"],
+            "상표법": ["상표법", "상표권 침해", "제230조"],
+            "부정경쟁방지법": ["부정경쟁", "제18조"],
+        }
+        
+        aliases = alias_map.get(law_short, [law_short])
+        for alias in aliases:
+            if alias not in reply:
+                continue
+            # alias가 포함된 문장에서 형량 패턴 교체
+            pattern = _re.compile(
+                r'(' + _re.escape(alias) + r'[^.]*?)(\d+년\s*이하의?\s*징역\s*(?:또는|이나)\s*[^.]{3,80}벌금)',
+                _re.DOTALL
+            )
+            _cp = correct_penalty
+            def _replace_alias(m, _correct=_cp, _alias=alias):
+                prefix = m.group(1)
+                found_penalty = m.group(2)
+                if found_penalty.strip() != _correct:
+                    logger.warning(f"형량 강제 교체({_alias}): '{found_penalty.strip()[:50]}' → '{_correct[:50]}'")
+                    return prefix + _correct
+                return m.group(0)
+            reply = pattern.sub(_replace_alias, reply)
     
     return reply
 
