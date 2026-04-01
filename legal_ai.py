@@ -817,7 +817,9 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "   - 반드시 {{법령약칭_조문번호_형량}} 형태의 Placeholder로 작성하라.\n"
         "   - 예시: {{형법_제347조_형량}}, {{관세법_제269조_형량}}, {{상표법_제230조_형량}}\n"
         "   - 시스템이 Placeholder를 DB 원문의 정확한 수치로 자동 치환한다.\n"
-        "   - Placeholder 없이 직접 숫자를 기재하는 것은 금지한다.\n\n"
+        "   - Placeholder 없이 직접 숫자를 기재하는 것은 금지한다.\n"
+        "7. 용어 규칙: '법무팀', 'MD팀' 등 '~팀' 표현을 사용하지 마라. "
+        "반드시 '법무 담당부서', 'MD 담당부서', '컴플라이언스 담당부서' 등 '~담당부서'로 표기하라.\n\n"
         
         "당신은 면세점 전문 시니어 변호사 AI입니다.\n"
         "아래 데이터는 Gemini(리서처)가 수집하고, 시스템(게이트키퍼)이 DB 원문과 대조하여 검증한 결과입니다.\n"
@@ -1079,7 +1081,12 @@ def postprocess_reply(reply, laws_db):
             penalty_match = _re.search(r'(\d+년\s*이하의?\s*징역[^.]{0,80})', content)
         if penalty_match:
             key = f"{db_law['law_short']} {db_law['article_no']}"
-            penalty_map[key] = penalty_match.group(1).strip()
+            raw_penalty = penalty_match.group(1).strip()
+            # 서술어 꼬리 제거 ("~에 처한다", "~에 처함" 등)
+            raw_penalty = _re.sub(r'\s*에\s*처한다.*$', '', raw_penalty)
+            raw_penalty = _re.sub(r'\s*에\s*처함.*$', '', raw_penalty)
+            raw_penalty = _re.sub(r'\s*에\s*처하[^가-힣]*$', '', raw_penalty)
+            penalty_map[key] = raw_penalty
     
     # AI 출력에서 형량 교체
     for law_key, correct_penalty in penalty_map.items():
@@ -1116,6 +1123,15 @@ def postprocess_reply(reply, laws_db):
             elif status == "wrong_context":
                 reply = reply.replace(case_query, f"~~{case_query}~~ [🚨 시스템 검증: 맥락 불일치 — 실제: {title}]")
                 logger.warning(f"후처리: 맥락 불일치 판례 차단 — {case_query} (실제: {title})")
+    
+    # 4. 용어 치환: "~팀" → "~담당부서"
+    team_replacements = {
+        "법무팀": "법무 담당부서", "MD팀": "MD 담당부서",
+        "컴플라이언스팀": "컴플라이언스 담당부서", "준법팀": "준법 담당부서",
+        "법무 팀": "법무 담당부서", "MD 팀": "MD 담당부서",
+    }
+    for old_term, new_term in team_replacements.items():
+        reply = reply.replace(old_term, new_term)
     
     return reply
 
