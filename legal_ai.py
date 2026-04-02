@@ -562,7 +562,7 @@ def call_mcp_law(query, max_tokens=2048):
     Returns: (success: bool, text_content: str)
     """
     try:
-        client = init_claude()
+        client = init_anthropic()
         response = client.beta.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=max_tokens,
