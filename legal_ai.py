@@ -1538,16 +1538,65 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
         pre_json, pre_detail = parse_review_response(reply)
         
         if pre_json:
-            # JSON 파싱 성공 → detail_text만 후처리 (JSON은 보호)
+            # JSON 파싱 성공 → detail_text 후처리
             processed_detail = postprocess_reply(pre_detail, laws_db)
-            # JSON 내부의 law_analysis 등에서도 형량 치환 필요 → JSON을 문자열로 후처리
+            
+            # JSON 내부 placeholder를 직접 순회하여 치환 (re.sub 대신 안전한 방식)
+            import re as _re
+            placeholder_db = {
+                "상표법_제230조_7년이하징역또는1억원이하벌금": "7년 이하의 징역 또는 1억원 이하의 벌금",
+                "상표법_제235조_3억원이하벌금": "3억원 이하의 벌금",
+                "상표법_제236조_전량강제필요적몰수": "전량 강제 몰수(필요적 몰수)",
+                "상표법_제236조_필요적몰수": "필요적 몰수(침해물품 전량 강제 몰수)",
+                "형법_제347조_20년이하징역또는5천만원이하벌금": "20년 이하의 징역 또는 5천만원 이하의 벌금",
+                "관세법_제269조제2항_5년이하징역또는관세액10배와물품원가중높은금액이하벌금": "5년 이하의 징역 또는 관세액의 10배와 물품원가 중 높은 금액 이하의 벌금",
+                "관세법_제269조제2항_5년이하징역또는관세액10배이하벌금": "5년 이하의 징역 또는 관세액의 10배 이하의 벌금",
+                "관세법_제235조_수출입원천금지": "수출입이 원천 금지",
+                "관세법_제178조_특허취소": "보세판매장 특허 취소",
+                "부정경쟁방지법_제18조제3항제1호_3년이하징역또는3천만원이하벌금": "3년 이하의 징역 또는 3천만원 이하의 벌금",
+                "부정경쟁방지법_징벌적손해배상_5배": "손해액의 최대 5배 징벌적 손해배상",
+                "보세판매장고시_영업정지_6개월": "6개월 이내 영업정지",
+                "보세판매장고시_특허취소": "보세판매장 특허 취소",
+                "보세판매장고시_과징금_수입액비례대규모": "수입액에 비례한 과징금",
+                "소비자기본법_제46조_수거파기등시정조치": "수거·파기·환급 등 시정조치",
+                "소비자기본법_집단분쟁조정절차": "집단분쟁조정",
+                "소비자기본법_소비자단체소송": "소비자단체소송",
+            }
+            
+            def clean_json_value(obj):
+                """JSON 객체를 재귀 순회하며 {{...}} placeholder 치환"""
+                if isinstance(obj, str):
+                    # 1차: DB 매칭
+                    for key, val in placeholder_db.items():
+                        obj = obj.replace("{{" + key + "}}", val)
+                    # 2차: 남은 {{...}} — 중괄호 제거 + 띄어쓰기 정리
+                    def _fallback(m):
+                        inner = m.group(1)
+                        parts = inner.split("_")
+                        # 마지막 파트가 형량이면 그것만, 아니면 전체
+                        last = parts[-1] if parts else inner
+                        last = last.replace("이하", " 이하의 ").replace("또는", " 또는 ")
+                        last = last.replace("징역", "징역 ").replace("벌금", "벌금")
+                        last = _re.sub(r'\s+', ' ', last).strip()
+                        return last
+                    obj = _re.sub(r'\{\{([^}]+)\}\}', _fallback, obj)
+                    return obj
+                elif isinstance(obj, dict):
+                    return {k: clean_json_value(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [clean_json_value(item) for item in obj]
+                return obj
+            
+            pre_json = clean_json_value(pre_json)
+            
+            # JSON 문자열로 후처리 (내부 태그 제거 등)
             json_str = json.dumps(pre_json, ensure_ascii=False)
             json_str = postprocess_reply(json_str, laws_db)
             try:
                 pre_json = json.loads(json_str)
             except json.JSONDecodeError:
-                logger.warning("JSON 후처리 후 파싱 실패 — 원본 사용")
-            # reply를 재조립
+                logger.warning("JSON 후처리 후 파싱 실패 — placeholder 치환 버전 사용")
+            
             reply = "```json\n" + json.dumps(pre_json, ensure_ascii=False, indent=2) + "\n```\n" + processed_detail
         else:
             # JSON 파싱 실패 → 전체 후처리
