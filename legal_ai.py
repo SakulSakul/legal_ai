@@ -1400,14 +1400,15 @@ def postprocess_reply(reply, laws_db):
     if penalty_map:
         for law_key, correct_penalty in penalty_map.items():
             law_short = law_key.split(" ")[0]
-            # 법령명 근처의 "(형량 — 원문 확인 필요)"를 실제 형량으로 교체
             for alias in [law_short, law_key]:
                 pattern = _re.compile(
                     r'(' + _re.escape(alias) + r'[^.]{0,200}?)\(형량\s*[—\-]\s*원문\s*확인\s*필요\)',
                     _re.DOTALL
                 )
+                # 람다 사용 — correct_penalty에 \10 같은 문자가 있어도 안전
+                _cp = correct_penalty
                 if pattern.search(reply):
-                    reply = pattern.sub(r'\1' + correct_penalty, reply)
+                    reply = pattern.sub(lambda m, cp=_cp: m.group(1) + cp, reply)
                     logger.info(f"placeholder 치환: {alias} 근처 → {correct_penalty[:30]}")
     
     # 남은 "(형량 — 원문 확인 필요)"는 경고 표시로 변환 (최종 문서에 placeholder 노출 방지)
