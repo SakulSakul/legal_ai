@@ -563,6 +563,8 @@ def call_mcp_law(query, max_tokens=2048):
     """
     try:
         client = init_anthropic()
+        
+        # MCP 호출 — SDK 0.85+에서는 betas 파라미터 사용
         response = client.beta.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=max_tokens,
@@ -572,7 +574,7 @@ def call_mcp_law(query, max_tokens=2048):
                 "url": "https://korean-law-mcp.fly.dev/mcp",
                 "name": "korean-law"
             }],
-            extra_headers={"anthropic-beta": "mcp-client-2025-11-20"}
+            betas=["mcp-client-2025-11-20"]
         )
         # 응답에서 텍스트 추출
         text_parts = []
@@ -581,8 +583,25 @@ def call_mcp_law(query, max_tokens=2048):
                 text_parts.append(block.text)
         return True, "\n".join(text_parts)
     except Exception as e:
-        logger.warning(f"MCP 법령 조회 실패: {e}")
-        return False, str(e)
+        err_str = str(e)
+        logger.warning(f"MCP 법령 조회 실패: {err_str[:500]}")
+        
+        # MCP 실패 시 law.go.kr API 직접 폴백
+        try:
+            import requests
+            url = "http://www.law.go.kr/DRF/lawSearch.do"
+            # 쿼리에서 법령명 추출
+            import re as _re
+            law_match = _re.search(r"['\"]([가-힣]+법[가-힣]*)['\"]", query)
+            if law_match:
+                params = {"OC": "sapphire_5", "target": "law", "type": "XML", "query": law_match.group(1)}
+                res = requests.get(url, params=params, timeout=10)
+                if res.status_code == 200 and "totalCnt" in res.text:
+                    return True, f"{law_match.group(1)} 법령 존재 확인 (law.go.kr 직접 조회)"
+        except Exception:
+            pass
+        
+        return False, err_str[:300]
 
 
 def verify_precedent_via_api(case_no, context_keywords=None):
