@@ -574,9 +574,13 @@ def call_mcp_law(query, max_tokens=2048):
             pass  # wake-up 실패해도 MCP 시도
         
         # mcp-client-2025-11-20에서는 tools에 mcp_toolset 필수
+        # API 키를 시스템 프롬프트로 전달 (MCP 서버가 세션별 키 사용)
+        law_api_key = get_secret("LAW_OC") or "ocwhip3122"
+        
         response = client.beta.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=max_tokens,
+            system=f"법제처 API 키: {law_api_key}. 모든 법령 조회 도구 호출 시 apiKey 파라미터에 이 키를 사용하세요.",
             messages=[{"role": "user", "content": query}],
             mcp_servers=[{
                 "type": "url",
@@ -612,7 +616,7 @@ def call_mcp_law(query, max_tokens=2048):
         
         law_name = law_match.group(1)
         url = "http://www.law.go.kr/DRF/lawSearch.do"
-        params = {"OC": "sapphire_5", "target": "law", "type": "XML", "query": law_name}
+        params = {"OC": "ocwhip3122", "target": "law", "type": "XML", "query": law_name}
         res = _req.get(url, params=params, timeout=10)
         
         if res.status_code == 200 and "totalCnt" in res.text:
@@ -640,7 +644,7 @@ def verify_precedent_via_api(case_no, context_keywords=None):
     query = num_match.group(1)
     try:
         url = "http://www.law.go.kr/DRF/lawSearch.do"
-        params = {"OC": "sapphire_5", "target": "prec", "type": "XML", "query": query}
+        params = {"OC": "ocwhip3122", "target": "prec", "type": "XML", "query": query}
         res = requests.get(url, params=params, timeout=10)
         if res.status_code != 200:
             return "error", ""
@@ -674,7 +678,7 @@ def verify_law_via_api(law_name, article):
     import requests
     try:
         url = "http://www.law.go.kr/DRF/lawSearch.do"
-        params = {"OC": "sapphire_5", "target": "law", "type": "XML", "query": law_name}
+        params = {"OC": "ocwhip3122", "target": "law", "type": "XML", "query": law_name}
         res = requests.get(url, params=params, timeout=10)
         if res.status_code != 200:
             return False, ""
@@ -2226,7 +2230,7 @@ def main():
                     with st.spinner("law.go.kr 연결 테스트 중..."):
                         try:
                             import requests as _req
-                            test_res = _req.get("http://www.law.go.kr/DRF/lawSearch.do?OC=sapphire_5&target=law&type=XML&query=관세법", timeout=10)
+                            test_res = _req.get("http://www.law.go.kr/DRF/lawSearch.do?OC=ocwhip3122&target=law&type=XML&query=관세법", timeout=10)
                             if test_res.status_code == 200 and "totalCnt" in test_res.text:
                                 st.success("✅ law.go.kr API 연결 정상")
                             else:
@@ -2263,9 +2267,11 @@ def main():
                             _client = init_anthropic()
                             
                             try:
+                                _law_key = get_secret("LAW_OC") or "ocwhip3122"
                                 resp = _client.beta.messages.create(
                                     model="claude-sonnet-4-20250514",
                                     max_tokens=500,
+                                    system=f"법제처 API 키: {_law_key}. 도구 호출 시 apiKey에 이 키를 사용하세요.",
                                     messages=[{"role": "user", "content": "관세법 제1조 조문 원문 알려줘"}],
                                     mcp_servers=[{
                                         "type": "url",
@@ -2398,7 +2404,7 @@ def main():
                                 
                                 # 1. 법령 검색 → MST 번호 획득
                                 search_res = _req.get("http://www.law.go.kr/DRF/lawSearch.do",
-                                    params={"OC": "sapphire_5", "target": "law", "type": "XML", "query": manual_law}, timeout=10)
+                                    params={"OC": "ocwhip3122", "target": "law", "type": "XML", "query": manual_law}, timeout=10)
                                 search_root = ET.fromstring(search_res.text)
                                 mst = None
                                 for item in search_root.iter():
@@ -2422,7 +2428,7 @@ def main():
                                     st.error(f"❌ '{manual_law}' 법령을 찾을 수 없습니다.")
                                 else:
                                     # 2. 조문 상세 조회
-                                    detail_res = _req.get(f"http://www.law.go.kr/DRF/lawService.do?OC=sapphire_5&target=law&MST={mst}&type=XML", timeout=15)
+                                    detail_res = _req.get(f"http://www.law.go.kr/DRF/lawService.do?OC=ocwhip3122&target=law&MST={mst}&type=XML", timeout=15)
                                     detail_root = ET.fromstring(detail_res.text)
                                     art_num = _re.sub(r'[^0-9]', '', manual_art.split("조의")[0])
                                     
