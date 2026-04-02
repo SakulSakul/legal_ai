@@ -1186,7 +1186,7 @@ def postprocess_reply(reply, laws_db):
         # 형량 패턴 추출 — "~에 처한다"까지 포함 후 제거
         # 패턴1: "N년 이하 징역 또는 N만원 이하 벌금" (일반적)
         penalty_match = _re.search(
-            r'(\d+년\s*이하의?\s*징역\s*(?:또는|이나)\s*\d[\d,]*[만억]?원?\s*이하의?\s*벌금(?:\s*에\s*처한다)?)', content)
+            r'(\d+년\s*이하의?\s*징역\s*(?:또는|이나)\s*\d[^\s]*원\s*이하의?\s*벌금(?:\s*에\s*처한다)?)', content)
         # 패턴2: "N년 이하 징역 또는 관세액의 10배..." (관세법 특수)
         if not penalty_match:
             penalty_match = _re.search(
@@ -1370,8 +1370,19 @@ def postprocess_reply(reply, laws_db):
     }
     for old_name, formal_name in file_name_map.items():
         reply = reply.replace(old_name, formal_name)
-    # 나머지 .docx 확장자도 제거
     reply = _re.sub(r'(\S+)\.docx', r'\1', reply)
+    
+    # 10. ██ 내부 파이프라인 태그 제거 — 최종 문서에 노출 금지 ██
+    # "⚠️ (DB 미등록, API 미확인 — 존재 여부 불확실) Gemini 검증:" 등
+    reply = _re.sub(r'⚠️?\s*\(DB\s*미등록[^)]*\)\s*(?:Gemini\s*검증:?\s*)?', '', reply)
+    reply = _re.sub(r'✅?\s*\(DB\s*검증\s*완료[^)]*\)\s*', '', reply)
+    reply = _re.sub(r'【DB\s*검증\s*완료[^】]*】\s*', '', reply)
+    reply = _re.sub(r'【DB\s*미등록[^】]*】\s*', '', reply)
+    reply = _re.sub(r'【DB\s*일부\s*검증[^】]*】\s*', '', reply)
+    reply = _re.sub(r'\(DB\s*검증\s*완료\)\s*', '', reply)
+    reply = _re.sub(r'Gemini\s*검증:\s*', '', reply)
+    # "(형량: 해당 법령 원문 참조)" 도 더 깔끔하게
+    reply = reply.replace("(형량: 해당 법령 원문 참조)", "(형량은 해당 법령 원문 참조)")
     
     return reply
 
