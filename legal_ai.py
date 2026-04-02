@@ -1164,7 +1164,7 @@ def postprocess_reply(reply, laws_db):
         # 형량 패턴 추출 — "~에 처한다"까지 포함 후 제거
         # 패턴1: "N년 이하 징역 또는 N만원 이하 벌금" (일반적)
         penalty_match = _re.search(
-            r'(\d+년\s*이하의?\s*징역\s*(?:또는|이나)\s*\d[\d,]*만?원?\s*이하의?\s*벌금(?:\s*에\s*처한다)?)', content)
+            r'(\d+년\s*이하의?\s*징역\s*(?:또는|이나)\s*\d[\d,]*[만억]?원?\s*이하의?\s*벌금(?:\s*에\s*처한다)?)', content)
         # 패턴2: "N년 이하 징역 또는 관세액의 10배..." (관세법 특수)
         if not penalty_match:
             penalty_match = _re.search(
@@ -1413,9 +1413,27 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
                 fallback_text = gemini_reply[json_match.end():].strip() or gemini_reply
             return fallback_text, "Gemini (Claude 우회)"
         
-        # 성공 — 후처리: 가짜 판례 필터링
+        # 성공 — JSON 먼저 파싱, 후처리는 detail_text에만 적용
         st.caption("🔍 후처리: 전체 텍스트 판례 검증 중...")
-        reply = postprocess_reply(reply, laws_db)
+        
+        # 1) JSON 먼저 분리
+        pre_json, pre_detail = parse_review_response(reply)
+        
+        if pre_json:
+            # JSON 파싱 성공 → detail_text만 후처리 (JSON은 보호)
+            processed_detail = postprocess_reply(pre_detail, laws_db)
+            # JSON 내부의 law_analysis 등에서도 형량 치환 필요 → JSON을 문자열로 후처리
+            json_str = json.dumps(pre_json, ensure_ascii=False)
+            json_str = postprocess_reply(json_str, laws_db)
+            try:
+                pre_json = json.loads(json_str)
+            except json.JSONDecodeError:
+                logger.warning("JSON 후처리 후 파싱 실패 — 원본 사용")
+            # reply를 재조립
+            reply = "```json\n" + json.dumps(pre_json, ensure_ascii=False, indent=2) + "\n```\n" + processed_detail
+        else:
+            # JSON 파싱 실패 → 전체 후처리
+            reply = postprocess_reply(reply, laws_db)
         
         st.session_state["_gatekeeper_meta"] = gatekeeper_meta
         
