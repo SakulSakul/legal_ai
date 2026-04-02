@@ -585,15 +585,7 @@ def call_mcp_law(query, max_tokens=2048):
             }],
             tools=[{
                 "type": "mcp_toolset",
-                "mcp_server_name": "korean-law",
-                "tool_configuration": {
-                    "allowed_tools": [
-                        "search_law", "get_law_text", "get_batch_articles",
-                        "search_precedents", "get_precedent_text",
-                        "search_admin_rule", "get_admin_rule",
-                        "search_interpretations", "get_interpretation_text"
-                    ]
-                }
+                "mcp_server_name": "korean-law"
             }],
             betas=["mcp-client-2025-11-20"]
         )
@@ -2282,10 +2274,7 @@ def main():
                                     }],
                                     tools=[{
                                         "type": "mcp_toolset",
-                                        "mcp_server_name": "korean-law",
-                                        "tool_configuration": {
-                                            "allowed_tools": ["search_law", "get_law_text"]
-                                        }
+                                        "mcp_server_name": "korean-law"
                                     }],
                                     betas=["mcp-client-2025-11-20"]
                                 )
