@@ -901,7 +901,8 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "━━━ [검증 데이터] ━━━\n" + gatekeeper_text +
         
         "\n\n━━━ [답변 형식] ━━━\n"
-        "반드시 아래 JSON + 마크다운 상세 설명을 출력하세요.\n\n"
+        "반드시 아래 JSON 형식으로만 출력하세요. JSON 외의 마크다운 설명은 작성하지 마세요.\n"
+        "모든 분석 내용은 JSON의 issues 안에 넣으세요.\n\n"
         "```json\n"
         "{\n"
         '  "summary": "1줄 요약",\n'
@@ -912,19 +913,19 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         '      "issue_no": 1, "title": "쟁점 제목", "risk_level": "high|medium|low",\n'
         '      "target_clause": "검토 대상 원문",\n'
         '      "applicable_law": "법령/고시명 제X조",\n'
-        '      "law_analysis": "법령·행정규칙 관점 (DB 검증 여부 명시)",\n'
+        '      "law_analysis": "법령·행정규칙 관점 — 형량은 반드시 {{법령약칭_조문번호_형량}} Placeholder 사용",\n'
         '      "applicable_rule": "사규 조항",\n'
         '      "rule_analysis": "사규 관점",\n'
         '      "recommendation": "종합 권고안"\n'
         '    }\n'
         '  ],\n'
-        '  "action_plan": "MD 실무 액션 (단계별)",\n'
+        '  "action_plan": "MD 실무 액션 (단계별, 시간축 포함: 즉시/24시간/1주/1개월)",\n'
         '  "alternative_clause": "수정 대안 (없으면 null)",\n'
         '  "cited_laws": [{"law_name": "법령명", "article": "제X조"}],\n'
         '  "cited_precedents": [{"case_no": "판례번호", "summary": "판시사항"}]\n'
         "}\n"
         "```\n"
-        "JSON 아래 마크다운 상세 설명. 🔴 위반, 🔵 통과.\n\n"
+        "⚠️ JSON 코드블록 뒤에 추가 마크다운 설명을 절대 작성하지 마세요. JSON만 출력하세요.\n"
         "후속 질문에는 JSON 없이 마크다운. 새 검토 요청 시만 JSON 출력.\n"
     )
 
@@ -1853,10 +1854,7 @@ def generate_review_docx(json_data, detail_text, query_text):
             p_alt.paragraph_format.left_indent = Cm(0.5)
             _apply_shading(p_alt, SHADE_ALT)
 
-        # ── 상세 검토 의견 전문 (화면의 expander 내용과 동일) ──
-        if detail_text:
-            _add_shaded_heading(doc, "📄 상세 검토 의견 전문", level=2, shade_color=SHADE_H2)
-            doc.add_paragraph(detail_text[:10000])
+        # 상세 전문 제거 — 본문과 형량 불일치 문제의 근본 원인이므로 삭제
 
     else:
         # JSON 파싱 실패 시 원문 그대로
@@ -2401,8 +2399,6 @@ def main():
                 render_issues_table(jd.get("issues", []), msg.get("citation_results", []))
                 if jd.get("alternative_clause"):
                     render_alternative_clause(jd["alternative_clause"])
-                with st.expander("📄 상세 검토 의견 전문", expanded=False):
-                    st.markdown(msg.get("detail_text", msg["content"]))
                 
                 if jd.get("verdict"):
                     docx_bytes = generate_review_docx(jd, msg.get("detail_text", ""), "")
@@ -2568,7 +2564,6 @@ def main():
                         
                         render_issues_table(json_data.get("issues", []), citation_results)
                         if json_data.get("alternative_clause"): render_alternative_clause(json_data["alternative_clause"])
-                        with st.expander("📄 상세 검토 의견 전문", expanded=False): st.markdown(detail_text)
 
                         docx_bytes = generate_review_docx(json_data, detail_text, display_query)
                         st.caption("⚠️ 본 문서를 사내변호사 확인 없이 외부에 발송하지 마세요.")
