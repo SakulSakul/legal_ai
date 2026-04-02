@@ -1443,6 +1443,32 @@ def postprocess_reply(reply, laws_db):
     # "(형량: 해당 법령 원문 참조)" 도 더 깔끔하게
     reply = reply.replace("(형량: 해당 법령 원문 참조)", "(형량은 해당 법령 원문 참조)")
     
+    # 11. ██ 최종 방어: 남은 {{...}} placeholder 정리 ██
+    # Claude가 {{상표법_제230조_7년이하징역또는1억원이하벌금}} 형태로 쓴 경우
+    # → "7년 이하의 징역 또는 1억원 이하의 벌금"으로 변환
+    def clean_placeholder(m):
+        inner = m.group(1)
+        # 마지막 _ 뒤의 형량 부분 추출
+        parts = inner.split("_")
+        # 형량 부분 찾기 (숫자+년 또는 숫자+원 포함)
+        penalty_parts = []
+        for p in parts:
+            if _re.search(r'\d+[년원배]', p):
+                penalty_parts.append(p)
+        
+        if penalty_parts:
+            # "7년이하징역또는1억원이하벌금" → "7년 이하의 징역 또는 1억원 이하의 벌금"
+            raw = "".join(penalty_parts)
+            raw = raw.replace("이하", " 이하의 ").replace("또는", " 또는 ")
+            raw = raw.replace("징역", "징역 ").replace("벌금", "벌금")
+            raw = _re.sub(r'\s+', ' ', raw).strip()
+            return raw
+        else:
+            # 형량이 아닌 placeholder (예: {{상표법_제236조_필요적몰수}})
+            return parts[-1] if parts else inner
+    
+    reply = _re.sub(r'\{\{([^}]+)\}\}', clean_placeholder, reply)
+    
     return reply
 
 
