@@ -1479,7 +1479,93 @@ def postprocess_reply(reply, laws_db):
 
 def dispatch_with_fallback(model_choice, messages, docs, laws_db):
     if model_choice == "claude":
-        # ━━━ 3단계 하이브리드 파이프라인 ━━━
+        # ━━━ 블록 삽입 파이프라인 체크 ━━━
+        # 모조품 관련 질의면 block_assembler로 분기 (형량 100% 보장)
+        user_query = messages[-1]["content"] if messages else ""
+        
+        try:
+            from block_assembler import classify_issues, load_legal_blocks, run_pipeline
+            
+            db = load_legal_blocks("legal_blocks.json")
+            matched_topics = classify_issues(user_query, db)
+            
+            if matched_topics:
+                st.caption(f"🔒 블록 삽입 모드: {', '.join(matched_topics)} (형량 DB 보장)")
+                
+                # 사규 텍스트 추출
+                saryu_texts = []
+                for doc in docs:
+                    if doc.get("cat") in ("saryu", "contract", "yakjeong"):
+                        saryu_texts.append(f"[{doc.get('label', '')}]\n{doc.get('text', '')[:3000]}")
+                
+                # Gemini 호출 함수 래퍼
+                def gemini_call_fn(prompt):
+                    return call_gemini(prompt, messages)
+                
+                result = run_pipeline(
+                    query=user_query,
+                    사규_texts=saryu_texts,
+                    gemini_call_fn=gemini_call_fn,
+                    db_path="legal_blocks.json",
+                )
+                
+                # 무결성 검증
+                if result["integrity_errors"]:
+                    for err in result["integrity_errors"]:
+                        st.warning(f"⚠️ {err}")
+                
+                # JSON 형식으로 변환 (기존 UI 호환)
+                block_data = db[matched_topics[0]]
+                json_data = {
+                    "summary": block_data["summary"],
+                    "verdict": "rejected",
+                    "verdict_reason": block_data["summary"],
+                    "issues": [],
+                    "action_plan": "즉시: 의심상품 판매중단·재고조사 → 24시간: 법무담당부서 긴급대응팀 구성 → 1주: 공급업체 전면 재심사 → 1개월: 보세판매장 준수체계 재구축",
+                    "alternative_clause": None,
+                    "cited_laws": [],
+                    "cited_precedents": [],
+                }
+                
+                # issues 변환
+                gemini_results = {}
+                try:
+                    from block_assembler import parse_gemini_response, build_gemini_prompt, fetch_legal_blocks
+                    blocks = fetch_legal_blocks(matched_topics[0], db)
+                    prompt = build_gemini_prompt(matched_topics[0], blocks, saryu_texts)
+                    gemini_resp = call_gemini(prompt, messages)
+                    gemini_results = parse_gemini_response(gemini_resp)
+                except Exception as e:
+                    logger.warning(f"블록 파이프라인 Gemini 사규연계 실패: {e}")
+                
+                for i, issue in enumerate(block_data["issues"], 1):
+                    issue_id = issue["id"]
+                    gr = gemini_results.get(issue_id, {})
+                    json_data["issues"].append({
+                        "issue_no": i,
+                        "title": issue["title"],
+                        "risk_level": "high" if issue["risk_level"] == "🔴" else "medium",
+                        "target_clause": user_query,
+                        "applicable_law": issue["applicable_laws"],
+                        "law_analysis": issue["legal_analysis"],
+                        "applicable_rule": gr.get("applicable_saryu", "사규 분석 대기중"),
+                        "rule_analysis": gr.get("saryu_analysis", "사규 분석 대기중"),
+                        "recommendation": gr.get("recommendation", "실무 권고 대기중"),
+                    })
+                    json_data["cited_laws"].append({
+                        "law_name": issue["applicable_laws"].split(" ")[0] if issue["applicable_laws"] else "",
+                        "article": issue["applicable_laws"],
+                    })
+                
+                # JSON + 마크다운 형식으로 reply 조립
+                reply = "```json\n" + json.dumps(json_data, ensure_ascii=False, indent=2) + "\n```"
+                return reply, "블록삽입→Gemini(사규연계)"
+        except FileNotFoundError:
+            logger.info("legal_blocks.json 미발견 — 기존 파이프라인 사용")
+        except Exception as e:
+            logger.warning(f"블록 파이프라인 실패: {e} — 기존 파이프라인 폴백")
+        
+        # ━━━ 기존 3단계 하이브리드 파이프라인 (블록 미매칭 시) ━━━
         
         # Stage 1: Gemini Researcher — 사규 분석 + 법령/판례 수집
         gemini_system = build_system_gemini_stage1(docs, laws_db)
