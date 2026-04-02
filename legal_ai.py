@@ -557,15 +557,63 @@ def build_system_gemini_stage1(docs, laws_db):
     )
 
 def call_mcp_law(query, max_tokens=2048):
-    """법령/판례 조회 — law.go.kr API 직접 호출.
-    MCP는 현재 비활성. law.go.kr DRF API 사용.
-    Returns: (success: bool, text_content: str)
+    """korean-law-mcp를 통해 법령/판례 조회.
+    MCP 실패 시 law.go.kr 직접 폴백.
     """
-    import requests
+    import requests as _req
     import re as _re
     
+    # 1차: MCP 시도
     try:
-        # 쿼리에서 법령명 추출
+        client = init_anthropic()
+        
+        # Fly.io wake-up (sleep 상태일 수 있으므로 먼저 깨움)
+        try:
+            _req.get("https://korean-law-mcp.fly.dev/health", timeout=15)
+        except Exception:
+            pass  # wake-up 실패해도 MCP 시도
+        
+        # mcp-client-2025-11-20에서는 tools에 mcp_toolset 필수
+        response = client.beta.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": query}],
+            mcp_servers=[{
+                "type": "url",
+                "url": "https://korean-law-mcp.fly.dev/mcp",
+                "name": "korean-law"
+            }],
+            tools=[{
+                "type": "mcp_toolset",
+                "mcp_server_name": "korean-law",
+                "tool_configuration": {
+                    "allowed_tools": [
+                        "search_law", "get_law_text", "get_batch_articles",
+                        "search_precedents", "get_precedent_text",
+                        "search_admin_rule", "get_admin_rule",
+                        "search_interpretations", "get_interpretation_text"
+                    ]
+                }
+            }],
+            betas=["mcp-client-2025-11-20"]
+        )
+        
+        text_parts = []
+        for block in response.content:
+            if hasattr(block, 'text') and block.text:
+                text_parts.append(block.text)
+        
+        result = "\n".join(text_parts)
+        if result:
+            logger.info(f"MCP 조회 성공: {query[:30]}... → {len(result)}자")
+            return True, result
+        return False, "MCP 응답 비어있음"
+        
+    except Exception as e:
+        logger.warning(f"MCP 실패 ({str(e)[:200]}), law.go.kr 폴백")
+    
+    # 2차: law.go.kr 직접 폴백
+    try:
         law_match = _re.search(r"['\"]?([가-힣]+법[가-힣]*)['\"]?", query)
         if not law_match:
             return False, "법령명 추출 실패"
@@ -573,17 +621,17 @@ def call_mcp_law(query, max_tokens=2048):
         law_name = law_match.group(1)
         url = "http://www.law.go.kr/DRF/lawSearch.do"
         params = {"OC": "sapphire_5", "target": "law", "type": "XML", "query": law_name}
-        res = requests.get(url, params=params, timeout=10)
+        res = _req.get(url, params=params, timeout=10)
         
         if res.status_code == 200 and "totalCnt" in res.text:
             root = ET.fromstring(res.text)
             total = root.findtext('.//totalCnt') or "0"
             if int(total) > 0:
-                return True, f"{law_name} 법령 존재 확인 (law.go.kr)"
+                return True, f"{law_name} 법령 존재 확인 (law.go.kr 폴백)"
         return False, f"{law_name} 검색 결과 없음"
-    except Exception as e:
-        logger.warning(f"법령 조회 실패: {e}")
-        return False, str(e)
+    except Exception as e2:
+        logger.warning(f"law.go.kr 폴백도 실패: {e2}")
+        return False, str(e2)
 
 
 def verify_precedent_via_api(case_no, context_keywords=None):
@@ -2226,11 +2274,18 @@ def main():
                                 resp = _client.beta.messages.create(
                                     model="claude-sonnet-4-20250514",
                                     max_tokens=500,
-                                    messages=[{"role": "user", "content": "도구 목록을 알려줘"}],
+                                    messages=[{"role": "user", "content": "관세법 제1조 조문 원문 알려줘"}],
                                     mcp_servers=[{
                                         "type": "url",
                                         "url": "https://korean-law-mcp.fly.dev/mcp",
                                         "name": "korean-law"
+                                    }],
+                                    tools=[{
+                                        "type": "mcp_toolset",
+                                        "mcp_server_name": "korean-law",
+                                        "tool_configuration": {
+                                            "allowed_tools": ["search_law", "get_law_text"]
+                                        }
                                     }],
                                     betas=["mcp-client-2025-11-20"]
                                 )
