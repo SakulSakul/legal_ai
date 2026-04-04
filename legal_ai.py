@@ -446,8 +446,8 @@ def build_system_claude(docs, laws_db, gemini_analysis=""):
         '  "issues": [{"issue_no":1,"title":"쟁점","risk_level":"high|medium|low",\n'
         '    "target_clause":"대상 원문","applicable_law":"법령/고시명 제X조",\n'
         '    "law_analysis":"법령·판례 평가 (Gemini 검색 결과 검증 포함)",\n'
-        '    "applicable_rule":"사규 조항 (Stage1 PART A 인용)",\n'
-        '    "rule_analysis":"사규 평가","recommendation":"권고안"}],\n'
+        '    "applicable_rule":"「사규명」 제X조 (예: 「MD 협력회사 입점 및 퇴점 지침」) — 꺾쇠「」필수",\n'
+        '    "rule_analysis":"사규 평가 — 사규명은 반드시 「」로 인용","recommendation":"권고안"}],\n'
         '  "action_plan":"액션 플랜","alternative_clause":"수정안 또는 null",\n'
         '  "cited_laws":["법령명 제X조"]\n'
         "}\n"
@@ -1183,10 +1183,10 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         '    {\n'
         '      "issue_no": 1, "title": "쟁점 제목", "risk_level": "high|medium|low",\n'
         '      "target_clause": "검토 대상 원문",\n'
-        '      "applicable_law": "법령/고시명 제X조",\n'
-        '      "law_analysis": "법령·행정규칙 관점 — 형량은 반드시 {{법령약칭_조문번호_형량}} Placeholder 사용",\n'
-        '      "applicable_rule": "사규 조항",\n'
-        '      "rule_analysis": "사규 관점",\n'
+        '      "applicable_law": "법령/고시명 제X조 (예: 상표법 제230조)",\n'
+        '      "law_analysis": "법령·행정규칙 관점 — 형량은 반드시 {{법령약칭_조문번호_형량}} Placeholder 사용 (예: {{상표법_제230조_형량}}에 처한다)",\n'
+        '      "applicable_rule": "「사규명」 (예: 「MD 협력회사 입점 및 퇴점 지침」 제5조) — 사규명은 반드시 꺾쇠「」로 감싸기",\n'
+        '      "rule_analysis": "사규 관점 — 사규명 인용 시 반드시 「」 사용 (예: 「직매입거래 기본계약서」 제22조에 따르면...)",\n'
         '      "recommendation": "종합 권고안"\n'
         '    }\n'
         '  ],\n'
@@ -1933,14 +1933,46 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
             def clean_json_value(obj):
                 """JSON 객체를 재귀 순회하며 {{...}} placeholder 치환"""
                 if isinstance(obj, str):
-                    # 1차: DB 매칭
+                    # 0차: 공백 변형 정규화 — {{ 상표법_제230조_형량 }} → {{상표법_제230조_형량}}
+                    obj = _re.sub(r'\{\{\s*', '{{', obj)
+                    obj = _re.sub(r'\s*\}\}', '}}', obj)
+                    # 1차: placeholder_db 정확 매칭
                     for key, val in placeholder_db.items():
                         obj = obj.replace("{{" + key + "}}", val)
-                    # 2차: 남은 {{...}} — 중괄호 제거 + 띄어쓰기 정리
+                    # 2차: 남은 {{...}} — placeholder_db 부분 매칭 후 DB 조회
                     def _fallback(m):
-                        inner = m.group(1)
+                        inner = m.group(1).strip()
+                        # 2-1: placeholder_db에서 키 부분 매칭 (약칭 변형 대응)
+                        inner_norm = inner.replace(" ", "")
+                        for key, val in placeholder_db.items():
+                            if key.replace(" ", "") == inner_norm:
+                                return val
+                            # "상표법_제230조_형량" ⊂ "상표법_제230조_7년이하..." 매칭
+                            if inner_norm.endswith("_형량"):
+                                prefix = inner_norm.replace("_형량", "")
+                                if key.startswith(prefix.replace(" ", "")):
+                                    return val
+                        # 2-2: laws_db에서 직접 조회
                         parts = inner.split("_")
-                        # 마지막 파트가 형량이면 그것만, 아니면 전체
+                        if len(parts) >= 2:
+                            law_short = parts[0]
+                            article_guess = ""
+                            for p in parts[1:]:
+                                if _re.search(r'\d+조', p):
+                                    article_guess = p if p.startswith("제") else f"제{p}"
+                                    break
+                            if article_guess:
+                                for db_law in laws_db:
+                                    ds = db_law.get("law_short", "")
+                                    da = db_law.get("article_no", "")
+                                    if da == article_guess and (ds == law_short or law_short in ds or ds in law_short):
+                                        content = db_law.get("content", "")
+                                        pen = _re.search(r'(\d+년\s*이하의?\s*징역\s*(?:또는|이나)\s*[^.]{5,80}벌금)', content)
+                                        if not pen:
+                                            pen = _re.search(r'(\d+년\s*이하의?\s*징역[^.]{0,80})', content)
+                                        if pen:
+                                            return pen.group(1).strip()
+                        # 2-3: 최종 — 마지막 파트에서 형량 텍스트 복원
                         last = parts[-1] if parts else inner
                         last = last.replace("이하", " 이하의 ").replace("또는", " 또는 ")
                         last = last.replace("징역", "징역 ").replace("벌금", "벌금")
@@ -2032,73 +2064,126 @@ def parse_review_response(response_text):
     return json_data, detail_text
 
 
-def enforce_mandatory_issues(json_data, laws_db):
-    """██ 필수 쟁점 강제 삽입 — AI가 빠뜨려도 코드가 100% 보장 ██"""
+def enforce_mandatory_issues(json_data, laws_db, user_query=""):
+    """██ 필수 쟁점 보충 삽입 — 질문과 관련 있는 법령만, DB 형량으로 ██"""
     if not json_data or "issues" not in json_data:
         return json_data
-    
+
     issues = json_data.get("issues", [])
     all_text = " ".join(iss.get("title", "") + " " + iss.get("applicable_law", "") for iss in issues)
     next_no = max((iss.get("issue_no", 0) for iss in issues), default=0) + 1
-    
-    # 1. 보세판매장고시 — 없으면 강제 삽입
-    if "보세판매장" not in all_text:
-        bc = []
+
+    # 사용자 질문 + AI 응답 전체 텍스트로 관련성 판단
+    query_context = user_query + " " + all_text
+
+    # ── 관련성 키워드 매핑 (질문에 해당 키워드가 있을 때만 삽입) ──
+    relevance_map = {
+        "보세판매장": ["보세", "면세", "세관", "통관", "반출", "반입", "특허취소", "반품"],
+        "소비자": ["소비자", "환불", "교환", "하자", "피해", "반품", "불량", "결함"],
+        "부정경쟁": ["모조품", "가품", "위조", "짝퉁", "모방", "혼동", "부정경쟁", "카피"],
+    }
+
+    def _is_relevant(category_key):
+        keywords = relevance_map.get(category_key, [])
+        return any(kw in query_context for kw in keywords)
+
+    def _get_db_analysis(law_short, articles):
+        """DB에서 실제 조문·형량 조회"""
+        parts = []
         for d in laws_db:
-            if d.get("law_short") == "보세판매장고시" and d.get("article_no") in ("제18조", "제28조"):
-                bc.append(f"{d['article_no']}({d.get('article_title','')}): {d['content'][:150]}")
+            if d.get("law_short") == law_short and d.get("article_no") in articles:
+                parts.append(f"{d['article_no']}({d.get('article_title','')}): {d['content'][:200]}")
+        return "  ".join(parts[:3]) if parts else ""
+
+    # 1. 보세판매장고시 — 관련 있고 AI가 빠뜨렸으면 삽입
+    if "보세판매장" not in all_text and _is_relevant("보세판매장"):
+        db_text = _get_db_analysis("보세판매장고시", ("제18조", "제28조", "제21조"))
+        analysis = f"운영인의 법령 위반 시 6개월 범위 내 물품반입 정지 또는 특허취소 (관세법 제178조 연계)."
+        if db_text:
+            analysis += f" {db_text}"
         issues.append({
-            "issue_no": next_no, "title": "보세판매장고시 위반 — 행정처분 리스크 [시스템 강제 삽입]",
+            "issue_no": next_no, "title": "보세판매장고시 위반 — 행정처분 리스크",
             "risk_level": "high", "target_clause": "보세판매장 운영 규정 위반",
             "applicable_law": "보세판매장 특허 및 운영에 관한 고시",
-            "law_analysis": f"운영인의 법령 위반 시 6개월 범위 내 물품반입 정지 또는 특허취소 (관세법 제178조 연계). {'  '.join(bc[:2]) if bc else '보세판매장고시 원문 참조'} (DB 검증 완료)",
+            "law_analysis": analysis,
             "applicable_rule": "해당 없음", "rule_analysis": "해당 없음",
             "recommendation": "세관 신고 및 보세판매장 특허 보호를 위한 즉시 시정 조치. 자진 신고 검토."
         })
-        logger.warning("enforce: 보세판매장고시 강제 삽입!")
+        logger.info("enforce: 보세판매장고시 보충 삽입 (관련 키워드 감지)")
         next_no += 1
-    
-    # 2. 소비자기본법 — 없으면 강제 삽입
-    if "소비자" not in all_text:
+
+    # 2. 소비자기본법 — 관련 있고 AI가 빠뜨렸으면 삽입
+    if "소비자" not in all_text and _is_relevant("소비자"):
+        db_text = _get_db_analysis("소비자기본법", ("제4조", "제19조", "제20조"))
+        analysis = "소비자 안전권·알 권리 침해. 소비자분쟁해결기준에 따른 피해구제 및 손해배상 가능."
+        if db_text:
+            analysis += f" {db_text}"
         issues.append({
-            "issue_no": next_no, "title": "소비자기본법 위반 — 소비자 피해 [시스템 강제 삽입]",
-            "risk_level": "medium", "target_clause": "모조품 판매로 인한 소비자 권리 침해",
+            "issue_no": next_no, "title": "소비자기본법 위반 — 소비자 피해",
+            "risk_level": "medium", "target_clause": "소비자 권리 침해",
             "applicable_law": "소비자기본법 제4조, 제19조, 제20조",
-            "law_analysis": "소비자 안전권·알 권리 침해. 소비자분쟁해결기준에 따른 피해구제 및 손해배상 가능 (형량 — 원문 확인 필요)",
+            "law_analysis": analysis,
             "applicable_rule": "해당 없음", "rule_analysis": "해당 없음",
             "recommendation": "피해 소비자 파악 및 환불/교환. 집단분쟁 가능성 대비."
         })
-        logger.warning("enforce: 소비자기본법 강제 삽입!")
+        logger.info("enforce: 소비자기본법 보충 삽입 (관련 키워드 감지)")
         next_no += 1
-    
-    # 3. 부정경쟁방지법 — 없으면 강제 삽입
-    if "부정경쟁" not in all_text:
+
+    # 3. 부정경쟁방지법 — 관련 있고 AI가 빠뜨렸으면 삽입
+    if "부정경쟁" not in all_text and _is_relevant("부정경쟁"):
+        db_text = _get_db_analysis("부정경쟁방지법", ("제2조", "제18조"))
+        analysis = "타인의 상품표지와 혼동을 일으키는 행위는 부정경쟁행위로 처벌. 부정경쟁방지법 제18조 제3항 제1호에 따라 3년 이하의 징역 또는 3천만원 이하의 벌금. 상표법과 별개 적용."
+        if db_text:
+            analysis += f" {db_text}"
         issues.append({
-            "issue_no": next_no, "title": "부정경쟁방지법 위반 — 상품형태 모방 [시스템 강제 삽입]",
-            "risk_level": "medium", "target_clause": "타인 상품 형태 모방 모조품 유통",
+            "issue_no": next_no, "title": "부정경쟁방지법 위반 — 상품 출처 혼동행위",
+            "risk_level": "medium", "target_clause": "타인 상품 형태 모방·혼동 유발",
             "applicable_law": "부정경쟁방지법 제2조, 제18조",
-            "law_analysis": "상품 혼동 야기 부정경쟁행위. 상표법과 별개 적용. 미등록 브랜드 디자인 도용 포함 (형량 — 원문 확인 필요)",
+            "law_analysis": analysis,
             "applicable_rule": "해당 없음", "rule_analysis": "해당 없음",
             "recommendation": "브랜드 권리자 민사 손해배상 대비. 법무 담당부서 검토."
         })
-        logger.warning("enforce: 부정경쟁방지법 강제 삽입!")
-    
+        logger.info("enforce: 부정경쟁방지법 보충 삽입 (관련 키워드 감지)")
+
     json_data["issues"] = issues
-    
-    # cited_laws에도 강제 삽입된 법령 추가 (verify_citations에서 DB 검증 통과하도록)
+
+    # cited_laws에도 실제 삽입된 법령만 추가
     cited = json_data.get("cited_laws", [])
     cited_text = " ".join(str(c) for c in cited)
+    inserted_laws = {iss.get("applicable_law", "") for iss in issues[max(0, len(issues)-3):]}
     forced_citations = [
         {"law_name": "보세판매장 특허 및 운영에 관한 고시", "article": "제18조, 제28조"},
         {"law_name": "소비자기본법", "article": "제4조, 제19조"},
         {"law_name": "부정경쟁방지 및 영업비밀보호에 관한 법률", "article": "제2조, 제18조"},
     ]
     for fc in forced_citations:
-        if fc["law_name"] not in cited_text:
+        if fc["law_name"] not in cited_text and any(fc["law_name"][:4] in il for il in inserted_laws):
             cited.append(fc)
     json_data["cited_laws"] = cited
-    
+
     return json_data
+
+
+def _wrap_saryu_brackets(text):
+    """사규명에 꺾쇠「」가 없으면 자동 보정"""
+    if not text or text in ("해당 없음", "없음", "사규 분석 대기중"):
+        return text
+    import re as _re
+    # 이미 「」로 감싸져 있으면 그대로
+    if "「" in text:
+        return text
+    # 알려진 사규명 패턴에 「」 추가
+    saryu_names = [
+        "MD 협력회사 입점 및 퇴점 지침",
+        "직매입거래 기본계약서",
+        "특정매입거래 기본계약서",
+        "임대차계약서",
+        "사내규정집",
+    ]
+    for name in saryu_names:
+        if name in text:
+            text = text.replace(name, f"「{name}」")
+    return text
 
 
 def render_verdict_badge(verdict):
@@ -2134,9 +2219,9 @@ def render_issues_table(issues, citation_results):
                     st.markdown(f"**🔍 법령·행정규칙·판례 관점:** {issue['law_analysis']}")
             with col2:
                 if issue.get("applicable_rule"):
-                    st.markdown(f"**🏛️ 적용 사규:** {issue['applicable_rule']}")
+                    st.markdown(f"**🏛️ 적용 사규:** {_wrap_saryu_brackets(issue['applicable_rule'])}")
                 if issue.get("rule_analysis"):
-                    st.markdown(f"**🔍 사규 관점:** {issue['rule_analysis']}")
+                    st.markdown(f"**🔍 사규 관점:** {_wrap_saryu_brackets(issue['rule_analysis'])}")
             if issue.get("recommendation"):
                 st.info(f"💡 **종합 실무 권고:** {issue['recommendation']}")
 
@@ -2322,12 +2407,12 @@ def generate_review_docx(json_data, detail_text, query_text):
                     p = doc.add_paragraph()
                     run_label = p.add_run("🏛️ 적용 사규: ")
                     run_label.bold = True
-                    p.add_run(issue["applicable_rule"])
+                    p.add_run(_wrap_saryu_brackets(issue["applicable_rule"]))
                 if issue.get("rule_analysis"):
                     p = doc.add_paragraph()
                     run_label = p.add_run("🔍 사규 관점: ")
                     run_label.bold = True
-                    p.add_run(issue["rule_analysis"])
+                    p.add_run(_wrap_saryu_brackets(issue["rule_analysis"]))
 
                 # 💡 종합 실무 권고 (시안 음영 박스 — 화면의 st.info와 동일)
                 if issue.get("recommendation"):
@@ -3323,8 +3408,8 @@ def main():
                 if "Failed" not in actual_model and ("Claude" in actual_model or (model_choice == "claude" and "Gemini" in actual_model)):
                     json_data, detail_text = parse_review_response(reply)
                     if json_data:
-                        # ██ 필수 쟁점 강제 삽입 — AI가 빠뜨려도 100% 보장 ██
-                        json_data = enforce_mandatory_issues(json_data, st.session_state.laws_db)
+                        # ██ 필수 쟁점 보충 삽입 — 질문 관련 법령만 ██
+                        json_data = enforce_mandatory_issues(json_data, st.session_state.laws_db, user_query=safe_query)
                         
                         citation_results = verify_citations(json_data.get("cited_laws", []), st.session_state.laws_db)
                         precedent_results = verify_precedents(json_data.get("cited_precedents", []))
