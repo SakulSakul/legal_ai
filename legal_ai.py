@@ -1828,8 +1828,9 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
         # Stage 1: Gemini Researcher — 사규 분석 + 법령/판례 수집
         gemini_system = build_system_gemini_stage1(docs, laws_db)
         st.caption("🔍 Stage 1: 사규 분석 + 법령·판례 수집 중 (Gemini + Google Search)...")
-        gemini_reply = call_gemini(gemini_system, messages)
-        
+        gemini_reply = call_gemini(gemini_system, messages, is_fallback=True)
+        gemini_reply = sanitize_html(gemini_reply)  # HTML 방어 (Claude 실패 시 직접 표시될 수 있음)
+
         if gemini_reply.startswith("⚠️"):
             st.warning(f"Stage 1 실패: {gemini_reply}")
             return gemini_reply, "Gemini (Failed)"
@@ -1974,12 +1975,13 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
     else:
         # 일반 Q&A는 Gemini 단독
         system = build_system_gemini(docs)
-        reply = call_gemini(system, messages)
+        reply = call_gemini(system, messages, is_fallback=True)
         if reply.startswith("⚠️"):
             fallback_reply = call_claude(build_system_claude(docs, laws_db), [messages[-1]] if messages else [])
             if not fallback_reply.startswith("⚠️"):
                 return fallback_reply, f"Claude ({CLAUDE_MODEL}, Fallback)"
             return reply, "Gemini (Failed)"
+        reply = sanitize_html(reply)
         return reply, "Gemini"
 
 # ── JSON 파싱 및 UI 렌더링 ────────────────────────────────────
@@ -3041,6 +3043,11 @@ def main():
                                 if reply and not reply.startswith("⚠️"):
                                     # Gemini 폴백 시 HTML 잔여물 제거
                                     reply = sanitize_html(reply)
+                                    # 코드펜스(```json ... ```) 제거 — st.code()가 자체 래핑
+                                    import re as _re
+                                    _stripped = _re.sub(r'```(?:json)?\s*', '', reply).strip().rstrip('`').strip()
+                                    if _stripped:
+                                        reply = _stripped
                                     st.subheader(f"📝 AI 생성 초안 ({gen_model}, 검증 필요)")
                                     st.code(reply, language="json")
                                     
