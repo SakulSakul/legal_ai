@@ -2294,6 +2294,98 @@ def enforce_mandatory_issues(json_data, laws_db, user_query=""):
     return json_data
 
 
+# ══════════════════════════════════════════════════════════════
+# ██ 후처리 필터: AI 할루시네이션 강제 차단 ██
+# ══════════════════════════════════════════════════════════════
+
+# 실제 존재하는 사규 목록 (이 목록에 없는 사규명은 할루시네이션)
+KNOWN_SARYU_NAMES = [
+    "MD 협력회사 입점 및 퇴점 지침",
+    "직매입거래 기본계약서",
+    "특정매입거래 기본계약서",
+    "임대차계약서",
+    "사내규정집",
+]
+
+
+def _filter_b2b_consumer_issues(json_data, user_query=""):
+    """B2B 맥락 질문에서 AI가 생성한 소비자기본법 쟁점을 강제 제거"""
+    if not json_data or "issues" not in json_data:
+        return json_data
+
+    # B2B 키워드가 있고 B2C 키워드가 없으면 → B2B 맥락
+    b2b_keywords = ["직매입", "납품", "수수료", "입점", "퇴점", "특정매입", "위탁매입", "반품"]
+    b2c_keywords = ["소비자", "고객", "클레임", "소비자보호", "소비자피해", "소비자분쟁"]
+
+    has_b2b = any(kw in user_query for kw in b2b_keywords)
+    has_b2c = any(kw in user_query for kw in b2c_keywords)
+
+    if not has_b2b or has_b2c:
+        return json_data  # B2B 아니거나 B2C 명시 → 필터 안 함
+
+    # B2B 맥락 확정 → 소비자기본법 쟁점 제거
+    original_count = len(json_data["issues"])
+    json_data["issues"] = [
+        iss for iss in json_data["issues"]
+        if "소비자기본법" not in iss.get("applicable_law", "")
+        and "소비자기본법" not in iss.get("title", "")
+    ]
+    removed = original_count - len(json_data["issues"])
+    if removed > 0:
+        logger.info(f"B2B 필터: 소비자기본법 쟁점 {removed}건 제거 (B2B 맥락)")
+        # issue_no 재정렬
+        for i, iss in enumerate(json_data["issues"], 1):
+            iss["issue_no"] = i
+        # cited_laws에서도 제거
+        if "cited_laws" in json_data:
+            json_data["cited_laws"] = [
+                c for c in json_data["cited_laws"]
+                if "소비자기본법" not in str(c.get("law_name", ""))
+            ]
+    return json_data
+
+
+def _validate_saryu_names(json_data):
+    """AI가 창작한 허구 사규명을 '해당 없음'으로 교체"""
+    if not json_data or "issues" not in json_data:
+        return json_data
+
+    for iss in json_data["issues"]:
+        rule_text = iss.get("applicable_rule", "")
+        if not rule_text or rule_text in ("해당 없음", "없음", "해당 규정 없음"):
+            continue
+
+        # 꺾쇠「」안의 사규명 추출
+        import re as _re
+        found_names = _re.findall(r"「([^」]+)」", rule_text)
+        if not found_names:
+            # 꺾쇠 없이 사규명처럼 보이는 텍스트 체크
+            # "~지침", "~규정", "~계약서" 패턴이 있지만 알려진 목록에 없으면 할루시네이션
+            suspicious_patterns = _re.findall(r"([\w\s]+(?:지침|규정|계약서|내규|규정집|매뉴얼))", rule_text)
+            found_names = [p.strip() for p in suspicious_patterns]
+
+        if not found_names:
+            continue
+
+        # 알려진 사규 목록과 대조
+        is_valid = False
+        for name in found_names:
+            for known in KNOWN_SARYU_NAMES:
+                if known in name or name in known:
+                    is_valid = True
+                    break
+            if is_valid:
+                break
+
+        if not is_valid:
+            hallucinated = ", ".join(found_names)
+            logger.warning(f"사규 검증 실패 — 허구 사규 감지: {hallucinated}")
+            iss["applicable_rule"] = "해당 없음"
+            iss["rule_analysis"] = "검증 데이터에 해당 사규 존재하지 않음"
+
+    return json_data
+
+
 def _wrap_saryu_brackets(text):
     """사규명에 꺾쇠「」가 없으면 자동 보정"""
     if not text or text in ("해당 없음", "없음", "사규 분석 대기중"):
@@ -3629,7 +3721,11 @@ def main():
                         # ██ 필수 쟁점 보충 삽입 — 리비전 비교 모드에서는 건너뜀 ██
                         if "Revision Compare" not in actual_model:
                             json_data = enforce_mandatory_issues(json_data, st.session_state.laws_db, user_query=safe_query)
-                        
+
+                        # ██ 후처리 필터: AI 할루시네이션 강제 차단 ██
+                        json_data = _filter_b2b_consumer_issues(json_data, user_query=safe_query)
+                        json_data = _validate_saryu_names(json_data)
+
                         citation_results = verify_citations(json_data.get("cited_laws", []), st.session_state.laws_db)
                         precedent_results = verify_precedents(json_data.get("cited_precedents", []))
                         msg_data["json_data"] = json_data
