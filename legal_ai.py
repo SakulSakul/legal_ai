@@ -468,9 +468,12 @@ def build_system_gemini_stage1(docs, laws_db):
         if not ds: return "(등록 없음)"
         return "\n\n---\n\n".join(["[" + d["label"] + "]\n" + d["text"] for d in ds])
 
-    saryu_text    = truncate_at_boundary(fmt_docs(by_cat("saryu")), 50000)
-    contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 60000)
-    yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 30000)
+    # 토큰 최적화: 사규/계약서/약정서 원문 한도 축소 (v2.1 → v2.2)
+    # 기존 50k+60k+30k=140k자(~93k tok) → 30k+40k+20k=90k자(~60k tok)
+    # Stage1은 데이터 수집 역할이므로 원문 전체가 필요하지 않음
+    saryu_text    = truncate_at_boundary(fmt_docs(by_cat("saryu")), 30000)
+    contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 40000)
+    yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 20000)
 
     laws_list = ""
     if laws_db:
@@ -561,16 +564,38 @@ def build_system_gemini_stage1(docs, laws_db):
         "━━━ [당사 사규] ━━━\n" + saryu_text +
         "\n\n━━━ [당사 표준 계약서] ━━━\n" + contract_text +
         "\n\n━━━ [당사 표준 약정서] ━━━\n" + yakjeong_text +
-        "\n\n━━━ [법령 DB 등록 목록 (참고)] ━━━\n" + laws_list
+        "\n\n━━━ [법령 DB 등록 목록 (참고)] ━━━\n" + laws_list +
+        "\n\n출력 형식 제약: 모든 출력은 순수 JSON 또는 Markdown 형식으로만 작성하세요. HTML, CSS, XML 태그를 절대 생성하지 마세요."
     )
+
+def _mcp_keep_alive():
+    """MCP 서버 Keep-Alive — 주기적으로 health 핑을 보내 세션 유지.
+    Streamlit 세션 상태에 마지막 핑 시각을 저장하고 30초 이내면 스킵.
+    """
+    import requests as _req
+    now = time.time()
+    last_ping = st.session_state.get("_mcp_last_ping", 0)
+    if now - last_ping < 30:
+        return  # 30초 이내 핑 했으면 스킵
+    try:
+        hc = _req.get("https://korean-law-mcp.fly.dev/health", timeout=10)
+        logger.debug(f"MCP keep-alive ping: {hc.status_code}")
+    except Exception:
+        logger.debug("MCP keep-alive ping 실패 (무시)")
+    st.session_state["_mcp_last_ping"] = now
+
 
 def call_mcp_law(query, max_tokens=2048):
     """korean-law-mcp를 통해 법령/판례 조회.
-    세션 404 시 재연결 + law.go.kr 직접 폴백.
+    세션 404 시 재연결(최대 3회) + Keep-Alive + law.go.kr 직접 폴백.
     """
     import requests as _req
     import re as _re
-    
+
+    MCP_URL = "https://korean-law-mcp.fly.dev/mcp"
+    HEALTH_URL = "https://korean-law-mcp.fly.dev/health"
+    MAX_RETRIES = 3
+
     def _mcp_call(client, law_api_key):
         """MCP 실제 호출"""
         response = client.beta.messages.create(
@@ -580,7 +605,7 @@ def call_mcp_law(query, max_tokens=2048):
             messages=[{"role": "user", "content": query}],
             mcp_servers=[{
                 "type": "url",
-                "url": "https://korean-law-mcp.fly.dev/mcp",
+                "url": MCP_URL,
                 "name": "korean-law"
             }],
             tools=[{
@@ -594,44 +619,58 @@ def call_mcp_law(query, max_tokens=2048):
             if hasattr(block, 'text') and block.text:
                 text_parts.append(block.text)
         return "\n".join(text_parts)
-    
-    # 1차: MCP 시도 (최대 2회 — 404 시 wake-up 후 재시도)
-    for attempt in range(2):
+
+    def _wake_up_server(wait_after=3):
+        """MCP 서버 wake-up (Fly.io cold start 대응)"""
+        try:
+            hc = _req.get(HEALTH_URL, timeout=20)
+            logger.info(f"MCP health: {hc.status_code}")
+            if hc.status_code == 200:
+                return True
+        except Exception:
+            logger.warning("MCP health check 실패 — 서버 sleep 상태일 수 있음")
+        time.sleep(wait_after)
+        return False
+
+    # Keep-Alive 핑 (세션 유지)
+    _mcp_keep_alive()
+
+    # MCP 시도 (최대 MAX_RETRIES회 — 404/세션에러 시 wake-up 후 재시도)
+    last_err = ""
+    for attempt in range(MAX_RETRIES):
         try:
             client = init_anthropic()
             law_api_key = get_secret("LAW_OC") or "ocwhip3122"
-            
-            # Fly.io wake-up
+
+            # 첫 시도 또는 세션 에러 후 → wake-up
             if attempt == 0:
-                try:
-                    hc = _req.get("https://korean-law-mcp.fly.dev/health", timeout=15)
-                    logger.info(f"MCP health: {hc.status_code}")
-                except Exception:
-                    logger.warning("MCP health check 실패 — 서버 sleep 상태일 수 있음")
-                    time.sleep(3)  # wake-up 대기
-            
+                _wake_up_server(wait_after=2)
+
             result = _mcp_call(client, law_api_key)
-            
+
             if result:
-                logger.info(f"MCP 조회 성공 (시도 {attempt+1}): {query[:30]}... → {len(result)}자")
+                logger.info(f"MCP 조회 성공 (시도 {attempt+1}/{MAX_RETRIES}): {query[:30]}... → {len(result)}자")
+                st.session_state["_mcp_last_ping"] = time.time()  # 성공 시 핑 갱신
                 return True, result
             return False, "MCP 응답 비어있음"
-            
+
         except Exception as e:
             err_str = str(e)
-            logger.warning(f"MCP 시도 {attempt+1} 실패: {err_str[:200]}")
-            
-            # 404 Session not found → wake-up 후 재시도
-            if "404" in err_str or "Session not found" in err_str or "session" in err_str.lower():
-                logger.info("MCP 세션 만료 감지 — wake-up 후 재시도...")
-                try:
-                    _req.get("https://korean-law-mcp.fly.dev/health", timeout=20)
-                except Exception:
-                    pass
-                time.sleep(5)  # 서버 부팅 대기
+            last_err = err_str
+            logger.warning(f"MCP 시도 {attempt+1}/{MAX_RETRIES} 실패: {err_str[:200]}")
+
+            # 404 Session not found / 세션 관련 에러 → wake-up 후 재시도
+            is_session_error = any(kw in err_str.lower() for kw in [
+                "404", "session not found", "session_not_found", "session expired",
+                "sse", "connection", "eof", "stream"
+            ])
+            if is_session_error and attempt < MAX_RETRIES - 1:
+                wait = 3 * (attempt + 1)  # 3초, 6초, 9초 점진적 대기
+                logger.info(f"MCP 세션 에러 감지 — {wait}초 대기 후 재연결 시도...")
+                _wake_up_server(wait_after=wait)
                 continue
-            else:
-                break  # 404가 아닌 에러는 재시도 불필요
+            elif not is_session_error:
+                break  # 세션 문제가 아닌 에러는 재시도 불필요
     
     # 2차: law.go.kr 직접 폴백
     logger.info("MCP 실패 — law.go.kr 직접 폴백")
@@ -1029,6 +1068,7 @@ def build_system_gemini(docs):
         "\n\n② 당사 표준 계약서:\n" + contract_text +
         "\n\n③ 당사 표준 약정서:\n" + yakjeong_text +
         "\n\n답변 시 위험은 🔴, 적법은 🔵 이모지를 사용하세요. Streamlit 색상 단축코드(:red[], :blue[], :blue_circle: 등)는 절대 사용하지 마세요."
+        "\n\n출력 형식 제약: 모든 출력은 순수 Markdown 형식으로만 작성하세요. HTML, CSS, XML 태그를 절대 생성하지 마세요."
     )
 
 # ── AI 호출 및 에러 핸들링 함수 ────────────────────────────────
@@ -1105,8 +1145,8 @@ def call_claude(system_prompt, messages):
                     return response.content[0].text
                 except Exception as retry_e:
                     err_type, err_msg = classify_api_error(retry_e)
-                    if err_type not in ("overloaded", "server"):
-                        break  # 다른 종류 에러면 재시도 중단
+                    if err_type not in ("overloaded", "server", "rate_limit"):
+                        break  # 재시도 가능한 에러가 아니면 중단
         
         logger.error(f"Claude API 최종 실패: {err_type} — {str(e)[:200]}")
         label_map = {
@@ -1122,17 +1162,37 @@ def call_claude(system_prompt, messages):
         return f"⚠️ [{label_map.get(err_type, '오류')}] Claude: {err_msg} {debug_info}"
 
 def sanitize_html(text):
-    """LLM 응답에서 HTML/CSS 태그를 제거하고 순수 마크다운만 남김."""
+    """LLM 응답에서 HTML/CSS/XML 태그를 제거하고 순수 마크다운만 남김.
+    v2.2: 태그 목록 확장 + <!DOCTYPE>, XML 선언, class/id 속성 제거 추가.
+    """
     import re as _re
+    # <!DOCTYPE ...> 및 <?xml ...?> 선언 제거
+    text = _re.sub(r'<!DOCTYPE[^>]*>', '', text, flags=_re.IGNORECASE)
+    text = _re.sub(r'<\?xml[^?]*\?>', '', text, flags=_re.IGNORECASE)
     # <style>...</style> 블록 전체 제거
     text = _re.sub(r'<style[^>]*>.*?</style>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
     # <script>...</script> 블록 전체 제거
     text = _re.sub(r'<script[^>]*>.*?</script>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
-    # HTML 태그 제거 (마크다운은 유지)
-    text = _re.sub(r'</?(?:div|span|table|tr|td|th|thead|tbody|p|br|hr|h[1-6]|ul|ol|li|a|img|section|article|header|footer|nav|main|aside|figure|figcaption)[^>]*>', '', text, flags=_re.IGNORECASE)
+    # <svg>...</svg> 블록 전체 제거
+    text = _re.sub(r'<svg[^>]*>.*?</svg>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
+    # HTML 태그 제거 (마크다운은 유지) — 확장된 태그 목록
+    text = _re.sub(
+        r'</?(?:html|head|body|div|span|table|tr|td|th|thead|tbody|tfoot|caption|colgroup|col'
+        r'|p|br|hr|h[1-6]|ul|ol|li|dl|dt|dd|a|img|video|audio|source|canvas|iframe'
+        r'|section|article|header|footer|nav|main|aside|figure|figcaption'
+        r'|form|input|button|select|option|textarea|label|fieldset|legend'
+        r'|details|summary|dialog|template|slot|meta|link|base|title'
+        r'|strong|em|b|i|u|s|small|mark|sub|sup|abbr|cite|code|pre|blockquote'
+        r'|ruby|rt|rp|bdi|bdo|wbr|data|time|progress|meter|output'
+        r')[^>]*>',
+        '', text, flags=_re.IGNORECASE
+    )
     # CSS 인라인 스타일 잔여물 제거
     text = _re.sub(r'style="[^"]*"', '', text, flags=_re.IGNORECASE)
     text = _re.sub(r"style='[^']*'", '', text, flags=_re.IGNORECASE)
+    # class, id 속성 잔여물 제거
+    text = _re.sub(r'class="[^"]*"', '', text, flags=_re.IGNORECASE)
+    text = _re.sub(r'id="[^"]*"', '', text, flags=_re.IGNORECASE)
     # 빈 줄 정리
     text = _re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
