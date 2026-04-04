@@ -568,36 +568,228 @@ def build_system_gemini_stage1(docs, laws_db):
         "\n\n출력 형식 제약: 모든 출력은 순수 JSON 또는 Markdown 형식으로만 작성하세요. HTML, CSS, XML 태그를 절대 생성하지 마세요."
     )
 
-def _mcp_keep_alive():
-    """MCP 서버 Keep-Alive — 주기적으로 health 핑을 보내 세션 유지.
-    Streamlit 세션 상태에 마지막 핑 시각을 저장하고 30초 이내면 스킵.
+# ── MCP 직접 호출 클라이언트 (Claude API 불필요) ──────────────
+class MCPDirectClient:
+    """korean-law-mcp 서버를 Streamable HTTP로 직접 호출.
+    Claude API를 경유하지 않으므로 Claude 한도와 무관하게 작동.
     """
-    import requests as _req
-    now = time.time()
-    last_ping = st.session_state.get("_mcp_last_ping", 0)
-    if now - last_ping < 30:
-        return  # 30초 이내 핑 했으면 스킵
-    try:
-        hc = _req.get("https://korean-law-mcp.fly.dev/health", timeout=10)
-        logger.debug(f"MCP keep-alive ping: {hc.status_code}")
-    except Exception:
-        logger.debug("MCP keep-alive ping 실패 (무시)")
-    st.session_state["_mcp_last_ping"] = now
+    MCP_URL = "https://korean-law-mcp.fly.dev/mcp"
+
+    def __init__(self, oc_key=""):
+        import requests as _req
+        self._req = _req
+        self.oc_key = oc_key
+        self.session_id = None
+        self._initialized = False
+
+    def _url(self):
+        url = self.MCP_URL
+        if self.oc_key:
+            url += f"?oc={self.oc_key}"
+        return url
+
+    def _post(self, payload):
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
+        resp = self._req.post(self._url(), json=payload, headers=headers, timeout=30)
+        if "mcp-session-id" in resp.headers:
+            self.session_id = resp.headers["mcp-session-id"]
+        elif "Mcp-Session-Id" in resp.headers:
+            self.session_id = resp.headers["Mcp-Session-Id"]
+        return resp
+
+    def _parse_response(self, resp):
+        """JSON-RPC 응답 또는 SSE 스트림에서 result 추출."""
+        ct = resp.headers.get("content-type", "")
+        if "text/event-stream" in ct:
+            # SSE 응답 파싱
+            result_data = None
+            for line in resp.text.split("\n"):
+                if line.startswith("data: "):
+                    try:
+                        data = json.loads(line[6:])
+                        if "result" in data:
+                            result_data = data["result"]
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+            return result_data
+        else:
+            # 일반 JSON 응답
+            try:
+                data = resp.json()
+                return data.get("result")
+            except Exception:
+                return None
+
+    def initialize(self):
+        if self._initialized:
+            return True
+        try:
+            payload = {
+                "jsonrpc": "2.0", "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "legal-ai-streamlit", "version": "2.2"}
+                }
+            }
+            resp = self._post(payload)
+            if resp.status_code not in (200, 201):
+                logger.warning(f"MCP init HTTP {resp.status_code}: {resp.text[:200]}")
+                return False
+            # initialized 알림
+            notif = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
+            self._post(notif)
+            self._initialized = True
+            logger.info("MCP 직접 연결 초기화 성공")
+            return True
+        except Exception as e:
+            logger.warning(f"MCP 직접 연결 초기화 실패: {e}")
+            return False
+
+    def call_tool(self, tool_name, arguments):
+        """MCP 도구 직접 호출. 반환: tool result의 text content 또는 None."""
+        if not self._initialized:
+            if not self.initialize():
+                return None
+        payload = {
+            "jsonrpc": "2.0", "id": 2,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments}
+        }
+        try:
+            resp = self._post(payload)
+            result = self._parse_response(resp)
+            if result and isinstance(result, dict):
+                # MCP tool result: {"content": [{"type": "text", "text": "..."}]}
+                contents = result.get("content", [])
+                texts = []
+                for c in contents:
+                    if isinstance(c, dict) and c.get("type") == "text":
+                        texts.append(c["text"])
+                return "\n".join(texts) if texts else str(result)
+            return str(result) if result else None
+        except Exception as e:
+            logger.warning(f"MCP 도구 호출 실패 ({tool_name}): {e}")
+            return None
+
+
+@st.cache_resource
+def _get_mcp_client():
+    """MCP 직접 클라이언트 싱글턴."""
+    oc = get_secret("LAW_OC") or ""
+    return MCPDirectClient(oc_key=oc)
+
+
+def call_mcp_law_direct(query):
+    """MCP 서버를 직접 호출하여 법령 조회 (Claude API 불필요).
+
+    1. search_law로 법령 MST 확보
+    2. get_article_detail로 조문 원문 조회
+    3. 실패 시 get_law_text 시도
+
+    Returns: (success: bool, text: str)
+    """
+    import re as _re
+
+    mcp = _get_mcp_client()
+    if not mcp.initialize():
+        return False, "MCP 서버 연결 실패"
+
+    # 법령명 추출
+    law_match = _re.search(r"['\"]?([가-힣ㆍ·\s]+(?:법률?|법|고시))['\"]?", query)
+    if not law_match:
+        law_match = _re.search(r"['\"]?([가-힣]{2,})['\"]?", query)
+    if not law_match:
+        return False, "법령명 추출 실패"
+    law_name = law_match.group(1).strip()
+
+    # 조문번호 추출
+    art_match = _re.search(r'(제\d+조(?:의\d+)?)', query)
+    art_str = art_match.group(1) if art_match else None
+
+    # Step 1: search_law → MST 확보
+    search_result = mcp.call_tool("search_law", {"query": law_name, "display": 5})
+    if not search_result:
+        return False, f"MCP search_law 실패: {law_name}"
+
+    logger.info(f"MCP search_law 결과: {str(search_result)[:200]}")
+
+    # MST 추출 (응답 텍스트에서 mst 또는 법령일련번호 파싱)
+    mst = None
+    law_id = None
+    mst_match = _re.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', search_result)
+    if mst_match:
+        mst = mst_match.group(1)
+    lawid_match = _re.search(r'(?:lawId|법령ID)[:\s]*["\']?(\d{4,7})', search_result)
+    if lawid_match:
+        law_id = lawid_match.group(1)
+
+    if not art_str:
+        # 조문번호 없으면 검색 결과만 반환
+        return True, f"[MCP 직접] {law_name} 검색 결과:\n{search_result[:800]}"
+
+    # Step 2: get_article_detail → 조문 원문 조회
+    args = {"jo": art_str}
+    if mst:
+        args["mst"] = mst
+    if law_id:
+        args["lawId"] = law_id
+
+    detail_result = mcp.call_tool("get_article_detail", args)
+    if detail_result and len(detail_result) > 20:
+        logger.info(f"MCP get_article_detail 성공: {law_name} {art_str} — {len(detail_result)}자")
+        return True, f"[MCP 직접] {law_name} {art_str}\n{detail_result}"
+
+    # Step 3: get_law_text 폴백
+    if mst:
+        text_result = mcp.call_tool("get_law_text", {"mst": mst, "jo": art_str})
+        if text_result and len(text_result) > 20:
+            logger.info(f"MCP get_law_text 성공: {law_name} {art_str} — {len(text_result)}자")
+            return True, f"[MCP 직접] {law_name} {art_str}\n{text_result}"
+
+    # 검색 결과는 있지만 조문 상세 실패
+    return True, f"[MCP 직접] {law_name} 검색 성공, {art_str} 조문 조회 실패\n{search_result[:500]}"
 
 
 def call_mcp_law(query, max_tokens=2048):
-    """korean-law-mcp를 통해 법령/판례 조회.
-    세션 404 시 재연결(최대 3회) + Keep-Alive + law.go.kr 직접 폴백.
+    """법령 조회 통합 함수.
+
+    우선순위:
+      1차: MCP 서버 직접 호출 (Claude API 불필요, 무료)
+      2차: Claude API 경유 MCP (기존 방식, Claude 토큰 소모)
+      3차: Supabase laws DB 캐시
     """
     import requests as _req
     import re as _re
 
     MCP_URL = "https://korean-law-mcp.fly.dev/mcp"
-    HEALTH_URL = "https://korean-law-mcp.fly.dev/health"
-    MAX_RETRIES = 3
 
-    def _mcp_call(client, law_api_key):
-        """MCP 실제 호출"""
+    # ━━━ 1차: MCP 직접 호출 (Claude API 불필요) ━━━
+    try:
+        success, result = call_mcp_law_direct(query)
+        if success and result and len(result) > 30:
+            return True, result
+        logger.info(f"MCP 직접 호출 불충분: {result[:100] if result else 'None'}")
+    except Exception as e:
+        logger.warning(f"MCP 직접 호출 실패: {e}")
+
+    # ━━━ 2차: Claude API 경유 MCP (기존 방식) ━━━
+    try:
+        client = init_anthropic()
+        law_api_key = get_secret("LAW_OC") or ""
+
+        # Fly.io wake-up
+        try:
+            _req.get("https://korean-law-mcp.fly.dev/health", timeout=10)
+        except Exception:
+            time.sleep(2)
+
         response = client.beta.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=max_tokens,
@@ -618,146 +810,41 @@ def call_mcp_law(query, max_tokens=2048):
         for block in response.content:
             if hasattr(block, 'text') and block.text:
                 text_parts.append(block.text)
-        return "\n".join(text_parts)
+        result = "\n".join(text_parts)
+        if result:
+            logger.info(f"Claude MCP 조회 성공: {query[:30]}... → {len(result)}자")
+            return True, result
+    except Exception as e:
+        logger.warning(f"Claude MCP 실패: {str(e)[:200]}")
 
-    def _wake_up_server(wait_after=3):
-        """MCP 서버 wake-up (Fly.io cold start 대응)"""
-        try:
-            hc = _req.get(HEALTH_URL, timeout=20)
-            logger.info(f"MCP health: {hc.status_code}")
-            if hc.status_code == 200:
-                return True
-        except Exception:
-            logger.warning("MCP health check 실패 — 서버 sleep 상태일 수 있음")
-        time.sleep(wait_after)
-        return False
-
-    # Keep-Alive 핑 (세션 유지)
-    _mcp_keep_alive()
-
-    # MCP 시도 (최대 MAX_RETRIES회 — 404/세션에러 시 wake-up 후 재시도)
-    last_err = ""
-    for attempt in range(MAX_RETRIES):
-        try:
-            client = init_anthropic()
-            law_api_key = get_secret("LAW_OC") or "ocwhip3122"
-
-            # 첫 시도 또는 세션 에러 후 → wake-up
-            if attempt == 0:
-                _wake_up_server(wait_after=2)
-
-            result = _mcp_call(client, law_api_key)
-
-            if result:
-                logger.info(f"MCP 조회 성공 (시도 {attempt+1}/{MAX_RETRIES}): {query[:30]}... → {len(result)}자")
-                st.session_state["_mcp_last_ping"] = time.time()  # 성공 시 핑 갱신
-                return True, result
-            return False, "MCP 응답 비어있음"
-
-        except Exception as e:
-            err_str = str(e)
-            last_err = err_str
-            logger.warning(f"MCP 시도 {attempt+1}/{MAX_RETRIES} 실패: {err_str[:200]}")
-
-            # 404 Session not found / 세션 관련 에러 → wake-up 후 재시도
-            is_session_error = any(kw in err_str.lower() for kw in [
-                "404", "session not found", "session_not_found", "session expired",
-                "sse", "connection", "eof", "stream"
-            ])
-            if is_session_error and attempt < MAX_RETRIES - 1:
-                wait = 3 * (attempt + 1)  # 3초, 6초, 9초 점진적 대기
-                logger.info(f"MCP 세션 에러 감지 — {wait}초 대기 후 재연결 시도...")
-                _wake_up_server(wait_after=wait)
-                continue
-            elif not is_session_error:
-                break  # 세션 문제가 아닌 에러는 재시도 불필요
-    
-    # 2차: law.go.kr 직접 폴백 — 조문 원문까지 가져오기
-    logger.info("MCP 실패 — law.go.kr 직접 폴백")
+    # ━━━ 3차: Supabase laws DB 캐시 ━━━
+    logger.info("MCP 모두 실패 — Supabase DB 캐시 폴백")
     try:
-        # 법령명 추출 (예: "표시ㆍ광고의 공정화에 관한 법률", "관세법")
-        law_match = _re.search(r"['\"]?([가-힣ㆍ·\s]+(?:법률?|법|고시))['\"]?", query)
-        if not law_match:
-            # 단순 패턴: 한글 법령명
-            law_match = _re.search(r"['\"]?([가-힣]{2,})['\"]?", query)
-        if not law_match:
-            return False, "법령명 추출 실패"
+        art_match = _re.search(r'(제\d+조(?:의\d+)?)', query)
+        art_str = art_match.group(1) if art_match else None
 
-        law_name = law_match.group(1).strip()
-        oc = get_secret("LAW_OC") or "ocwhip3122"
+        if art_str:
+            laws_db = load_laws()
+            if laws_db:
+                for law in laws_db:
+                    art_no = law.get("article_no", "")
+                    if art_str in art_no or art_no in art_str:
+                        law_name = law.get("law_name", "")
+                        law_short = law.get("law_short", "")
+                        query_clean = query.replace("'", "").replace('"', '')
+                        if (law_short and law_short in query_clean) or \
+                           (law_name and any(part in query_clean for part in law_name.split() if len(part) >= 2)):
+                            content = law.get("content", "")
+                            title = law.get("article_title", "")
+                            header = f"{law_short} {art_no}"
+                            if title:
+                                header += f"({title})"
+                            logger.info(f"Supabase DB 폴백 성공: {header} — {len(content)}자")
+                            return True, f"[DB 캐시] {header}\n{content}"
+    except Exception as db_err:
+        logger.warning(f"Supabase DB 폴백 실패: {db_err}")
 
-        # 조문번호 추출 (예: "제3조", "제45조제1항")
-        art_match = _re.search(r'제(\d+)조(?:의(\d+))?', query)
-        art_num = art_match.group(1) if art_match else None
-
-        # Step 1: 법령 검색 → MST(법령일련번호) 확보
-        url = "https://www.law.go.kr/DRF/lawSearch.do"
-        params = {"OC": oc, "target": "law", "type": "XML", "query": law_name, "display": "5"}
-        res = _req.get(url, params=params, timeout=15)
-
-        if res.status_code != 200 or "totalCnt" not in res.text:
-            return False, f"{law_name} 검색 실패 (HTTP {res.status_code})"
-
-        root = ET.fromstring(res.text)
-        total = root.findtext('.//totalCnt') or "0"
-        if int(total) == 0:
-            return False, f"{law_name} 검색 결과 없음"
-
-        # MST 찾기
-        mst = None
-        for item in root.iter():
-            found_name = item.findtext("법령명한글") or ""
-            serial = item.findtext("법령일련번호") or ""
-            if found_name and law_name.replace(" ", "") in found_name.replace(" ", "") and serial:
-                mst = serial
-                break
-
-        if not mst:
-            return True, f"{law_name} 법령 존재 확인 (law.go.kr 폴백, 조문 미조회)"
-
-        # Step 2: 조문 상세 조회
-        if not art_num:
-            return True, f"{law_name} 법령 존재 확인 (MST={mst}, 조문번호 미지정)"
-
-        detail_url = f"https://www.law.go.kr/DRF/lawService.do?OC={oc}&target=law&MST={mst}&type=XML"
-        detail_res = _req.get(detail_url, timeout=15)
-        if detail_res.status_code != 200:
-            return True, f"{law_name} 법령 존재 확인 (조문 조회 HTTP {detail_res.status_code})"
-
-        detail_root = ET.fromstring(detail_res.text)
-
-        for art_elem in detail_root.findall('.//조문단위') or detail_root.findall('.//조문'):
-            no_elem = art_elem.find('조문번호')
-            if no_elem is None or not no_elem.text or no_elem.text.strip() != art_num:
-                continue
-            jo_type = art_elem.findtext('조문여부') or ""
-            if jo_type.strip() == '전문':
-                continue
-            title = (art_elem.findtext('조문제목') or "").strip()
-            parts = []
-            ce = art_elem.find('조문내용')
-            if ce is not None and ce.text:
-                parts.append(ce.text.strip())
-            for hang in art_elem.findall('항'):
-                hc = hang.find('항내용')
-                if hc is not None and hc.text:
-                    parts.append(hc.text.strip())
-                for ho in hang.findall('호'):
-                    hoc = ho.find('호내용')
-                    if hoc is not None and hoc.text:
-                        parts.append("  " + hoc.text.strip())
-            content = "\n".join(parts)
-            if content:
-                header = f"{law_name} 제{art_num}조"
-                if title:
-                    header += f"({title})"
-                logger.info(f"law.go.kr 폴백 조문 조회 성공: {header} — {len(content)}자")
-                return True, f"{header}\n{content}"
-
-        return True, f"{law_name} 제{art_num}조 — 조문 내용 미발견 (law.go.kr 폴백)"
-    except Exception as e2:
-        logger.warning(f"law.go.kr 폴백도 실패: {e2}")
-        return False, str(e2)
+    return False, "MCP 직접·Claude MCP·DB 캐시 모두 실패"
 
 
 def verify_precedent_via_api(case_no, context_keywords=None):
@@ -2635,9 +2722,9 @@ def main():
                         try:
                             import anthropic as _anth
                             import requests as _req
-                            
+
                             st.caption(f"anthropic SDK: {_anth.__version__}")
-                            
+
                             # Step 1: MCP 서버 health check
                             st.caption("Step 1: MCP 서버 health check...")
                             try:
@@ -2645,7 +2732,24 @@ def main():
                                 st.caption(f"  Health: HTTP {hc.status_code} — {hc.text[:100]}")
                             except Exception as hc_err:
                                 st.warning(f"  Health check 실패: {hc_err}")
-                            
+
+                            # Step 1.5: MCP 직접 연결 테스트 (Claude API 불필요)
+                            st.caption("Step 1.5: MCP 직접 호출 테스트 (Claude API 불필요)...")
+                            try:
+                                mcp_client = _get_mcp_client()
+                                if mcp_client.initialize():
+                                    st.caption("  ✅ MCP 직접 연결 초기화 성공")
+                                    test_result = mcp_client.call_tool("search_law", {"query": "관세법", "display": 2})
+                                    if test_result:
+                                        st.success(f"  ✅ MCP 직접 search_law 성공!")
+                                        st.caption(f"  결과: {str(test_result)[:300]}")
+                                    else:
+                                        st.warning("  ⚠️ MCP 직접 search_law 응답 없음")
+                                else:
+                                    st.warning("  ⚠️ MCP 직접 연결 초기화 실패")
+                            except Exception as direct_err:
+                                st.warning(f"  ⚠️ MCP 직접 연결 실패: {str(direct_err)[:200]}")
+
                             # Step 2: MCP 엔드포인트 직접 접근
                             st.caption("Step 2: MCP 엔드포인트 확인...")
                             try:
@@ -2653,7 +2757,7 @@ def main():
                                 st.caption(f"  /mcp: HTTP {ep.status_code} — {ep.text[:200]}")
                             except Exception as ep_err:
                                 st.caption(f"  /mcp 접근: {ep_err}")
-                            
+
                             # Step 3: Anthropic API + MCP
                             st.caption("Step 3: Anthropic API + MCP connector...")
                             _client = init_anthropic()
@@ -2910,22 +3014,29 @@ def main():
 }}
 ```
 """
-                                # Claude 우선, 실패 시 Gemini 폴백
+                                # Gemini 우선 호출 (Claude API 한도 초과 빈번 → 대기시간 제거)
                                 reply = None
                                 try:
-                                    reply = call_claude(block_prompt, [{"role": "user", "content": block_prompt}])
-                                    if reply.startswith("⚠️"):
-                                        raise Exception(reply)
-                                    gen_model = "Claude"
-                                except Exception as claude_err:
-                                    st.warning(f"Claude API 실패 ({str(claude_err)[:100]}), Gemini로 폴백...")
-                                    try:
-                                        reply = call_gemini(block_prompt, [{"role": "user", "content": block_prompt}], is_fallback=True)
-                                        if reply:
-                                            reply = sanitize_html(reply)
+                                    reply = call_gemini(
+                                        block_prompt + "\n\nSystem Constraint: 절대 HTML, CSS, XML 태그를 생성하지 마십시오. 오직 순수 JSON만 출력하세요.",
+                                        [{"role": "user", "content": block_prompt}],
+                                        is_fallback=True,
+                                    )
+                                    if reply:
+                                        reply = sanitize_html(reply)
+                                    if reply and not reply.startswith("⚠️"):
                                         gen_model = "Gemini"
-                                    except Exception as gemini_err:
-                                        st.error(f"❌ Claude·Gemini 모두 실패\nClaude: {str(claude_err)[:200]}\nGemini: {str(gemini_err)[:200]}")
+                                    else:
+                                        raise Exception(reply or "Gemini 응답 없음")
+                                except Exception as gemini_err:
+                                    st.warning(f"Gemini 실패 ({str(gemini_err)[:100]}), Claude 시도...")
+                                    try:
+                                        reply = call_claude(block_prompt, [{"role": "user", "content": block_prompt}])
+                                        if reply.startswith("⚠️"):
+                                            raise Exception(reply)
+                                        gen_model = "Claude"
+                                    except Exception as claude_err:
+                                        st.error(f"❌ Gemini·Claude 모두 실패\nGemini: {str(gemini_err)[:200]}\nClaude: {str(claude_err)[:200]}")
                                 
                                 if reply and not reply.startswith("⚠️"):
                                     # Gemini 폴백 시 HTML 잔여물 제거
