@@ -672,24 +672,89 @@ def call_mcp_law(query, max_tokens=2048):
             elif not is_session_error:
                 break  # 세션 문제가 아닌 에러는 재시도 불필요
     
-    # 2차: law.go.kr 직접 폴백
+    # 2차: law.go.kr 직접 폴백 — 조문 원문까지 가져오기
     logger.info("MCP 실패 — law.go.kr 직접 폴백")
     try:
-        law_match = _re.search(r"['\"]?([가-힣]+법[가-힣]*)['\"]?", query)
+        # 법령명 추출 (예: "표시ㆍ광고의 공정화에 관한 법률", "관세법")
+        law_match = _re.search(r"['\"]?([가-힣ㆍ·\s]+(?:법률?|법|고시))['\"]?", query)
+        if not law_match:
+            # 단순 패턴: 한글 법령명
+            law_match = _re.search(r"['\"]?([가-힣]{2,})['\"]?", query)
         if not law_match:
             return False, "법령명 추출 실패"
-        
-        law_name = law_match.group(1)
+
+        law_name = law_match.group(1).strip()
+        oc = get_secret("LAW_OC") or "ocwhip3122"
+
+        # 조문번호 추출 (예: "제3조", "제45조제1항")
+        art_match = _re.search(r'제(\d+)조(?:의(\d+))?', query)
+        art_num = art_match.group(1) if art_match else None
+
+        # Step 1: 법령 검색 → MST(법령일련번호) 확보
         url = "https://www.law.go.kr/DRF/lawSearch.do"
-        params = {"OC": "ocwhip3122", "target": "law", "type": "XML", "query": law_name}
+        params = {"OC": oc, "target": "law", "type": "XML", "query": law_name, "display": "5"}
         res = _req.get(url, params=params, timeout=15)
-        
-        if res.status_code == 200 and "totalCnt" in res.text:
-            root = ET.fromstring(res.text)
-            total = root.findtext('.//totalCnt') or "0"
-            if int(total) > 0:
-                return True, f"{law_name} 법령 존재 확인 (law.go.kr 폴백)"
-        return False, f"{law_name} 검색 결과 없음"
+
+        if res.status_code != 200 or "totalCnt" not in res.text:
+            return False, f"{law_name} 검색 실패 (HTTP {res.status_code})"
+
+        root = ET.fromstring(res.text)
+        total = root.findtext('.//totalCnt') or "0"
+        if int(total) == 0:
+            return False, f"{law_name} 검색 결과 없음"
+
+        # MST 찾기
+        mst = None
+        for item in root.iter():
+            found_name = item.findtext("법령명한글") or ""
+            serial = item.findtext("법령일련번호") or ""
+            if found_name and law_name.replace(" ", "") in found_name.replace(" ", "") and serial:
+                mst = serial
+                break
+
+        if not mst:
+            return True, f"{law_name} 법령 존재 확인 (law.go.kr 폴백, 조문 미조회)"
+
+        # Step 2: 조문 상세 조회
+        if not art_num:
+            return True, f"{law_name} 법령 존재 확인 (MST={mst}, 조문번호 미지정)"
+
+        detail_url = f"https://www.law.go.kr/DRF/lawService.do?OC={oc}&target=law&MST={mst}&type=XML"
+        detail_res = _req.get(detail_url, timeout=15)
+        if detail_res.status_code != 200:
+            return True, f"{law_name} 법령 존재 확인 (조문 조회 HTTP {detail_res.status_code})"
+
+        detail_root = ET.fromstring(detail_res.text)
+
+        for art_elem in detail_root.findall('.//조문단위') or detail_root.findall('.//조문'):
+            no_elem = art_elem.find('조문번호')
+            if no_elem is None or not no_elem.text or no_elem.text.strip() != art_num:
+                continue
+            jo_type = art_elem.findtext('조문여부') or ""
+            if jo_type.strip() == '전문':
+                continue
+            title = (art_elem.findtext('조문제목') or "").strip()
+            parts = []
+            ce = art_elem.find('조문내용')
+            if ce is not None and ce.text:
+                parts.append(ce.text.strip())
+            for hang in art_elem.findall('항'):
+                hc = hang.find('항내용')
+                if hc is not None and hc.text:
+                    parts.append(hc.text.strip())
+                for ho in hang.findall('호'):
+                    hoc = ho.find('호내용')
+                    if hoc is not None and hoc.text:
+                        parts.append("  " + hoc.text.strip())
+            content = "\n".join(parts)
+            if content:
+                header = f"{law_name} 제{art_num}조"
+                if title:
+                    header += f"({title})"
+                logger.info(f"law.go.kr 폴백 조문 조회 성공: {header} — {len(content)}자")
+                return True, f"{header}\n{content}"
+
+        return True, f"{law_name} 제{art_num}조 — 조문 내용 미발견 (law.go.kr 폴백)"
     except Exception as e2:
         logger.warning(f"law.go.kr 폴백도 실패: {e2}")
         return False, str(e2)
@@ -2855,12 +2920,16 @@ def main():
                                 except Exception as claude_err:
                                     st.warning(f"Claude API 실패 ({str(claude_err)[:100]}), Gemini로 폴백...")
                                     try:
-                                        reply = call_gemini(block_prompt, [{"role": "user", "content": block_prompt}])
+                                        reply = call_gemini(block_prompt, [{"role": "user", "content": block_prompt}], is_fallback=True)
+                                        if reply:
+                                            reply = sanitize_html(reply)
                                         gen_model = "Gemini"
                                     except Exception as gemini_err:
                                         st.error(f"❌ Claude·Gemini 모두 실패\nClaude: {str(claude_err)[:200]}\nGemini: {str(gemini_err)[:200]}")
                                 
                                 if reply and not reply.startswith("⚠️"):
+                                    # Gemini 폴백 시 HTML 잔여물 제거
+                                    reply = sanitize_html(reply)
                                     st.subheader(f"📝 AI 생성 초안 ({gen_model}, 검증 필요)")
                                     st.code(reply, language="json")
                                     
