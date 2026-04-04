@@ -437,10 +437,11 @@ def build_system_claude(docs, laws_db, gemini_analysis=""):
         + gemini_section +
         "\n\n━━━ [적용 법령·행정규칙 DB 목록] ━━━\n" + laws_text +
         "\n\n━━━ [답변 형식] ━━━\n"
-        "모든 법적 리스크를 빠짐없이. high/medium 상세, low 1~2문장. 해당없으면 생략.\n\n"
+        "모든 법적 리스크를 빠짐없이. high/medium 상세, low 1~2문장. 해당없으면 생략.\n"
+        "문체 규칙: 모든 필드에 개조식(불릿 - ) + 평어체(명사형 종결: ~불가/~필요/~존재/~대상). 서술형(~입니다/~합니다) 절대 금지.\n\n"
         "```json\n"
         "{\n"
-        '  "summary": "1줄 요약",\n'
+        '  "summary": "개조식 3~4줄 요약 (불릿 - 사용, 명사형 종결: ~불가/~필요/~존재/~대상)",\n'
         '  "verdict": "approved|conditional|rejected",\n'
         '  "verdict_reason": "종합 판단 근거",\n'
         '  "issues": [{"issue_no":1,"title":"쟁점","risk_level":"high|medium|low",\n'
@@ -1150,6 +1151,14 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "DB 미등록 법령도 Placeholder를 사용하라. 예: {{관세법_제269조제2항_5년이하징역또는관세액10배이하벌금}}\n\n"
         "██ 규칙 5 — 용어 ██\n"
         "'~팀' 금지 → '~담당부서'. 새 법령 추가 인용 금지.\n\n"
+        "██ 규칙 6 — 문체 (절대 규칙) ██\n"
+        "summary, law_analysis, rule_analysis, recommendation, verdict_reason, action_plan 모든 필드에 적용:\n"
+        "① 개조식: 반드시 불릿('-')으로 3~4개 핵심 포인트 나열. 줄글(서술형 문단) 금지.\n"
+        "② 평어체(명사형 종결): 모든 문장을 '~임', '~필요', '~불가', '~존재', '~요망', '~대상', '~위반' 등 명사형으로 종결.\n"
+        "   금지: '~입니다', '~합니다', '~됩니다', '~있습니다' 등 서술형 종결 절대 사용 금지.\n"
+        "③ 두괄식: 결론(위반 여부/위험도)을 첫 불릿에 배치, 근거는 후속 불릿에 배치.\n"
+        "예시(summary): \"- 직매입 반품 시 대규모유통업법 제10조 위반 리스크 존재\\n- 보세물품 무단반출 시 특허취소 대상\\n- 반품 전 세관 승인 및 납품업자 서면 동의 확보 필요\"\n"
+        "예시(law_analysis): \"- 대규모유통업법 제10조 위반 — 정당한 사유 없는 반품 원칙적 불가\\n- 위반 시 시정명령 및 과징금 부과 대상\\n- 시즌상품의 경우 계약체결 시 구체적 반품조건 명시 서면 교부 필수\"\n\n"
         
         "████ 필수 쟁점 포함 규칙 (모조품/가품 관련) ████\n"
         "모조품 관련 질의 시 아래 7개를 각각 독립 쟁점으로 출력:\n"
@@ -1176,7 +1185,7 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "모든 분석 내용은 JSON의 issues 안에 넣으세요.\n\n"
         "```json\n"
         "{\n"
-        '  "summary": "1줄 요약",\n'
+        '  "summary": "개조식 3~4줄 요약 (불릿 - 사용, 명사형 종결: ~불가/~필요/~존재/~대상)",\n'
         '  "verdict": "approved | conditional | rejected",\n'
         '  "verdict_reason": "종합 판단 근거 (전달된 데이터에 근거하여)",\n'
         '  "issues": [\n'
@@ -1198,6 +1207,82 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "```\n"
         "⚠️ JSON 코드블록 뒤에 추가 마크다운 설명을 절대 작성하지 마세요. JSON만 출력하세요.\n"
         "후속 질문에는 JSON 없이 마크다운. 새 검토 요청 시만 JSON 출력.\n"
+    )
+
+
+def build_system_revision_compare(docs, laws_db):
+    """리비전 교차 비교 전용 시스템 프롬프트 — 계약서 독소조항 감별기(Redlining)"""
+    # 사규 텍스트 수집
+    saryu_texts = []
+    for d in docs:
+        if d.get("cat") in ("saryu", "contract", "yakjeong"):
+            saryu_texts.append(f"[{d.get('label', '')}]\n{d.get('text', '')[:3000]}")
+    saryu_block = "\n\n---\n\n".join(saryu_texts) if saryu_texts else "(사규 등록 없음)"
+
+    # 핵심 법령 DB 텍스트 수집 (보세판매장고시 + 대규모유통업법 중심)
+    key_laws = []
+    for d in laws_db:
+        ls = d.get("law_short", "")
+        if any(k in ls for k in ("보세판매장", "대규모유통업", "관세법", "상표법", "표시광고")):
+            key_laws.append(f"{ls} {d.get('article_no','')}({d.get('article_title','')}): {d.get('content','')[:200]}")
+    laws_block = "\n".join(key_laws[:40]) if key_laws else "(법령 DB 없음)"
+
+    return (
+        "당신은 면세점 전문 시니어 변호사 AI이며, 계약서 리비전 교차 비교(Redlining) 전문가입니다.\n"
+        "당사가 보낸 표준 초안(V1)과 협력사가 회신한 수정본(V2)을 조항별로 대조하여,\n"
+        "협력사가 변경·추가·삭제한 독소조항을 식별하고 위험도를 평가하는 것이 당신의 임무입니다.\n\n"
+
+        "████ 듀얼 코어 절대 기준 ████\n"
+        "아래 두 법령을 최우선 심사 기준으로 적용합니다:\n"
+        "1. 「보세판매장 특허 및 운영에 관한 고시」 — 보세물품 무단반출, 밀수, 특허취소 리스크\n"
+        "2. 「대규모유통업법」 — 부당반품, 부당 대금지연, 부당 수수료 전가 등 금지행위\n"
+        "협력사 수정안이 이 두 법령의 금지행위에 1%라도 저촉되면 🔴 최고 위험(high)으로 경고.\n\n"
+
+        "████ 오작동 방지 (할루시네이션 억제) ████\n"
+        "- 단순 오탈자 수정, 문구 다듬기, 고시/법률과 무관한 일반적 조건 변경은 위반으로 판단하지 마라.\n"
+        "- 실제 법령 위반 근거가 없으면 억지로 쟁점을 창작하여 끼워 넣지 마라.\n"
+        "- V1과 V2가 실질적으로 동일한 조항은 분석에서 생략하라.\n"
+        "- 변경사항이 없거나 위험 조항이 없으면 'approved'로 판단하라.\n\n"
+
+        "████ 분석 절차 ████\n"
+        "1. V1과 V2를 조항별로 대조하여 변경점을 식별\n"
+        "2. 각 변경점이 아래 기준 문서(사규)와 법령에 위반되는지 심사\n"
+        "3. 위반 시 구체적 법령 조항과 위반 사유를 명시\n"
+        "4. 변경이 당사에 불리한지 분석 (손해배상 한도 삭제, 일방 해지권 추가, IP 귀속 변경 등)\n\n"
+
+        "████ 사규 인용 시 꺾쇠「」 필수 ████\n"
+        "사규명은 반드시 「」로 감싸서 인용 (예: 「직매입거래 기본계약서」 제22조)\n\n"
+
+        "━━━ [기준 문서 — 사규] ━━━\n" + saryu_block + "\n\n"
+        "━━━ [참조 법령 DB] ━━━\n" + laws_block + "\n\n"
+
+        "━━━ [답변 형식] ━━━\n"
+        "반드시 아래 JSON 형식으로만 출력. JSON 외 마크다운 설명 금지.\n\n"
+        "```json\n"
+        "{\n"
+        '  "summary": "교차 비교 결과 1줄 요약 (변경 N건 중 독소조항 M건 발견)",\n'
+        '  "verdict": "approved | conditional | rejected",\n'
+        '  "verdict_reason": "종합 판단 근거",\n'
+        '  "issues": [\n'
+        '    {\n'
+        '      "issue_no": 1,\n'
+        '      "title": "변경 쟁점 제목 (예: 손해배상 한도 삭제)",\n'
+        '      "risk_level": "high | medium | low",\n'
+        '      "target_clause": "V1 원문: [당사 조항 내용] 👉 V2 수정문: [협력사 변경 내용]",\n'
+        '      "applicable_law": "법령명 제X조",\n'
+        '      "law_analysis": "법령 위반 여부 분석",\n'
+        '      "applicable_rule": "「사규명」 제X조 — 사규 위반 여부",\n'
+        '      "rule_analysis": "사규 관점 분석",\n'
+        '      "recommendation": "수용 / 거부 / 수정협상 + 구체적 대안"\n'
+        '    }\n'
+        '  ],\n'
+        '  "action_plan": "협상 전략 (즉시 거부할 조항 / 수정 협상할 조항 / 수용 가능 조항 분류)",\n'
+        '  "alternative_clause": "독소조항에 대한 당사 수정 대안 제시",\n'
+        '  "cited_laws": [{"law_name": "법령명", "article": "제X조"}],\n'
+        '  "cited_precedents": []\n'
+        "}\n"
+        "```\n"
+        "⚠️ JSON 코드블록 뒤에 추가 마크다운 설명을 절대 작성하지 마세요. JSON만 출력하세요.\n"
     )
 
 
@@ -1729,10 +1814,29 @@ def postprocess_reply(reply, laws_db):
 
 
 def dispatch_with_fallback(model_choice, messages, docs, laws_db):
+    user_query = messages[-1]["content"] if messages else ""
+
+    # ━━━ 리비전 교차 비교 전용 Bypass ━━━
+    if "[REVISION_COMPARE]" in user_query:
+        st.caption("🔄 리비전 교차 비교 모드 (전용 파이프라인)")
+        # 플래그 제거 후 순수 비교 텍스트만 추출
+        clean_query = user_query.replace("[REVISION_COMPARE]\n", "").replace("[REVISION_COMPARE]", "")
+        system_prompt = build_system_revision_compare(docs, laws_db)
+        # Claude 단독 직행 — Gemini 검색, Gatekeeper, enforce_mandatory_issues 전면 생략
+        reply = call_claude(system_prompt, [{"role": "user", "content": clean_query}])
+        if reply.startswith("⚠️"):
+            # Claude 실패 시 Gemini 폴백
+            st.warning("Claude API 한도 → Gemini 폴백")
+            reply = call_gemini(system_prompt, [{"role": "user", "content": clean_query}], is_fallback=True)
+            reply = sanitize_html(reply)
+            if reply and not reply.startswith("⚠️"):
+                return reply, "Gemini (Revision Compare)"
+            return reply, "Failed"
+        return reply, f"Claude ({CLAUDE_MODEL}, Revision Compare)"
+
     if model_choice == "claude":
         # ━━━ 블록 삽입 파이프라인 체크 ━━━
         # 모조품 관련 질의면 block_assembler로 분기 (형량 100% 보장)
-        user_query = messages[-1]["content"] if messages else ""
         
         try:
             from block_assembler import classify_issues, load_legal_blocks, run_pipeline
@@ -2073,15 +2177,25 @@ def enforce_mandatory_issues(json_data, laws_db, user_query=""):
     all_text = " ".join(iss.get("title", "") + " " + iss.get("applicable_law", "") for iss in issues)
     next_no = max((iss.get("issue_no", 0) for iss in issues), default=0) + 1
 
-    # 사용자 질문 + AI 응답 전체 텍스트로 관련성 판단
-    query_context = user_query + " " + all_text
+    # 사용자 질문 텍스트만으로 관련성 판단 (AI 응답 제외 — AI가 쓴 키워드에 오발동 방지)
+    query_context = user_query
 
-    # ── 관련성 키워드 매핑 (질문에 해당 키워드가 있을 때만 삽입) ──
+    # ── 관련성 키워드 매핑 ──
+    # B2B/B2C 혼동 방지: "반품", "교환", "하자" 등 양쪽에서 쓰이는 단어는 소비자법 트리거에서 제외
     relevance_map = {
-        "보세판매장": ["보세", "면세", "세관", "통관", "반출", "반입", "특허취소", "반품"],
-        "소비자": ["소비자", "환불", "교환", "하자", "피해", "반품", "불량", "결함"],
+        "보세판매장": ["보세", "세관", "통관", "반출", "반입", "특허취소", "밀수"],
+        "소비자": ["소비자", "고객", "클레임", "안전", "소비자보호", "소비자피해", "소비자분쟁"],
         "부정경쟁": ["모조품", "가품", "위조", "짝퉁", "모방", "혼동", "부정경쟁", "카피"],
     }
+
+    # AI가 이미 생성한 쟁점의 법령 목록 (중복 삽입 방지용)
+    existing_laws = set()
+    for iss in issues:
+        _al = iss.get("applicable_law", "")
+        if "보세판매장" in _al: existing_laws.add("보세판매장")
+        if "관세법" in _al: existing_laws.add("관세법")
+        if "소비자" in _al: existing_laws.add("소비자")
+        if "부정경쟁" in _al: existing_laws.add("부정경쟁")
 
     def _is_relevant(category_key):
         keywords = relevance_map.get(category_key, [])
@@ -2095,8 +2209,8 @@ def enforce_mandatory_issues(json_data, laws_db, user_query=""):
                 parts.append(f"{d['article_no']}({d.get('article_title','')}): {d['content'][:200]}")
         return "  ".join(parts[:3]) if parts else ""
 
-    # 1. 보세판매장고시 — 관련 있고 AI가 빠뜨렸으면 삽입
-    if "보세판매장" not in all_text and _is_relevant("보세판매장"):
+    # 1. 보세판매장고시 — 관련 있고, AI가 빠뜨렸고, 관세법/보세 중복 아닌 경우만
+    if "보세판매장" not in all_text and "보세판매장" not in existing_laws and _is_relevant("보세판매장"):
         db_text = _get_db_analysis("보세판매장고시", ("제18조", "제28조", "제21조"))
         analysis = f"운영인의 법령 위반 시 6개월 범위 내 물품반입 정지 또는 특허취소 (관세법 제178조 연계)."
         if db_text:
@@ -2112,8 +2226,8 @@ def enforce_mandatory_issues(json_data, laws_db, user_query=""):
         logger.info("enforce: 보세판매장고시 보충 삽입 (관련 키워드 감지)")
         next_no += 1
 
-    # 2. 소비자기본법 — 관련 있고 AI가 빠뜨렸으면 삽입
-    if "소비자" not in all_text and _is_relevant("소비자"):
+    # 2. 소비자기본법 — 명확한 B2C 키워드가 있고, AI가 빠뜨렸고, 중복 아닌 경우만
+    if "소비자" not in all_text and "소비자" not in existing_laws and _is_relevant("소비자"):
         db_text = _get_db_analysis("소비자기본법", ("제4조", "제19조", "제20조"))
         analysis = "소비자 안전권·알 권리 침해. 소비자분쟁해결기준에 따른 피해구제 및 손해배상 가능."
         if db_text:
@@ -2129,8 +2243,8 @@ def enforce_mandatory_issues(json_data, laws_db, user_query=""):
         logger.info("enforce: 소비자기본법 보충 삽입 (관련 키워드 감지)")
         next_no += 1
 
-    # 3. 부정경쟁방지법 — 관련 있고 AI가 빠뜨렸으면 삽입
-    if "부정경쟁" not in all_text and _is_relevant("부정경쟁"):
+    # 3. 부정경쟁방지법 — 관련 있고, AI가 빠뜨렸고, 중복 아닌 경우만
+    if "부정경쟁" not in all_text and "부정경쟁" not in existing_laws and _is_relevant("부정경쟁"):
         db_text = _get_db_analysis("부정경쟁방지법", ("제2조", "제18조"))
         analysis = "타인의 상품표지와 혼동을 일으키는 행위는 부정경쟁행위로 처벌. 부정경쟁방지법 제18조 제3항 제1호에 따라 3년 이하의 징역 또는 3천만원 이하의 벌금. 상표법과 별개 적용."
         if db_text:
@@ -2202,9 +2316,14 @@ def render_issues_table(issues, citation_results):
         risk = issue.get("risk_level", "medium")
         icon = risk_icons.get(risk, "⚪")
         with st.expander(f"{icon} 쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '제목 없음')}", expanded=(risk == "high")):
-            if issue.get("target_clause"):
+            _tc = issue.get("target_clause", "")
+            # 짧은 원문(30자 이하) 또는 사용자 질문과 동일하면 도배 방지 → 숨김
+            _user_msgs = [m for m in st.session_state.get("messages", []) if m.get("role") == "user"]
+            _last_q = _user_msgs[-1]["content"][:200] if _user_msgs else ""
+            _tc_skip = len(_tc) <= 30 or _tc.strip() == _last_q.strip()
+            if _tc and not _tc_skip:
                 st.markdown(f"**📌 검토 대상 원문:**")
-                st.code(issue["target_clause"], language="text")
+                st.code(_tc, language="text")
             col1, col2 = st.columns(2)
             with col1:
                 law_ref = issue.get("applicable_law", "")
@@ -2380,10 +2499,13 @@ def generate_review_docx(json_data, detail_text, query_text):
                 h = doc.add_heading(f"{icon} 쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '제목 없음')} {label}", level=3)
                 _apply_shading(h, risk_shades.get(risk, SHADE_H3))
 
-                # 📌 검토 대상 원문 (회색 음영 박스)
-                if issue.get("target_clause"):
+                # 📌 검토 대상 원문 (짧거나 질문 동일 시 생략)
+                _dtc = issue.get("target_clause", "")
+                _du_msgs = [m for m in st.session_state.get("messages", []) if m.get("role") == "user"]
+                _dlast = _du_msgs[-1]["content"][:200] if _du_msgs else ""
+                if _dtc and len(_dtc) > 30 and _dtc.strip() != _dlast.strip():
                     doc.add_paragraph("📌 검토 대상 원문:").runs[0].bold = True
-                    p_clause = doc.add_paragraph(issue["target_clause"])
+                    p_clause = doc.add_paragraph(_dtc)
                     p_clause.paragraph_format.left_indent = Cm(0.5)
                     _apply_shading(p_clause, SHADE_QUOTE)
                     for run in p_clause.runs:
@@ -2907,6 +3029,77 @@ def main():
 
             st.markdown("---")
 
+            # API 헬스체크 (test_api.py 통합)
+            st.markdown("**🔑 API 키 헬스체크**")
+            if st.button("🔑 전체 API 상태 점검", use_container_width=True, key="api_health"):
+                with st.spinner("API 키 상태 점검 중..."):
+                    health_results = {"pass": 0, "warn": 0, "fail": 0}
+
+                    # Supabase
+                    try:
+                        sb = init_supabase()
+                        if sb:
+                            res = sb.table("docs").select("id").limit(1).execute()
+                            st.success("✅ Supabase 연결 정상")
+                            health_results["pass"] += 1
+                        else:
+                            st.error("❌ Supabase 클라이언트 없음")
+                            health_results["fail"] += 1
+                    except Exception as e:
+                        st.error(f"❌ Supabase: {str(e)[:100]}")
+                        health_results["fail"] += 1
+
+                    # Gemini
+                    try:
+                        from google import genai
+                        from google.genai import types
+                        gclient = genai.Client(api_key=get_secret("GEMINI_API_KEY"))
+                        resp = gclient.models.generate_content(
+                            model=GEMINI_MODELS[0],
+                            contents=[types.Content(role="user", parts=[types.Part(text="테스트. '정상'이라고만 답해.")])],
+                            config=types.GenerateContentConfig(system_instruction="'정상'이라고만 답하세요."),
+                        )
+                        st.success(f"✅ Gemini ({GEMINI_MODELS[0]}) 정상 — {(resp.text or '').strip()[:20]}")
+                        health_results["pass"] += 1
+                    except Exception as e:
+                        err = str(e).lower()
+                        if "quota" in err or "429" in err:
+                            st.warning(f"⚠️ Gemini 쿼터 초과 (키는 유효)")
+                            health_results["warn"] += 1
+                        else:
+                            st.error(f"❌ Gemini: {str(e)[:100]}")
+                            health_results["fail"] += 1
+
+                    # Claude
+                    try:
+                        aclient = init_anthropic()
+                        resp = aclient.messages.create(
+                            model=CLAUDE_MODEL, max_tokens=50,
+                            system="'정상'이라고만 답하세요.",
+                            messages=[{"role": "user", "content": "테스트. '정상'이라고만 답해."}],
+                        )
+                        st.success(f"✅ Claude ({CLAUDE_MODEL}) 정상 — {resp.content[0].text.strip()[:20]}")
+                        st.caption(f"  토큰: 입력 {resp.usage.input_tokens} / 출력 {resp.usage.output_tokens}")
+                        health_results["pass"] += 1
+                    except Exception as e:
+                        err = str(e).lower()
+                        if "rate" in err or "429" in err:
+                            st.warning(f"⚠️ Claude Rate Limit (키는 유효)")
+                            health_results["warn"] += 1
+                        else:
+                            st.error(f"❌ Claude: {str(e)[:100]}")
+                            health_results["fail"] += 1
+
+                    # 결과 요약
+                    if health_results["fail"] == 0 and health_results["warn"] == 0:
+                        st.success(f"🎉 전체 통과 (PASS {health_results['pass']})")
+                    elif health_results["fail"] == 0:
+                        st.warning(f"⚠️ PASS {health_results['pass']} / WARN {health_results['warn']}")
+                    else:
+                        st.error(f"⛔ PASS {health_results['pass']} / WARN {health_results['warn']} / FAIL {health_results['fail']}")
+
+            st.markdown("---")
+
             # DB 원문 검증
             if st.button("🔬 DB 원문 검증 (핵심 법령)", use_container_width=True, key="check_db"):
                 with st.spinner("DB 원문 검증 중..."):
@@ -3349,9 +3542,8 @@ def main():
                         st.error(f"V2 파일 읽기 실패: {v2_text}")
                     else:
                         prompt = (
+                            f"[REVISION_COMPARE]\n"
                             f"당사가 보낸 초안(V1)과 협력사가 회신한 수정본(V2)을 교차 비교해주세요.\n\n"
-                            f"1. 협력사가 어느 조항을 어떻게 변경/추가/삭제했는지 핵심만 대조해주세요.\n"
-                            f"2. 수정본(V2)의 내용이 DB의 [기준 문서]와 [법령]을 위반하는지 엄격히 심사해주세요.\n\n"
                             f"[V1 당사 초안 내용]\n{v1_text}\n\n"
                             f"[V2 협력사 수정본 내용]\n{v2_text}"
                         )
@@ -3393,7 +3585,10 @@ def main():
             model_choice = route_query(safe_query, has_attachment)
 
             with st.chat_message("assistant", avatar="🤝"):
-                if model_choice == "claude":
+                is_revision = "[REVISION_COMPARE]" in safe_query
+                if is_revision:
+                    spinner_msg = "🔄 리비전 교차 비교 분석 중 (V1 vs V2 독소조항 감별)..."
+                elif model_choice == "claude":
                     spinner_msg = "⚖ 3단계 하이브리드 검토 중 (Gemini→DB검증→Claude)..."
                 else:
                     spinner_msg = "💬 당사 사내 기준을 검색 및 분석 중..."
@@ -3408,8 +3603,9 @@ def main():
                 if "Failed" not in actual_model and ("Claude" in actual_model or (model_choice == "claude" and "Gemini" in actual_model)):
                     json_data, detail_text = parse_review_response(reply)
                     if json_data:
-                        # ██ 필수 쟁점 보충 삽입 — 질문 관련 법령만 ██
-                        json_data = enforce_mandatory_issues(json_data, st.session_state.laws_db, user_query=safe_query)
+                        # ██ 필수 쟁점 보충 삽입 — 리비전 비교 모드에서는 건너뜀 ██
+                        if "Revision Compare" not in actual_model:
+                            json_data = enforce_mandatory_issues(json_data, st.session_state.laws_db, user_query=safe_query)
                         
                         citation_results = verify_citations(json_data.get("cited_laws", []), st.session_state.laws_db)
                         precedent_results = verify_precedents(json_data.get("cited_precedents", []))
