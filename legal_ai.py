@@ -497,6 +497,12 @@ def build_system_gemini_stage1(docs, laws_db):
         "5. 구법(폐지/개정)이 아닌 현행 법령만 인용할 것.\n"
         "6. 판례 내용만 서술하고 사건번호를 생략하는 것은 금지. 번호 없으면 판례 미인용.\n\n"
 
+        "██ B2B/B2C 구분 규칙 ██\n"
+        "면세점 거래는 대부분 B2B(사업자 간)이다.\n"
+        "'직매입 반품', '납품 단가', '수수료', '입점/퇴점' 등은 B2B → 소비자기본법 적용 금지.\n"
+        "소비자기본법은 '소비자', '고객 클레임' 등 B2C 맥락이 명확할 때만 적용.\n\n"
+        "██ 사규 창작 금지 ██\n"
+        "DB에 실제 존재하는 사규명만 인용. 존재하지 않는 사규(예: '반품 절차 지침')를 만들어내지 말 것. 없으면 '해당 규정 없음'.\n\n"
         "당신은 면세점 공정거래 법률 리서처입니다.\n"
         "당신의 역할은 '최종 판단'이 아니라 '정확한 데이터 수집'입니다.\n"
         "사용자의 질문을 분석하여 관련 사규 조항과 법령/판례를 수집하고,\n"
@@ -1151,6 +1157,16 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "DB 미등록 법령도 Placeholder를 사용하라. 예: {{관세법_제269조제2항_5년이하징역또는관세액10배이하벌금}}\n\n"
         "██ 규칙 5 — 용어 ██\n"
         "'~팀' 금지 → '~담당부서'. 새 법령 추가 인용 금지.\n\n"
+        "██ 규칙 5.5 — B2B/B2C 구분 (절대 규칙) ██\n"
+        "면세점의 거래는 대부분 B2B(사업자 간)이다. 다음 규칙을 준수하라:\n"
+        "① '직매입 반품', '납품 단가', '수수료', '입점/퇴점' 등은 B2B 거래 → 소비자기본법 적용 금지.\n"
+        "② 소비자기본법은 질문에 '소비자', '고객', '소비자 클레임', '소비자 피해' 등 B2C 맥락이 명확할 때만 적용.\n"
+        "③ B2B 반품 질문에 소비자기본법 쟁점을 생성하는 것은 할루시네이션이다. 절대 금지.\n\n"
+        "██ 규칙 5.6 — 사규 창작 금지 (절대 규칙) ██\n"
+        "applicable_rule, rule_analysis에 사규명을 기재할 때:\n"
+        "① 검증 데이터에 실제 존재하는 사규명만 인용 가능. 존재하지 않는 사규를 창작하는 것은 금지.\n"
+        "② 검증 데이터에 해당 사규가 없으면 '해당 없음'으로 기재.\n"
+        "③ '반품 절차 지침', '보세물품 관리지침' 등 존재하지 않는 가상의 사규명을 만들어내지 마라.\n\n"
         "██ 규칙 6 — 문체 (절대 규칙) ██\n"
         "summary, law_analysis, rule_analysis, recommendation, verdict_reason, action_plan 모든 필드에 적용:\n"
         "① 개조식: 반드시 불릿('-')으로 3~4개 핵심 포인트 나열. 줄글(서술형 문단) 금지.\n"
@@ -2480,6 +2496,11 @@ def generate_review_docx(json_data, detail_text, query_text):
         if json_data.get("verdict_reason"):
             doc.add_paragraph(json_data["verdict_reason"])
 
+        # ── MD Action Plan (결론 바로 다음) ──
+        if json_data.get("action_plan"):
+            _add_shaded_heading(doc, "MD Action Plan", level=2, shade_color=SHADE_H2)
+            doc.add_paragraph(json_data["action_plan"])
+
         doc.add_paragraph("")
 
         # ── 쟁점별 분석 (화면의 expander 구조와 동일) ──
@@ -2545,11 +2566,6 @@ def generate_review_docx(json_data, detail_text, query_text):
                     run_rec.font.color.rgb = RGBColor(0, 80, 160)
 
                 doc.add_paragraph("")  # 쟁점 간 간격
-
-        # ── MD Action Plan ──
-        if json_data.get("action_plan"):
-            _add_shaded_heading(doc, "MD Action Plan", level=2, shade_color=SHADE_H2)
-            doc.add_paragraph(json_data["action_plan"])
 
         # ── 수정 대안 조항 (보라 음영 박스) ──
         alt = json_data.get("alternative_clause")
@@ -3485,9 +3501,14 @@ def main():
         with st.chat_message(msg["role"], avatar="🤝" if msg["role"] == "assistant" else "👤"):
             if msg["role"] == "assistant" and msg.get("json_data"):
                 jd = msg["json_data"]
+                # ── 결론 → 액션플랜 → 쟁점 순서 ──
                 render_verdict_badge(jd.get("verdict", ""))
                 st.markdown(f"**📋 {jd.get('summary', '')}**")
-                # 4번: 인용 검증 실패 경고
+                # 액션플랜 (결론 바로 다음)
+                if jd.get("action_plan"):
+                    st.markdown("### 📌 MD Action Plan")
+                    st.info(jd["action_plan"])
+                # 인용 검증 실패 경고
                 cit_results = msg.get("citation_results", [])
                 if cit_results and not all(cr["verified"] for cr in cit_results):
                     unverified = [cr["citation"] for cr in cit_results if not cr["verified"]]
@@ -3498,6 +3519,8 @@ def main():
                         unverified_links.append(f"[{uv}]({link})")
                     st.warning("⚠️ 다음 법령 인용의 DB 검증이 완료되지 않았습니다.\n\n사내변호사에게 해당 조문의 현행 유효 여부를 반드시 확인받으세요.")
                     st.markdown("🔗 " + " | ".join(unverified_links))
+                # 쟁점 (사유)
+                st.markdown("### ⚖️ 쟁점별 교차 분석")
                 render_issues_table(jd.get("issues", []), msg.get("citation_results", []))
                 if jd.get("alternative_clause"):
                     render_alternative_clause(jd["alternative_clause"])
@@ -3614,13 +3637,19 @@ def main():
                         msg_data["citation_results"] = citation_results
                         msg_data["precedent_results"] = precedent_results
 
+                        # ── 결론 → 액션플랜 → 검증 → 쟁점 순서 ──
                         render_verdict_badge(json_data.get("verdict", ""))
                         st.markdown(f"**📋 {json_data.get('summary', '')}**")
-                        
+
+                        # 액션플랜 (결론 바로 다음)
+                        if json_data.get("action_plan"):
+                            st.markdown("### 📌 MD Action Plan")
+                            st.info(json_data["action_plan"])
+
                         # 법령 인용 검증 결과
                         db_verified = [cr for cr in citation_results if cr["verified"]]
                         db_unverified = [cr for cr in citation_results if not cr["verified"]]
-                        
+
                         if db_verified:
                             verified_items = []
                             for cr in db_verified:
@@ -3633,7 +3662,7 @@ def main():
                                 verified_items.append(f"✅ {cr['citation']}{date_info}")
                             with st.expander(f"📚 DB 검증 완료 법령 ({len(db_verified)}건)", expanded=False):
                                 st.markdown("\n".join(verified_items))
-                        
+
                         if db_unverified:
                             unverified_links = []
                             for cr in db_unverified:
@@ -3642,7 +3671,7 @@ def main():
                                 unverified_links.append(f"[{cr['citation']}]({link})")
                             st.warning(f"⚠️ DB 미등록 법령 {len(db_unverified)}건 — 국가법령정보센터에서 현행 여부를 확인하세요.")
                             st.markdown("🔗 " + " | ".join(unverified_links))
-                        
+
                         # 판례 검증 결과 + 할루시네이션 차단 표시
                         gk_meta = st.session_state.get("_gatekeeper_meta", {})
                         if gk_meta:
@@ -3666,7 +3695,9 @@ def main():
                                 st.warning(f"⚠️ 미확인 판례 {len(unverified_prec)}건 — 대법원 판례검색에서 실재 여부를 확인하세요.")
                                 prec_links = [f"[{p['case_no']}](https://glaw.scourt.go.kr/wsjo/panre/sjo100.do)" for p in unverified_prec]
                                 st.markdown("🔗 " + " | ".join(prec_links))
-                        
+
+                        # 쟁점 (사유)
+                        st.markdown("### ⚖️ 쟁점별 교차 분석")
                         render_issues_table(json_data.get("issues", []), citation_results)
                         if json_data.get("alternative_clause"): render_alternative_clause(json_data["alternative_clause"])
 
