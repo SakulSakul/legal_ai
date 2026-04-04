@@ -566,29 +566,17 @@ def build_system_gemini_stage1(docs, laws_db):
 
 def call_mcp_law(query, max_tokens=2048):
     """korean-law-mcp를 통해 법령/판례 조회.
-    MCP 실패 시 law.go.kr 직접 폴백.
+    세션 404 시 재연결 + law.go.kr 직접 폴백.
     """
     import requests as _req
     import re as _re
     
-    # 1차: MCP 시도
-    try:
-        client = init_anthropic()
-        
-        # Fly.io wake-up (sleep 상태일 수 있으므로 먼저 깨움)
-        try:
-            _req.get("https://korean-law-mcp.fly.dev/health", timeout=15)
-        except Exception:
-            pass  # wake-up 실패해도 MCP 시도
-        
-        # mcp-client-2025-11-20에서는 tools에 mcp_toolset 필수
-        # API 키를 시스템 프롬프트로 전달 (MCP 서버가 세션별 키 사용)
-        law_api_key = get_secret("LAW_OC") or "ocwhip3122"
-        
+    def _mcp_call(client, law_api_key):
+        """MCP 실제 호출"""
         response = client.beta.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=max_tokens,
-            system=f"법제처 API 키: {law_api_key}. 모든 법령 조회 도구 호출 시 apiKey 파라미터에 이 키를 사용하세요.",
+            system=f"법제처 API 키: {law_api_key}. 도구 호출 시 apiKey에 이 키를 사용하세요.",
             messages=[{"role": "user", "content": query}],
             mcp_servers=[{
                 "type": "url",
@@ -601,22 +589,52 @@ def call_mcp_law(query, max_tokens=2048):
             }],
             betas=["mcp-client-2025-11-20"]
         )
-        
         text_parts = []
         for block in response.content:
             if hasattr(block, 'text') and block.text:
                 text_parts.append(block.text)
-        
-        result = "\n".join(text_parts)
-        if result:
-            logger.info(f"MCP 조회 성공: {query[:30]}... → {len(result)}자")
-            return True, result
-        return False, "MCP 응답 비어있음"
-        
-    except Exception as e:
-        logger.warning(f"MCP 실패 ({str(e)[:200]}), law.go.kr 폴백")
+        return "\n".join(text_parts)
+    
+    # 1차: MCP 시도 (최대 2회 — 404 시 wake-up 후 재시도)
+    for attempt in range(2):
+        try:
+            client = init_anthropic()
+            law_api_key = get_secret("LAW_OC") or "ocwhip3122"
+            
+            # Fly.io wake-up
+            if attempt == 0:
+                try:
+                    hc = _req.get("https://korean-law-mcp.fly.dev/health", timeout=15)
+                    logger.info(f"MCP health: {hc.status_code}")
+                except Exception:
+                    logger.warning("MCP health check 실패 — 서버 sleep 상태일 수 있음")
+                    time.sleep(3)  # wake-up 대기
+            
+            result = _mcp_call(client, law_api_key)
+            
+            if result:
+                logger.info(f"MCP 조회 성공 (시도 {attempt+1}): {query[:30]}... → {len(result)}자")
+                return True, result
+            return False, "MCP 응답 비어있음"
+            
+        except Exception as e:
+            err_str = str(e)
+            logger.warning(f"MCP 시도 {attempt+1} 실패: {err_str[:200]}")
+            
+            # 404 Session not found → wake-up 후 재시도
+            if "404" in err_str or "Session not found" in err_str or "session" in err_str.lower():
+                logger.info("MCP 세션 만료 감지 — wake-up 후 재시도...")
+                try:
+                    _req.get("https://korean-law-mcp.fly.dev/health", timeout=20)
+                except Exception:
+                    pass
+                time.sleep(5)  # 서버 부팅 대기
+                continue
+            else:
+                break  # 404가 아닌 에러는 재시도 불필요
     
     # 2차: law.go.kr 직접 폴백
+    logger.info("MCP 실패 — law.go.kr 직접 폴백")
     try:
         law_match = _re.search(r"['\"]?([가-힣]+법[가-힣]*)['\"]?", query)
         if not law_match:
@@ -625,7 +643,7 @@ def call_mcp_law(query, max_tokens=2048):
         law_name = law_match.group(1)
         url = "https://www.law.go.kr/DRF/lawSearch.do"
         params = {"OC": "ocwhip3122", "target": "law", "type": "XML", "query": law_name}
-        res = _req.get(url, params=params, timeout=10)
+        res = _req.get(url, params=params, timeout=15)
         
         if res.status_code == 200 and "totalCnt" in res.text:
             root = ET.fromstring(res.text)
@@ -1070,10 +1088,10 @@ def call_claude(system_prompt, messages):
     except Exception as e:
         err_type, err_msg = classify_api_error(e)
         
-        # overloaded/server → 최대 3회 재시도 (3초→6초→12초)
-        if err_type in ("overloaded", "server"):
+        # overloaded/server/rate_limit → 지수 백오프 재시도 (2초→4초→8초)
+        if err_type in ("overloaded", "server", "rate_limit"):
             for retry in range(3):
-                wait = 3 * (2 ** retry)  # 3, 6, 12초
+                wait = 2 * (2 ** retry)  # 2, 4, 8초
                 logger.info(f"Claude {err_type} — {wait}초 대기 후 재시도 {retry+1}/3...")
                 time.sleep(wait)
                 try:
@@ -1103,16 +1121,36 @@ def call_claude(system_prompt, messages):
         debug_info = f"(system={sys_chars:,}자, msg={msg_chars:,}자)"
         return f"⚠️ [{label_map.get(err_type, '오류')}] Claude: {err_msg} {debug_info}"
 
-def call_gemini(system_prompt, messages):
+def sanitize_html(text):
+    """LLM 응답에서 HTML/CSS 태그를 제거하고 순수 마크다운만 남김."""
+    import re as _re
+    # <style>...</style> 블록 전체 제거
+    text = _re.sub(r'<style[^>]*>.*?</style>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
+    # <script>...</script> 블록 전체 제거
+    text = _re.sub(r'<script[^>]*>.*?</script>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
+    # HTML 태그 제거 (마크다운은 유지)
+    text = _re.sub(r'</?(?:div|span|table|tr|td|th|thead|tbody|p|br|hr|h[1-6]|ul|ol|li|a|img|section|article|header|footer|nav|main|aside|figure|figcaption)[^>]*>', '', text, flags=_re.IGNORECASE)
+    # CSS 인라인 스타일 잔여물 제거
+    text = _re.sub(r'style="[^"]*"', '', text, flags=_re.IGNORECASE)
+    text = _re.sub(r"style='[^']*'", '', text, flags=_re.IGNORECASE)
+    # 빈 줄 정리
+    text = _re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def call_gemini(system_prompt, messages, is_fallback=False):
     from google.genai import types
     client = init_gemini()
+    
+    # 폴백 모드일 때 HTML 생성 금지 지시 추가
+    if is_fallback:
+        system_prompt += "\n\nSystem Constraint: 당신은 백엔드 데이터 처리 엔진입니다. 절대 HTML, CSS, XML 태그를 생성하지 마십시오. 모든 출력은 오직 순수 Markdown 형식으로만 반환해야 합니다."
     
     last_error_type = None
     
     for model_name in GEMINI_MODELS:
-        # rate_limit 에러 시 동일 API 키 쿼터를 공유하므로 다음 모델로 폴백해도 무의미
         if last_error_type == "rate_limit":
-            logger.info(f"Gemini rate limit 발생 — 동일 쿼터 공유로 {model_name} 폴백 건너뜀")
+            logger.info(f"Gemini rate limit — 동일 쿼터 공유로 {model_name} 폴백 건너뜀")
             continue
             
         try:
@@ -1129,12 +1167,14 @@ def call_gemini(system_prompt, messages):
                     tools=[types.Tool(google_search=types.GoogleSearch())],
                 ),
             )
-            return response.text
+            result = response.text
+            # HTML 새니타이징 (Gemini가 HTML을 생성했을 경우 방어)
+            result = sanitize_html(result)
+            return result
         except Exception as e:
             logger.error(f"Gemini ({model_name}) 오류: {e}")
             last_error_type, last_err_msg = classify_api_error(e)
             
-            # 마지막 모델이거나 rate_limit(공유 쿼터)인 경우 즉시 에러 반환
             is_last = (model_name == GEMINI_MODELS[-1])
             if is_last or last_error_type == "rate_limit":
                 label_map = {
@@ -1143,8 +1183,7 @@ def call_gemini(system_prompt, messages):
                     "server": "서버 통신 장애",
                     "unknown": "통신 오류",
                 }
-                return f"⚠️ [{label_map[last_error_type]}] Gemini: {last_err_msg}"
-            # auth 에러도 같은 키를 쓰므로 폴백 무의미
+                return f"⚠️ [{label_map.get(last_error_type, '오류')}] Gemini: {last_err_msg}"
             if last_error_type == "auth":
                 return f"⚠️ [API 인증 오류] Gemini: {last_err_msg}"
             continue
@@ -1627,6 +1666,8 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
             fallback_text = gemini_reply
             if json_match:
                 fallback_text = gemini_reply[json_match.end():].strip() or gemini_reply
+            # HTML 새니타이징 (Gemini가 HTML을 생성했을 경우 방어)
+            fallback_text = sanitize_html(fallback_text)
             return fallback_text, "Gemini (Claude 우회)"
         
         # 성공 — JSON 먼저 파싱, 후처리는 detail_text에만 적용
