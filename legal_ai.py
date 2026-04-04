@@ -2476,19 +2476,59 @@ def _wrap_saryu_brackets(text):
 
 
 def render_verdict_badge(verdict, summary=""):
-    """결론 배지 + 요약을 하나의 강조 블록으로 렌더링"""
+    """결론 배지 + 요약을 시각적 위계가 명확한 HTML 블록으로 렌더링"""
     badges = {
-        "approved":    ("🟢 위험 요소 미발견 (사내변호사 확인 권장)", "success"),
-        "conditional": ("🟡 수정 필요 사항 발견", "warning"),
-        "rejected":    ("🔴 중대 위험 발견 (진행 보류 권고)", "error"),
+        "approved":    ("🟢 위험 요소 미발견", "(사내변호사 확인 권장)", "#E8F5E9", "#2E7D32"),
+        "conditional": ("🟡 수정 필요 사항 발견", "", "#FFF8E1", "#F57F17"),
+        "rejected":    ("🔴 중대 위험 발견", "(진행 보류 권고)", "#FCE4EC", "#C62828"),
     }
-    label, msg_type = badges.get(verdict, ("⚪ 판단 보류", "info"))
-    if summary:
-        # 결론 + 요약을 하나의 강조 블록으로 통합
-        block_text = f"**{label}**\n\n📋 **{summary}**"
-        getattr(st, msg_type)(block_text)
-    else:
-        getattr(st, msg_type)(label)
+    label, sub, bg_color, text_color = badges.get(verdict, ("⚪ 판단 보류", "", "#F5F5F5", "#616161"))
+
+    # summary에서 마크다운 ** 제거 (raw text로 사용)
+    clean_summary = summary.replace("**", "").strip() if summary else ""
+
+    # 요약 텍스트를 줄 단위로 분리하여 리스트 형태로
+    summary_html = ""
+    if clean_summary:
+        lines = [l.strip() for l in clean_summary.split("\n") if l.strip()]
+        if len(lines) == 1:
+            summary_html = f'<div style="font-size:15px;line-height:1.6;margin-top:10px;color:#333;">{lines[0]}</div>'
+        else:
+            items = "".join(f"<li>{l.lstrip('- •')}</li>" for l in lines)
+            summary_html = f'<ul style="font-size:14px;line-height:1.8;margin-top:10px;color:#333;padding-left:20px;">{items}</ul>'
+
+    html = f"""
+    <div style="background:{bg_color};border-left:4px solid {text_color};border-radius:4px;padding:16px 20px;margin-bottom:12px;">
+        <div style="font-size:20px;font-weight:700;color:{text_color};">{label} <span style="font-size:13px;font-weight:400;color:#888;">{sub}</span></div>
+        {summary_html}
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _section_header(icon, title):
+    """통일된 섹션 헤더 (h3보다 작고 정돈된 스타일)"""
+    st.markdown(
+        f'<div style="font-size:15px;font-weight:600;color:#333;padding:8px 0 4px 0;'
+        f'border-bottom:2px solid #E8E8E8;margin:16px 0 8px 0;">'
+        f'{icon} {title}</div>',
+        unsafe_allow_html=True
+    )
+
+def _detect_doc_type_label(rule_text):
+    """applicable_rule 텍스트에서 문서 종류를 판별하여 라벨 반환"""
+    if not rule_text or rule_text in ("해당 없음", "없음", "해당 규정 없음"):
+        return "🏛️ 적용 사규", "사규"
+    _t = rule_text
+    # 계약서 판별
+    if any(kw in _t for kw in ["계약서", "기본계약", "거래계약"]):
+        return "📄 적용 계약서", "계약서"
+    # 약정서 판별
+    if any(kw in _t for kw in ["약정서", "약정"]):
+        return "📝 적용 약정서", "약정서"
+    # 기본: 사규
+    return "🏛️ 적용 사규", "사규"
+
 
 def render_issues_table(issues, citation_results):
     if not issues: return
@@ -2523,7 +2563,8 @@ def render_issues_table(issues, citation_results):
             with col2:
                 rule = issue.get("applicable_rule", "")
                 if rule:
-                    st.markdown(f"**🏛️ 적용 사규:** {_wrap_saryu_brackets(rule)}")
+                    _doc_label, _doc_type = _detect_doc_type_label(rule)
+                    st.markdown(f"**{_doc_label}:** {_wrap_saryu_brackets(rule)}")
                 if issue.get("rule_analysis"):
                     st.caption(_wrap_saryu_brackets(issue["rule_analysis"]))
 
@@ -2533,7 +2574,7 @@ def render_issues_table(issues, citation_results):
 
 def render_alternative_clause(clause):
     if clause and clause != "null":
-        st.markdown("### 📝 수정 대안 제안")
+        _section_header("📝", "수정 대안 제안")
         st.caption("아래 내용을 참고하여 수정 방향을 검토하세요. (AI 초안이므로 반드시 법무 담당자 확인 필요)")
         st.info(clause)
 
@@ -2727,15 +2768,16 @@ def generate_review_docx(json_data, detail_text, query_text):
                     run_label.bold = True
                     p.add_run(issue["law_analysis"])
 
-                # 🏛️ 적용 사규 + 사규 관점
+                # 적용 사규/계약서/약정서 + 관점
+                _dlabel, _dtype = _detect_doc_type_label(issue.get("applicable_rule", ""))
                 if issue.get("applicable_rule"):
                     p = doc.add_paragraph()
-                    run_label = p.add_run("🏛️ 적용 사규: ")
+                    run_label = p.add_run(f"{_dlabel}: ")
                     run_label.bold = True
                     p.add_run(_wrap_saryu_brackets(issue["applicable_rule"]))
                 if issue.get("rule_analysis"):
                     p = doc.add_paragraph()
-                    run_label = p.add_run("🔍 사규 관점: ")
+                    run_label = p.add_run(f"🔍 {_dtype} 관점: ")
                     run_label.bold = True
                     p.add_run(_wrap_saryu_brackets(issue["rule_analysis"]))
 
@@ -2851,6 +2893,21 @@ def main():
     button[kind="secondary"]:hover {
         background-color: #000000 !important;
         color: #FFFFFF !important;
+    }
+
+    /* 6-a. 검토 결과 Alert 블록 (success/info 등) — 본문과 동일 크기 */
+    [data-testid="stAlert"] {
+        font-size: 14px !important;
+        line-height: 1.7 !important;
+    }
+    [data-testid="stAlert"] p {
+        font-size: 14px !important;
+    }
+
+    /* 6-b. Expander 제목 — 정돈된 크기 */
+    [data-testid="stExpander"] summary span {
+        font-size: 14px !important;
+        font-weight: 500 !important;
     }
 
     /* 6. 사이드바 */
@@ -3744,7 +3801,7 @@ def main():
                 render_verdict_badge(jd.get("verdict", ""), summary=jd.get("summary", ""))
                 # ── 2. MD Action Plan ──
                 if jd.get("action_plan"):
-                    st.markdown("### 📌 MD Action Plan")
+                    _section_header("📌", "MD Action Plan")
                     st.success(jd["action_plan"])
                 # ── 3. 수정 대안 제안 ──
                 if jd.get("alternative_clause"):
@@ -3767,7 +3824,7 @@ def main():
                                 _links.append(f"[{cr['citation']}](https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={_st})")
                             st.markdown("🔗 " + " | ".join(_links))
                 # ── 5. 쟁점별 교차 분석 ──
-                st.markdown("### ⚖️ 쟁점별 교차 분석")
+                _section_header("⚖️", "쟁점별 교차 분석")
                 render_issues_table(jd.get("issues", []), msg.get("citation_results", []))
                 # ── 6. 다운로드 ──
                 if jd.get("verdict"):
@@ -3858,7 +3915,7 @@ def main():
 
                         # ── 2. MD Action Plan ──
                         if json_data.get("action_plan"):
-                            st.markdown("### 📌 MD Action Plan")
+                            _section_header("📌", "MD Action Plan")
                             st.success(json_data["action_plan"])
 
                         # ── 3. 수정 대안 제안 ──
@@ -3903,7 +3960,7 @@ def main():
                                         st.caption(f"⚠️ {p['case_no']}")
 
                         # ── 5. 쟁점별 교차 분석 ──
-                        st.markdown("### ⚖️ 쟁점별 교차 분석")
+                        _section_header("⚖️", "쟁점별 교차 분석")
                         render_issues_table(json_data.get("issues", []), citation_results)
 
                         # ── 6. 다운로드 ──
