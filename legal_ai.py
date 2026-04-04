@@ -2408,14 +2408,20 @@ def _wrap_saryu_brackets(text):
     return text
 
 
-def render_verdict_badge(verdict):
+def render_verdict_badge(verdict, summary=""):
+    """결론 배지 + 요약을 하나의 강조 블록으로 렌더링"""
     badges = {
         "approved":    ("🟢 위험 요소 미발견 (사내변호사 확인 권장)", "success"),
         "conditional": ("🟡 수정 필요 사항 발견", "warning"),
         "rejected":    ("🔴 중대 위험 발견 (진행 보류 권고)", "error"),
     }
     label, msg_type = badges.get(verdict, ("⚪ 판단 보류", "info"))
-    getattr(st, msg_type)(label)
+    if summary:
+        # 결론 + 요약을 하나의 강조 블록으로 통합
+        block_text = f"**{label}**\n\n📋 **{summary}**"
+        getattr(st, msg_type)(block_text)
+    else:
+        getattr(st, msg_type)(label)
 
 def render_issues_table(issues, citation_results):
     if not issues: return
@@ -2859,15 +2865,23 @@ def main():
     with st.sidebar:
         st.markdown("## 🤝 공정거래 실무 어시스턴트 v2.1")
         st.caption("면세점 MD 바이어 전용")
-        
-        # 1. 자동 보안 마스킹 안내 (DLP) - 최상단 배치
-        st.markdown("### 🛡️ 정보보안 (DLP) 가동 중")
-        st.success(
-            "⚠️ **정보 유출 방지 시스템 작동 안내**\n\n"
-            "외부 클라우드 AI 서버로 당사의 핵심 기밀 및 협력사 정보가 유출되는 것을 원천 차단하기 위해, **문서 내 민감 정보는 모두 AI 전송 전에 자동 블라인드(마스킹) 처리됩니다.**"
-        )
-        st.caption("• **자동 차단:** 주민/외국인번호, 휴대전화, 이메일, 사업자/법인번호, 계좌번호, 당사 명칭", unsafe_allow_html=True)
-        st.caption("• **수동 차단:** 하단 텍스트 입력창에 기재한 '협력사명'", unsafe_allow_html=True)
+
+        # 1. DLP 보안 마스킹 — 전역 설정 (대화 시작 전 세팅)
+        with st.expander("🛡️ 정보보안 (DLP) 설정", expanded=False):
+            st.caption("주민번호·전화번호·이메일·사업자번호·당사 명칭은 **자동 마스킹**됩니다.")
+            if "dlp_partner" not in st.session_state:
+                st.session_state.dlp_partner = ""
+            st.session_state.dlp_partner = st.text_input(
+                "🏢 검토 대상 협력사명 (보안 마스킹)",
+                value=st.session_state.dlp_partner,
+                placeholder="예: 에르메스, 샤넬",
+                key="sidebar_dlp_partner",
+                help="입력된 협력사명은 AI 전송 시 █협력사█로 자동 치환됩니다."
+            )
+            if st.session_state.dlp_partner:
+                st.success(f"🔒 마스킹 대상: **{st.session_state.dlp_partner}**")
+            else:
+                st.caption("⚠️ 미입력 시 자동 마스킹만 적용됩니다.")
 
         # 법령 DB 업데이트 이력 (일반 사용자 대상)
         law_count = len(st.session_state.laws_db)
@@ -2969,8 +2983,28 @@ def main():
 
         st.divider()
 
-        # 5. 관리자용 DB 관리는 가장 아래 숨김 (Expander)
-        with st.expander("⚙️ 기준 문서 DB 관리 (관리자 전용)", expanded=False):
+        # 5. 관리자 패널 — 비밀번호 인증 게이트
+        if "admin_unlocked" not in st.session_state:
+            st.session_state.admin_unlocked = False
+
+        _admin_label = "🔓 관리자 도구 (인증됨)" if st.session_state.admin_unlocked else "🔐 관리자 모드"
+        with st.expander(_admin_label, expanded=False):
+            if not st.session_state.admin_unlocked:
+                admin_pw = st.text_input("관리자 비밀번호", type="password", key="admin_pw_input")
+                if st.button("인증", key="admin_auth_btn", use_container_width=True):
+                    _app_pw = os.environ.get("APP_PASSWORD", "")
+                    if admin_pw and admin_pw == _app_pw:
+                        st.session_state.admin_unlocked = True
+                        st.rerun()
+                    else:
+                        st.error("비밀번호가 올바르지 않습니다.")
+            else:
+                if st.button("🔒 관리자 모드 잠금", key="admin_lock", use_container_width=True):
+                    st.session_state.admin_unlocked = False
+                    st.rerun()
+
+        if st.session_state.admin_unlocked:
+         with st.expander("⚙️ 기준 문서 DB 관리", expanded=False):
             law_count = len(st.session_state.laws_db)
             if law_count > 0:
                 # 최신 업데이트 일시 추출
@@ -3568,7 +3602,47 @@ def main():
     st.title("🤝 공정거래 실무 어시스턴트 v2.1")
     st.caption("MD·협력사 실무 Q&A & 계약·법령 Self-Check AI")
 
-    if not st.session_state.messages and st.session_state.docs:
+    # DLP 마스킹 대상 (사이드바에서 설정)
+    target_partner = st.session_state.get("dlp_partner", "")
+
+    # ── 탭 분리: 일반 자문 vs 계약서 교차 비교 ──
+    tab_chat, tab_revision = st.tabs(["💬 AI 법무 자문", "🔄 계약서 교차 비교"])
+
+    # ═══ TAB 2: 계약서 교차 비교 (리비전 비교) ═══
+    with tab_revision:
+        st.markdown("### 🔄 V1 vs V2 계약서 교차 비교")
+        st.info("당사 초안(V1)과 협력사 수정본(V2)을 업로드하면, AI가 변경된 독소조항을 찾아 비교 분석합니다.")
+        col_v1, col_v2 = st.columns(2)
+        with col_v1:
+            v1_file = st.file_uploader("📄 V1 (당사 표준 초안)", type=["docx"], key="v1_upload")
+        with col_v2:
+            v2_file = st.file_uploader("📝 V2 (협력사 수정본)", type=["docx"], key="v2_upload")
+        if v1_file and v2_file:
+            if st.button("⚖️ 교차 비교 분석 실행", type="primary", use_container_width=True, key="revision_run"):
+                v1_file.seek(0)
+                v2_file.seek(0)
+                v1_text = extract_text(v1_file.read())
+                v2_text = extract_text(v2_file.read())
+                if v1_text.startswith("(") and v1_text.endswith(")"):
+                    st.error(f"V1 파일 읽기 실패: {v1_text}")
+                elif v2_text.startswith("(") and v2_text.endswith(")"):
+                    st.error(f"V2 파일 읽기 실패: {v2_text}")
+                else:
+                    prompt = (
+                        f"[REVISION_COMPARE]\n"
+                        f"당사가 보낸 초안(V1)과 협력사가 회신한 수정본(V2)을 교차 비교해주세요.\n\n"
+                        f"[V1 당사 초안 내용]\n{v1_text}\n\n"
+                        f"[V2 협력사 수정본 내용]\n{v2_text}"
+                    )
+                    st.session_state["pending_input"] = apply_auto_masking(prompt, target_partner)
+                    st.rerun()
+        elif v1_file or v2_file:
+            st.warning("V1과 V2 파일을 모두 업로드해 주세요.")
+
+    # ═══ TAB 1: AI 법무 자문 (채팅) ═══
+    with tab_chat:
+
+      if not st.session_state.messages and st.session_state.docs:
         st.markdown("### 💡 AI 법무 자문 100% 활용 가이드")
         st.info(
             "본 시스템은 질문의 목적에 따라 **두 가지 수준의 맞춤형 자문**을 제공합니다.\n\n"
@@ -3588,14 +3662,13 @@ def main():
                     st.session_state["pending_input"] = q
                     st.rerun()
 
-    # 대화 히스토리 렌더링
-    for msg in st.session_state.messages:
+      # 대화 히스토리 렌더링
+      for msg in st.session_state.messages:
         with st.chat_message(msg["role"], avatar="🤝" if msg["role"] == "assistant" else "👤"):
             if msg["role"] == "assistant" and msg.get("json_data"):
                 jd = msg["json_data"]
                 # ── 결론 → 액션플랜 → 쟁점 순서 ──
-                render_verdict_badge(jd.get("verdict", ""))
-                st.markdown(f"**📋 {jd.get('summary', '')}**")
+                render_verdict_badge(jd.get("verdict", ""), summary=jd.get("summary", ""))
                 # 액션플랜 (결론 바로 다음)
                 if jd.get("action_plan"):
                     st.markdown("### 📌 MD Action Plan")
@@ -3628,44 +3701,10 @@ def main():
                 model_label = msg.get("model", "")
                 st.caption(f"⏱️ {msg['time']:.1f}초 · {model_label}")
 
-    # ── 입력 처리 ────────────────────────────────────────────
+    # ── 입력 처리 (깔끔한 하단) ──────────────────────────────
     if st.session_state.docs:
-        
-        st.markdown("---")
-        st.markdown("### 💬 신규 검토 요청")
-        
-        st.info("🔒 **기밀 유출 방지 시스템:** 당사의 기밀이나 특정 브랜드명, 상호명이 외부 AI로 전송되어 학습에 오남용되는 것을 막기 위해 아래 칸에 **검토 대상 협력사명**을 기재해 주세요. 해당 단어는 문서와 채팅에서 모두 가려집니다.")
-        target_partner = st.text_input("🏢 검토 대상 협력사명 입력 (보안 마스킹용)", placeholder="예: 에르메스, 샤넬 (입력 시 █협력사█로 자동 치환)", key="target_partner")
 
-        with st.expander("🔄 리비전 교차 비교 (당사 초안 vs 협력사 수정본)", expanded=False):
-            st.info("당사 초안(기준)과 협력사가 수정한 문서를 나란히 업로드하면, AI변호사가 변경된 독소조항을 찾아 비교 분석합니다.")
-            col1, col2 = st.columns(2)
-            with col1: v1_file = st.file_uploader("📄 V1 (당사 표준 초안)", type=["docx"], key="v1_upload")
-            with col2: v2_file = st.file_uploader("📝 V2 (협력사 수정본)", type=["docx"], key="v2_upload")
-            if v1_file and v2_file:
-                if st.button("교차 비교 분석 실행", type="primary", use_container_width=True):
-                    v1_file.seek(0)
-                    v2_file.seek(0)
-                    v1_bytes, v2_bytes = v1_file.read(), v2_file.read()
-                    v1_text = extract_text(v1_bytes)
-                    v2_text = extract_text(v2_bytes)
-                    
-                    # 추출 실패 체크
-                    if v1_text.startswith("(") and v1_text.endswith(")"):
-                        st.error(f"V1 파일 읽기 실패: {v1_text}")
-                    elif v2_text.startswith("(") and v2_text.endswith(")"):
-                        st.error(f"V2 파일 읽기 실패: {v2_text}")
-                    else:
-                        prompt = (
-                            f"[REVISION_COMPARE]\n"
-                            f"당사가 보낸 초안(V1)과 협력사가 회신한 수정본(V2)을 교차 비교해주세요.\n\n"
-                            f"[V1 당사 초안 내용]\n{v1_text}\n\n"
-                            f"[V2 협력사 수정본 내용]\n{v2_text}"
-                        )
-                        st.session_state["pending_input"] = apply_auto_masking(prompt, target_partner)
-                        st.rerun()
-
-        chat_files = st.file_uploader("📎 검토할 파일 첨부 (협력사 회신본 등)", type=["docx"], accept_multiple_files=True, key="chat_uploader")
+        chat_files = st.file_uploader("📎 검토할 파일 첨부", type=["docx"], accept_multiple_files=True, key="chat_uploader")
         user_input = st.chat_input("검토할 텍스트를 입력하거나 파일을 첨부하세요...")
         query = user_input or st.session_state.pop("pending_input", None)
 
@@ -3734,8 +3773,7 @@ def main():
                         msg_data["precedent_results"] = precedent_results
 
                         # ── 결론 → 액션플랜 → 검증 → 쟁점 순서 ──
-                        render_verdict_badge(json_data.get("verdict", ""))
-                        st.markdown(f"**📋 {json_data.get('summary', '')}**")
+                        render_verdict_badge(json_data.get("verdict", ""), summary=json_data.get("summary", ""))
 
                         # 액션플랜 (결론 바로 다음)
                         if json_data.get("action_plan"):
@@ -3862,7 +3900,7 @@ def main():
                 st.warning("미등록")
         
         st.markdown("---")
-        st.info("👈 사이드바 하단 **'⚙️ 기준 문서 DB 관리'**를 열고, 문서 유형을 선택한 뒤 Word 파일을 업로드하세요.\n\n최소 **사규 1개 + 계약서 1개**가 등록되면 AI 검토를 시작할 수 있습니다.")
+        st.info("👈 사이드바 하단 **🔐 관리자 모드** 인증 후 **'⚙️ 기준 문서 DB 관리'**에서 문서를 업로드하세요.\n\n최소 **사규 1개 + 계약서 1개**가 등록되면 AI 검토를 시작할 수 있습니다.")
 
 if __name__ == "__main__":
     main()
