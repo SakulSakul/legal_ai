@@ -507,6 +507,11 @@ def build_system_gemini_stage1(docs, laws_db):
         "당신의 역할은 '최종 판단'이 아니라 '정확한 데이터 수집'입니다.\n"
         "사용자의 질문을 분석하여 관련 사규 조항과 법령/판례를 수집하고,\n"
         "반드시 아래 JSON 형식으로만 출력하세요. 마크다운 설명은 작성하지 마세요.\n\n"
+        "██ 사규 검색 필수 규칙 ██\n"
+        "사규/계약서/약정서 원문 전체를 꼼꼼히 읽고, 질문 키워드와 관련된 조항을 모두 saryu_findings에 포함시켜라.\n"
+        "예: '반품' 질문이면 사규 원문에서 '반품', '반환', '반출', '환입', '인도', '하자' 등 유사어가 포함된 조항을 빠짐없이 찾아라.\n"
+        "⚠️ saryu_findings가 빈 배열 []이면 안 된다. 관련 조항이 정말 없을 때만 빈 배열을 허용.\n"
+        "조항을 찾았으면 해당 원문을 content에 200자 이상 충분히 발췌하라.\n\n"
 
         "```json\n"
         "{\n"
@@ -917,7 +922,7 @@ def verify_law_via_api(law_name, article):
         return False, ""
 
 
-def gatekeeper_process(gemini_raw_json, laws_db, docs=None):
+def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
     """Stage 2: Gatekeeper — Gemini의 Raw Data를 3중 검증 후 정제.
     1차: 사내 DB(124건+) 원문 대조
     2차: law.go.kr API 실시간 판례 검증 (할루시네이션 차단)
@@ -933,21 +938,80 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None):
     verified_precedents = []
     dropped_precedents = []
     
-    # 1. 사규 분석 결과 → Gemini가 못 찾았으면 원문 직접 주입
+    # 1. 사규 분석 결과 → Gemini가 못 찾았으면 키워드 기반 원문 직접 주입
     saryu_findings = gemini_raw_json.get("saryu_findings", [])
     if saryu_findings:
         refined_parts.append("━━━ [사규 분석 결과 (Gemini 확인)] ━━━")
         for sf in saryu_findings:
             refined_parts.append(f"- [{sf.get('relevance','?')}] {sf.get('source','?')} {sf.get('clause','')}: {sf.get('content','')[:200]}")
-    elif docs:
-        # Gemini가 사규를 못 찾았으면 원문 핵심 부분 직접 주입
-        refined_parts.append("━━━ [사규 원문 — 시스템 강제 주입 (Gemini 누락)] ━━━")
-        for doc in docs:
-            if doc.get("cat") in ("saryu", "contract", "yakjeong"):
+
+    # Gemini가 못 찾았거나, 찾은 게 적으면 → 키워드 기반 원문 검색으로 보충
+    if docs and len(saryu_findings) < 2:
+        import re as _re
+        # 사용자 질문에서 핵심 키워드 추출
+        query_text = gemini_raw_json.get("query_summary", "")
+        if not query_text and user_query:
+            query_text = user_query
+        # 키워드: 질문의 명사/동사 핵심어
+        _keywords = set()
+        for kw in ["반품", "반출", "반입", "직매입", "특정매입", "위탁매입", "납품", "인도",
+                    "입점", "퇴점", "판촉", "감액", "수수료", "인테리어", "리뉴얼",
+                    "파견", "임대", "계약", "해지", "해제", "위약", "손해배상",
+                    "환불", "교환", "하자", "검수", "정산", "마진", "단가"]:
+            if kw in query_text:
+                _keywords.add(kw)
+        if not _keywords:
+            # 질문이 짧으면 단어 전부 키워드로
+            _keywords = set(query_text.replace(" ", ""))
+
+        if _keywords:
+            refined_parts.append("━━━ [사규/계약서 원문 — 키워드 기반 검색 결과] ━━━")
+            _found_any = False
+            for doc in docs:
+                if doc.get("cat") not in ("saryu", "contract", "yakjeong"):
+                    continue
+                full_text = doc.get("text", "")
                 label = doc.get("label", doc.get("name", ""))
-                text_preview = doc.get("text", "")[:500]
-                refined_parts.append(f"📄 [{label}]\n{text_preview}")
-        logger.info("Gatekeeper: Gemini 사규 누락 → 원문 강제 주입")
+                if not full_text:
+                    continue
+
+                # 키워드가 포함된 문단(paragraph) 추출
+                paragraphs = _re.split(r'\n\s*\n|\n(?=제\d+조|\d+\.)', full_text)
+                matched_paragraphs = []
+                for para in paragraphs:
+                    para_stripped = para.strip()
+                    if len(para_stripped) < 10:
+                        continue
+                    if any(kw in para_stripped for kw in _keywords):
+                        matched_paragraphs.append(para_stripped[:500])
+
+                if matched_paragraphs:
+                    _found_any = True
+                    refined_parts.append(f"📄 [{label}] — 키워드 매칭 {len(matched_paragraphs)}건")
+                    for mp in matched_paragraphs[:12]:  # 최대 12개 문단
+                        refined_parts.append(f"  → {mp}")
+                    logger.info(f"Gatekeeper 사규 키워드 검색: [{label}] {len(matched_paragraphs)}건 매칭 (키워드: {_keywords})")
+
+            if not _found_any:
+                # 키워드 매칭 실패 → 각 문서의 앞/중간/끝 구간을 균등 샘플링
+                refined_parts.append("━━━ [사규 원문 — 키워드 미매칭, 균등 샘플링 주입] ━━━")
+                for doc in docs:
+                    if doc.get("cat") in ("saryu", "contract", "yakjeong"):
+                        label = doc.get("label", doc.get("name", ""))
+                        full = doc.get("text", "")
+                        doc_len = len(full)
+                        if doc_len <= 5000:
+                            refined_parts.append(f"📄 [{label}] (전문)\n{full}")
+                        else:
+                            # 앞 2000자 + 중간 2000자 + 끝 1000자 = 5000자
+                            mid_start = doc_len // 2 - 1000
+                            sample = (
+                                full[:2000] + "\n...(중략)...\n" +
+                                full[mid_start:mid_start+2000] + "\n...(중략)...\n" +
+                                full[-1000:]
+                            )
+                            refined_parts.append(f"📄 [{label}] (샘플링 {doc_len}자 중 5000자)\n{sample}")
+                logger.info("Gatekeeper: 키워드 미매칭 → 균등 샘플링 주입")
     
     # 2. 법령 → 사내 DB 대조 + API 보조 검증
     law_findings = gemini_raw_json.get("law_findings", [])
@@ -1971,7 +2035,10 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
         
         # Stage 2: Gatekeeper — DB 원문 대조 + API 실시간 검증
         st.caption("🛡️ Stage 2: DB 원문 대조 + law.go.kr API 팩트체크 중...")
-        gatekeeper_meta, gatekeeper_text = gatekeeper_process(gemini_json, laws_db, docs)
+        # 사용자 질문 추출 (키워드 기반 사규 검색용)
+        _user_msgs = [m for m in messages if m.get("role") == "user"]
+        _uq = _user_msgs[-1]["content"][:500] if _user_msgs else ""
+        gatekeeper_meta, gatekeeper_text = gatekeeper_process(gemini_json, laws_db, docs, user_query=_uq)
         
         # Gatekeeper 결과 요약 표시
         if gatekeeper_meta and not gatekeeper_meta.get("error"):
