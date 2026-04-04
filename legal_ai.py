@@ -3049,8 +3049,23 @@ def main():
                                     if _stripped:
                                         reply = _stripped
                                     st.subheader(f"📝 AI 생성 초안 ({gen_model}, 검증 필요)")
-                                    st.code(reply, language="json")
-                                    
+
+                                    # JSON 파싱 → 보기 좋게 렌더링
+                                    try:
+                                        import json as _json
+                                        _block = _json.loads(reply)
+                                        _risk_icon = _block.get("risk_level", "")
+                                        _risk_lbl = _block.get("risk_label", "")
+                                        st.markdown(f"### {_risk_icon} {_block.get('title', '')}")
+                                        st.markdown(f"**위험도:** {_risk_icon} {_risk_lbl}")
+                                        st.markdown(f"**적용 법령:** {_block.get('applicable_laws', '')}")
+                                        st.markdown("**법리 분석:**")
+                                        st.markdown(_block.get("legal_analysis", ""))
+                                        with st.expander("원본 JSON (검증용)", expanded=False):
+                                            st.code(reply, language="json")
+                                    except Exception:
+                                        st.code(reply, language="json")
+
                                     # JSON 추가 버튼
                                     st.warning("⚠️ 아래 버튼을 누르기 전에 형량·조문번호를 반드시 검증하세요!")
                                     
