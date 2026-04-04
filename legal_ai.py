@@ -1492,11 +1492,18 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
             if matched_topics:
                 st.caption(f"🔒 블록 삽입 모드: {', '.join(matched_topics)} (형량 DB 보장)")
                 
-                # 사규 텍스트 추출
-                saryu_texts = []
-                for doc in docs:
-                    if doc.get("cat") in ("saryu", "contract", "yakjeong"):
-                        saryu_texts.append(f"[{doc.get('label', '')}]\n{doc.get('text', '')[:3000]}")
+                # WP1: 지능형 사규 리트리버 — 관련 조항만 추출 (50,000자 → 5,000자)
+                try:
+                    from saryu_retriever import retrieve_relevant_saryu
+                    compressed_saryu = retrieve_relevant_saryu(user_query, docs, max_chars=5000)
+                    saryu_texts = [compressed_saryu]
+                    logger.info(f"사규 리트리버: {len(compressed_saryu)}자 추출 (전체 대비 압축)")
+                except ImportError:
+                    logger.warning("saryu_retriever.py 미발견 — 기존 방식 폴백")
+                    saryu_texts = []
+                    for doc in docs:
+                        if doc.get("cat") in ("saryu", "contract", "yakjeong"):
+                            saryu_texts.append(f"[{doc.get('label', '')}]\n{doc.get('text', '')[:3000]}")
                 
                 # Gemini 호출 함수 래퍼
                 def gemini_call_fn(prompt):
@@ -2670,6 +2677,63 @@ def main():
                                         st.error(f"❌ {manual_law}에서 {manual_art}를 찾을 수 없습니다.")
                             except Exception as e:
                                 st.error(f"❌ 오류: {e}")
+
+            st.markdown("─" * 30)
+            
+            # WP2: 신규 쟁점 블록 자동 생성기
+            with st.expander("🧱 신규 쟁점 블록 생성 (AI 초안 + 전문가 검증)", expanded=False):
+                st.caption("AI가 MCP로 조문을 가져와 블록 초안을 생성합니다. 전문가가 검증 후 저장하면 100% 정확한 블록 삽입 모드로 작동합니다.")
+                
+                topic_name = st.text_input("쟁점 토픽명 (예: 병행수입, 표시광고)", key="block_topic")
+                topic_keywords = st.text_input("키워드 (쉼표 구분, 예: 병행수입,진정상품,grey market)", key="block_keywords")
+                topic_laws = st.text_area("관련 법령 (줄바꿈 구분, 예:\n상표법 제99조의2\n관세법 제235조)", key="block_laws", height=100)
+                
+                if st.button("🤖 AI 초안 생성", key="gen_block"):
+                    if topic_name and topic_laws:
+                        with st.spinner("MCP로 조문 조회 + Claude로 블록 초안 생성 중..."):
+                            try:
+                                # MCP로 조문 원문 가져오기
+                                law_texts = []
+                                for law_line in topic_laws.strip().split("\n"):
+                                    law_line = law_line.strip()
+                                    if law_line:
+                                        success, raw = call_mcp_law(f"'{law_line}' 조문 전문 알려줘")
+                                        if success:
+                                            law_texts.append(f"[{law_line}]\n{raw[:500]}")
+                                        else:
+                                            law_texts.append(f"[{law_line}] (조회 실패)")
+                                
+                                # Claude로 블록 초안 생성
+                                block_prompt = f"""legal_blocks.json 형식에 맞는 법률 분석 블록 초안을 생성하세요.
+
+토픽: {topic_name}
+관련 법령 조문 원문:
+{chr(10).join(law_texts)}
+
+아래 JSON 형식으로 출력:
+```json
+{{
+  "id": "토픽영문id",
+  "title": "쟁점 제목",
+  "risk_level": "🔴 또는 🟡",
+  "risk_label": "위험 또는 주의",
+  "applicable_laws": "법령명 제X조",
+  "legal_analysis": "법리 분석 (조문 원문의 형량을 정확히 인용)"
+}}
+```
+"""
+                                reply = call_claude(block_prompt, [{"role": "user", "content": block_prompt}])
+                                
+                                st.subheader("📝 AI 생성 초안 (검증 필요)")
+                                st.code(reply, language="json")
+                                st.warning("⚠️ 위 초안의 형량·조문번호를 반드시 검증한 후 legal_blocks.json에 추가하세요.")
+                                st.caption("MCP 조문 원문:")
+                                for lt in law_texts:
+                                    st.caption(lt[:200])
+                            except Exception as e:
+                                st.error(f"❌ 블록 생성 실패: {e}")
+                    else:
+                        st.warning("토픽명과 관련 법령을 입력하세요.")
 
             st.markdown("─" * 30)
 
