@@ -2426,18 +2426,21 @@ def render_verdict_badge(verdict, summary=""):
 def render_issues_table(issues, citation_results):
     if not issues: return
     risk_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+    risk_labels = {"high": "고위험", "medium": "주의", "low": "양호"}
     for issue in issues:
         risk = issue.get("risk_level", "medium")
         icon = risk_icons.get(risk, "⚪")
-        with st.expander(f"{icon} 쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '제목 없음')}", expanded=(risk == "high")):
+        rlabel = risk_labels.get(risk, "")
+        with st.expander(f"{icon} **[{rlabel}]** 쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '제목 없음')}", expanded=(risk == "high")):
             _tc = issue.get("target_clause", "")
-            # 짧은 원문(30자 이하) 또는 사용자 질문과 동일하면 도배 방지 → 숨김
             _user_msgs = [m for m in st.session_state.get("messages", []) if m.get("role") == "user"]
             _last_q = _user_msgs[-1]["content"][:200] if _user_msgs else ""
             _tc_skip = len(_tc) <= 30 or _tc.strip() == _last_q.strip()
             if _tc and not _tc_skip:
-                st.markdown(f"**📌 검토 대상 원문:**")
+                st.caption("📌 검토 대상 원문")
                 st.code(_tc, language="text")
+
+            # ── 법령 / 사규 2컬럼 ──
             col1, col2 = st.columns(2)
             with col1:
                 law_ref = issue.get("applicable_law", "")
@@ -2449,21 +2452,23 @@ def render_issues_table(issues, citation_results):
                             break
                     st.markdown(f"**⚖️ 적용 법령:** {law_ref} {verified}")
                 if issue.get("law_analysis"):
-                    st.markdown(f"**🔍 법령·행정규칙·판례 관점:** {issue['law_analysis']}")
+                    st.caption(issue["law_analysis"])
             with col2:
-                if issue.get("applicable_rule"):
-                    st.markdown(f"**🏛️ 적용 사규:** {_wrap_saryu_brackets(issue['applicable_rule'])}")
+                rule = issue.get("applicable_rule", "")
+                if rule:
+                    st.markdown(f"**🏛️ 적용 사규:** {_wrap_saryu_brackets(rule)}")
                 if issue.get("rule_analysis"):
-                    st.markdown(f"**🔍 사규 관점:** {_wrap_saryu_brackets(issue['rule_analysis'])}")
+                    st.caption(_wrap_saryu_brackets(issue["rule_analysis"]))
+
+            # ── 종합 실무 권고 (강조) ──
             if issue.get("recommendation"):
-                st.info(f"💡 **종합 실무 권고:** {issue['recommendation']}")
+                st.success(f"💡 **종합 실무 권고:** {issue['recommendation']}")
 
 def render_alternative_clause(clause):
     if clause and clause != "null":
-        st.markdown("---")
-        st.markdown("### 📝 수정 대안 조항 (초안)")
-        st.caption("아래 조항을 복사하여 협상 메일이나 수정 계약서에 활용하세요.")
-        st.code(clause, language="text")
+        st.markdown("### 📝 수정 대안 제안")
+        st.caption("아래 내용을 참고하여 수정 방향을 검토하세요. (AI 초안이므로 반드시 법무 담당자 확인 필요)")
+        st.info(clause)
 
 def _apply_shading(paragraph, hex_color):
     """단락에 배경 음영(shading) 적용 — Word '음영' 스타일과 동일 효과"""
@@ -2594,17 +2599,29 @@ def generate_review_docx(json_data, detail_text, query_text):
         if json_data.get("verdict_reason"):
             doc.add_paragraph(json_data["verdict_reason"])
 
-        # ── MD Action Plan (결론 바로 다음) ──
+        # ── 2. MD Action Plan ──
         if json_data.get("action_plan"):
-            _add_shaded_heading(doc, "MD Action Plan", level=2, shade_color=SHADE_H2)
-            doc.add_paragraph(json_data["action_plan"])
+            _add_shaded_heading(doc, "📌 MD Action Plan", level=2, shade_color=SHADE_H2)
+            p_ap = doc.add_paragraph(json_data["action_plan"])
+            _apply_shading(p_ap, "E2EFDA")  # 연한 초록 강조
+
+        # ── 3. 수정 대안 제안 ──
+        alt = json_data.get("alternative_clause")
+        if alt and alt != "null":
+            _add_shaded_heading(doc, "📝 수정 대안 제안", level=2, shade_color=SHADE_H2)
+            p_alt_desc = doc.add_paragraph("아래 내용을 참고하여 수정 방향을 검토하세요. (AI 초안이므로 반드시 법무 담당자 확인 필요)")
+            p_alt_desc.runs[0].font.size = Pt(8)
+            p_alt_desc.runs[0].font.color.rgb = RGBColor(128, 128, 128)
+            p_alt = doc.add_paragraph(alt)
+            p_alt.paragraph_format.left_indent = Cm(0.5)
+            _apply_shading(p_alt, SHADE_ALT)
 
         doc.add_paragraph("")
 
-        # ── 쟁점별 분석 (화면의 expander 구조와 동일) ──
+        # ── 4~5. 쟁점별 분석 ──
         issues = json_data.get("issues", [])
         if issues:
-            _add_shaded_heading(doc, "쟁점별 교차 분석", level=2, shade_color=SHADE_H2)
+            _add_shaded_heading(doc, "⚖️ 쟁점별 교차 분석", level=2, shade_color=SHADE_H2)
             risk_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
             risk_labels = {"high": "[위험]", "medium": "[주의]", "low": "[양호]"}
             risk_shades = {"high": "FCE4EC", "medium": "FFF8E1", "low": "E8F5E9"}
@@ -2665,18 +2682,7 @@ def generate_review_docx(json_data, detail_text, query_text):
 
                 doc.add_paragraph("")  # 쟁점 간 간격
 
-        # ── 수정 대안 조항 (보라 음영 박스) ──
-        alt = json_data.get("alternative_clause")
-        if alt and alt != "null":
-            _add_shaded_heading(doc, "📝 수정 대안 조항 (초안)", level=2, shade_color=SHADE_H2)
-            p_alt_desc = doc.add_paragraph("아래 조항을 복사하여 협상 메일이나 수정 계약서에 활용하세요.")
-            p_alt_desc.runs[0].font.size = Pt(8)
-            p_alt_desc.runs[0].font.color.rgb = RGBColor(128, 128, 128)
-            p_alt = doc.add_paragraph(alt)
-            p_alt.paragraph_format.left_indent = Cm(0.5)
-            _apply_shading(p_alt, SHADE_ALT)
-
-        # 상세 전문 제거 — 본문과 형량 불일치 문제의 근본 원인이므로 삭제
+        # (수정 대안 제안은 위쪽에서 이미 출력됨)
 
     else:
         # JSON 파싱 실패 시 원문 그대로
@@ -3667,31 +3673,39 @@ def main():
         with st.chat_message(msg["role"], avatar="🤝" if msg["role"] == "assistant" else "👤"):
             if msg["role"] == "assistant" and msg.get("json_data"):
                 jd = msg["json_data"]
-                # ── 결론 → 액션플랜 → 쟁점 순서 ──
+                # ── 1. 결론 ──
                 render_verdict_badge(jd.get("verdict", ""), summary=jd.get("summary", ""))
-                # 액션플랜 (결론 바로 다음)
+                # ── 2. MD Action Plan ──
                 if jd.get("action_plan"):
                     st.markdown("### 📌 MD Action Plan")
-                    st.info(jd["action_plan"])
-                # 인용 검증 실패 경고
-                cit_results = msg.get("citation_results", [])
-                if cit_results and not all(cr["verified"] for cr in cit_results):
-                    unverified = [cr["citation"] for cr in cit_results if not cr["verified"]]
-                    unverified_links = []
-                    for uv in unverified:
-                        search_term = re.sub(r'\s*제\d+조.*', '', uv).strip()
-                        link = f"https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={search_term}"
-                        unverified_links.append(f"[{uv}]({link})")
-                    st.warning("⚠️ 다음 법령 인용의 DB 검증이 완료되지 않았습니다.\n\n사내변호사에게 해당 조문의 현행 유효 여부를 반드시 확인받으세요.")
-                    st.markdown("🔗 " + " | ".join(unverified_links))
-                # 쟁점 (사유)
-                st.markdown("### ⚖️ 쟁점별 교차 분석")
-                render_issues_table(jd.get("issues", []), msg.get("citation_results", []))
+                    st.success(jd["action_plan"])
+                # ── 3. 수정 대안 제안 ──
                 if jd.get("alternative_clause"):
                     render_alternative_clause(jd["alternative_clause"])
-                
+                # ── 4. 법령 인용 검증 ──
+                cit_results = msg.get("citation_results", [])
+                if cit_results:
+                    _verified = [cr for cr in cit_results if cr["verified"]]
+                    _unverified = [cr for cr in cit_results if not cr["verified"]]
+                    with st.expander(f"📚 법령 인용 검증 ({len(_verified)}건 확인 / {len(_unverified)}건 미확인)", expanded=False):
+                        if _verified:
+                            for cr in _verified:
+                                _di = f" (DB: {cr['last_updated'][:10]})" if cr.get("last_updated") else ""
+                                st.caption(f"✅ {cr['citation']}{_di}")
+                        if _unverified:
+                            st.warning(f"⚠️ DB 미등록 {len(_unverified)}건 — 현행 여부 확인 필요")
+                            _links = []
+                            for cr in _unverified:
+                                _st = re.sub(r'\s*제\d+조.*', '', cr["citation"]).strip()
+                                _links.append(f"[{cr['citation']}](https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={_st})")
+                            st.markdown("🔗 " + " | ".join(_links))
+                # ── 5. 쟁점별 교차 분석 ──
+                st.markdown("### ⚖️ 쟁점별 교차 분석")
+                render_issues_table(jd.get("issues", []), msg.get("citation_results", []))
+                # ── 6. 다운로드 ──
                 if jd.get("verdict"):
                     docx_bytes = generate_review_docx(jd, msg.get("detail_text", ""), "")
+                    st.divider()
                     st.caption("⚠️ 본 문서를 사내변호사 확인 없이 외부에 발송하지 마세요.")
                     st.download_button("📥 검토의견서 다운로드 (.docx)", data=docx_bytes, file_name=f"검토의견서_{datetime.now().strftime('%Y%m%d_%H%M')}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"dl_{msg.get('msg_id', datetime.now().timestamp())}")
             else:
@@ -3772,70 +3786,62 @@ def main():
                         msg_data["citation_results"] = citation_results
                         msg_data["precedent_results"] = precedent_results
 
-                        # ── 결론 → 액션플랜 → 검증 → 쟁점 순서 ──
+                        # ── 1. 결론 ──
                         render_verdict_badge(json_data.get("verdict", ""), summary=json_data.get("summary", ""))
 
-                        # 액션플랜 (결론 바로 다음)
+                        # ── 2. MD Action Plan ──
                         if json_data.get("action_plan"):
                             st.markdown("### 📌 MD Action Plan")
-                            st.info(json_data["action_plan"])
+                            st.success(json_data["action_plan"])
 
-                        # 법령 인용 검증 결과
+                        # ── 3. 수정 대안 제안 ──
+                        if json_data.get("alternative_clause"):
+                            render_alternative_clause(json_data["alternative_clause"])
+
+                        # ── 4. 법령 인용 검증 + 판례 검증 ──
                         db_verified = [cr for cr in citation_results if cr["verified"]]
                         db_unverified = [cr for cr in citation_results if not cr["verified"]]
+                        if citation_results:
+                            with st.expander(f"📚 법령 인용 검증 ({len(db_verified)}건 확인 / {len(db_unverified)}건 미확인)", expanded=False):
+                                if db_verified:
+                                    for cr in db_verified:
+                                        _di = f" (DB: {cr['last_updated'][:10]})" if cr.get("last_updated") else ""
+                                        st.caption(f"✅ {cr['citation']}{_di}")
+                                if db_unverified:
+                                    st.warning(f"⚠️ DB 미등록 {len(db_unverified)}건 — 현행 여부 확인 필요")
+                                    _links = []
+                                    for cr in db_unverified:
+                                        _st = re.sub(r'\s*제\d+조.*', '', cr["citation"]).strip()
+                                        _links.append(f"[{cr['citation']}](https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={_st})")
+                                    st.markdown("🔗 " + " | ".join(_links))
 
-                        if db_verified:
-                            verified_items = []
-                            for cr in db_verified:
-                                date_info = ""
-                                if cr.get("last_updated"):
-                                    try:
-                                        date_info = f" (DB: {cr['last_updated'][:10]})"
-                                    except Exception:
-                                        pass
-                                verified_items.append(f"✅ {cr['citation']}{date_info}")
-                            with st.expander(f"📚 DB 검증 완료 법령 ({len(db_verified)}건)", expanded=False):
-                                st.markdown("\n".join(verified_items))
-
-                        if db_unverified:
-                            unverified_links = []
-                            for cr in db_unverified:
-                                search_term = re.sub(r'\s*제\d+조.*', '', cr["citation"]).strip()
-                                link = f"https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={search_term}"
-                                unverified_links.append(f"[{cr['citation']}]({link})")
-                            st.warning(f"⚠️ DB 미등록 법령 {len(db_unverified)}건 — 국가법령정보센터에서 현행 여부를 확인하세요.")
-                            st.markdown("🔗 " + " | ".join(unverified_links))
-
-                        # 판례 검증 결과 + 할루시네이션 차단 표시
+                        # 판례 검증 결과
                         gk_meta = st.session_state.get("_gatekeeper_meta", {})
                         if gk_meta:
                             dropped = gk_meta.get("dropped_precedents", [])
                             v_prec = gk_meta.get("verified_precedents", [])
                             if dropped:
-                                with st.expander(f"🚨 AI 할루시네이션 {len(dropped)}건 감지 — 시스템이 자동 차단", expanded=True):
+                                with st.expander(f"🚨 AI 할루시네이션 {len(dropped)}건 감지 — 자동 차단됨", expanded=False):
                                     for dp in dropped:
-                                        reason = dp.get('reason', '국가법령정보센터 미존재')
-                                        st.markdown(f"~~{dp['case_no']}~~ → **차단 사유:** {reason}")
-                                    st.caption("위 판례는 AI가 생성한 허위 정보로, 검토의견서에서 자동 제거되었습니다.")
+                                        st.caption(f"~~{dp['case_no']}~~ — {dp.get('reason', '미존재')}")
                             if v_prec:
-                                with st.expander(f"✅ API 검증 완료 판례 ({len(v_prec)}건)", expanded=False):
+                                with st.expander(f"✅ 판례 검증 완료 ({len(v_prec)}건)", expanded=False):
                                     for vp in v_prec:
-                                        title = vp.get('title', '')
-                                        title_str = f" ({title})" if title else ""
-                                        st.markdown(f"- ✅ {vp['case_no']}{title_str}: {vp.get('summary', '')[:100]}")
+                                        st.caption(f"✅ {vp['case_no']}: {vp.get('summary', '')[:80]}")
                         elif precedent_results:
                             unverified_prec = [p for p in precedent_results if not p["verified"]]
                             if unverified_prec:
-                                st.warning(f"⚠️ 미확인 판례 {len(unverified_prec)}건 — 대법원 판례검색에서 실재 여부를 확인하세요.")
-                                prec_links = [f"[{p['case_no']}](https://glaw.scourt.go.kr/wsjo/panre/sjo100.do)" for p in unverified_prec]
-                                st.markdown("🔗 " + " | ".join(prec_links))
+                                with st.expander(f"⚠️ 미확인 판례 {len(unverified_prec)}건", expanded=False):
+                                    for p in unverified_prec:
+                                        st.caption(f"⚠️ {p['case_no']}")
 
-                        # 쟁점 (사유)
+                        # ── 5. 쟁점별 교차 분석 ──
                         st.markdown("### ⚖️ 쟁점별 교차 분석")
                         render_issues_table(json_data.get("issues", []), citation_results)
-                        if json_data.get("alternative_clause"): render_alternative_clause(json_data["alternative_clause"])
 
+                        # ── 6. 다운로드 ──
                         docx_bytes = generate_review_docx(json_data, detail_text, display_query)
+                        st.divider()
                         st.caption("⚠️ 본 문서를 사내변호사 확인 없이 외부에 발송하지 마세요.")
                         st.download_button("📥 검토의견서 다운로드 (.docx)", data=docx_bytes, file_name=f"검토의견서_{datetime.now().strftime('%Y%m%d_%H%M')}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
