@@ -623,7 +623,7 @@ def call_mcp_law(query, max_tokens=2048):
             return False, "법령명 추출 실패"
         
         law_name = law_match.group(1)
-        url = "http://www.law.go.kr/DRF/lawSearch.do"
+        url = "https://www.law.go.kr/DRF/lawSearch.do"
         params = {"OC": "ocwhip3122", "target": "law", "type": "XML", "query": law_name}
         res = _req.get(url, params=params, timeout=10)
         
@@ -651,7 +651,7 @@ def verify_precedent_via_api(case_no, context_keywords=None):
     
     query = num_match.group(1)
     try:
-        url = "http://www.law.go.kr/DRF/lawSearch.do"
+        url = "https://www.law.go.kr/DRF/lawSearch.do"
         params = {"OC": "ocwhip3122", "target": "prec", "type": "XML", "query": query}
         res = requests.get(url, params=params, timeout=10)
         if res.status_code != 200:
@@ -685,7 +685,7 @@ def verify_law_via_api(law_name, article):
     """
     import requests
     try:
-        url = "http://www.law.go.kr/DRF/lawSearch.do"
+        url = "https://www.law.go.kr/DRF/lawSearch.do"
         params = {"OC": "ocwhip3122", "target": "law", "type": "XML", "query": law_name}
         res = requests.get(url, params=params, timeout=10)
         if res.status_code != 200:
@@ -2434,13 +2434,35 @@ def main():
                     with st.spinner("law.go.kr 연결 테스트 중..."):
                         try:
                             import requests as _req
-                            test_res = _req.get("http://www.law.go.kr/DRF/lawSearch.do?OC=ocwhip3122&target=law&type=XML&query=관세법", timeout=10)
+                            # HTTPS 사용 (Streamlit Cloud에서 HTTP 차단 가능)
+                            test_res = _req.get(
+                                "https://www.law.go.kr/DRF/lawSearch.do",
+                                params={"OC": "ocwhip3122", "target": "law", "type": "XML", "query": "관세법"},
+                                timeout=15, verify=True
+                            )
                             if test_res.status_code == 200 and "totalCnt" in test_res.text:
-                                st.success("✅ law.go.kr API 연결 정상")
+                                import xml.etree.ElementTree as _ET
+                                _root = _ET.fromstring(test_res.text)
+                                _total = _root.findtext('.//totalCnt') or "0"
+                                st.success(f"✅ law.go.kr API 연결 정상 (관세법 검색 결과: {_total}건)")
                             else:
-                                st.error(f"❌ API 응답 이상 (HTTP {test_res.status_code})")
+                                st.error(f"❌ API 응답 이상\n- HTTP 상태: {test_res.status_code}\n- 응답 본문: {test_res.text[:300]}")
                         except Exception as api_err:
-                            st.error(f"❌ 연결 실패: {api_err}")
+                            err_msg = str(api_err)
+                            st.error(f"❌ 연결 실패")
+                            st.code(err_msg[:500], language="text")
+                            if "ConnectionReset" in err_msg or "Connection aborted" in err_msg:
+                                st.info("💡 Streamlit Cloud에서 HTTP(80) 포트가 차단될 수 있습니다. HTTPS로 재시도 중...")
+                                try:
+                                    test_res2 = _req.get(
+                                        "https://www.law.go.kr/DRF/lawSearch.do",
+                                        params={"OC": "ocwhip3122", "target": "law", "type": "XML", "query": "형법"},
+                                        timeout=15
+                                    )
+                                    if test_res2.status_code == 200:
+                                        st.success("✅ HTTPS로 연결 성공!")
+                                except Exception as e2:
+                                    st.error(f"HTTPS도 실패: {str(e2)[:200]}")
                 
                 if st.button("🧪 MCP 연결 디버그", use_container_width=True, key="mcp_debug"):
                     with st.spinner("korean-law-mcp 테스트 중..."):
@@ -2607,7 +2629,7 @@ def main():
                                 import re as _re
                                 
                                 # 1. 법령 검색 → MST 번호 획득
-                                search_res = _req.get("http://www.law.go.kr/DRF/lawSearch.do",
+                                search_res = _req.get("https://www.law.go.kr/DRF/lawSearch.do",
                                     params={"OC": "ocwhip3122", "target": "law", "type": "XML", "query": manual_law}, timeout=10)
                                 search_root = ET.fromstring(search_res.text)
                                 mst = None
@@ -2632,7 +2654,7 @@ def main():
                                     st.error(f"❌ '{manual_law}' 법령을 찾을 수 없습니다.")
                                 else:
                                     # 2. 조문 상세 조회
-                                    detail_res = _req.get(f"http://www.law.go.kr/DRF/lawService.do?OC=ocwhip3122&target=law&MST={mst}&type=XML", timeout=15)
+                                    detail_res = _req.get(f"https://www.law.go.kr/DRF/lawService.do?OC=ocwhip3122&target=law&MST={mst}&type=XML", timeout=15)
                                     detail_root = ET.fromstring(detail_res.text)
                                     art_num = _re.sub(r'[^0-9]', '', manual_art.split("조의")[0])
                                     
@@ -2703,14 +2725,14 @@ def main():
                                         else:
                                             law_texts.append(f"[{law_line}] (조회 실패)")
                                 
-                                # Claude로 블록 초안 생성
+                                # Claude로 블록 초안 생성 (실패 시 Gemini 폴백)
                                 block_prompt = f"""legal_blocks.json 형식에 맞는 법률 분석 블록 초안을 생성하세요.
 
 토픽: {topic_name}
 관련 법령 조문 원문:
 {chr(10).join(law_texts)}
 
-아래 JSON 형식으로 출력:
+아래 JSON 형식으로만 출력 (마크다운 설명 없이):
 ```json
 {{
   "id": "토픽영문id",
@@ -2718,22 +2740,100 @@ def main():
   "risk_level": "🔴 또는 🟡",
   "risk_label": "위험 또는 주의",
   "applicable_laws": "법령명 제X조",
-  "legal_analysis": "법리 분석 (조문 원문의 형량을 정확히 인용)"
+  "legal_analysis": "법리 분석 (조문 원문의 형량을 정확히 인용. 숫자를 변형하지 말 것.)"
 }}
 ```
 """
-                                reply = call_claude(block_prompt, [{"role": "user", "content": block_prompt}])
+                                # Claude 우선, 실패 시 Gemini 폴백
+                                reply = None
+                                try:
+                                    reply = call_claude(block_prompt, [{"role": "user", "content": block_prompt}])
+                                    if reply.startswith("⚠️"):
+                                        raise Exception(reply)
+                                    gen_model = "Claude"
+                                except Exception as claude_err:
+                                    st.warning(f"Claude API 실패 ({str(claude_err)[:100]}), Gemini로 폴백...")
+                                    try:
+                                        reply = call_gemini(block_prompt, [{"role": "user", "content": block_prompt}])
+                                        gen_model = "Gemini"
+                                    except Exception as gemini_err:
+                                        st.error(f"❌ Claude·Gemini 모두 실패\nClaude: {str(claude_err)[:200]}\nGemini: {str(gemini_err)[:200]}")
                                 
-                                st.subheader("📝 AI 생성 초안 (검증 필요)")
-                                st.code(reply, language="json")
-                                st.warning("⚠️ 위 초안의 형량·조문번호를 반드시 검증한 후 legal_blocks.json에 추가하세요.")
-                                st.caption("MCP 조문 원문:")
-                                for lt in law_texts:
-                                    st.caption(lt[:200])
+                                if reply and not reply.startswith("⚠️"):
+                                    st.subheader(f"📝 AI 생성 초안 ({gen_model}, 검증 필요)")
+                                    st.code(reply, language="json")
+                                    
+                                    # JSON 추가 버튼
+                                    st.warning("⚠️ 아래 버튼을 누르기 전에 형량·조문번호를 반드시 검증하세요!")
+                                    
+                                    # 세션에 임시 저장
+                                    st.session_state["_draft_block"] = reply
+                                    st.session_state["_draft_topic"] = topic_name
+                                    st.session_state["_draft_keywords"] = topic_keywords
+                                    
+                                    st.caption("MCP 조문 원문:")
+                                    for lt in law_texts:
+                                        st.caption(lt[:200])
+                                
                             except Exception as e:
                                 st.error(f"❌ 블록 생성 실패: {e}")
+                                st.code(str(e)[:500], language="text")
                     else:
                         st.warning("토픽명과 관련 법령을 입력하세요.")
+                
+                # 검증 완료 후 JSON 추가 버튼
+                if st.session_state.get("_draft_block"):
+                    if st.button("✅ 검증 완료 — legal_blocks.json에 추가", key="save_block", type="primary"):
+                        try:
+                            import re as _re
+                            draft = st.session_state["_draft_block"]
+                            topic = st.session_state.get("_draft_topic", "")
+                            keywords = st.session_state.get("_draft_keywords", "")
+                            
+                            # JSON 추출
+                            json_match = _re.search(r'```json\s*(.*?)\s*```', draft, _re.DOTALL)
+                            if json_match:
+                                new_issue = json.loads(json_match.group(1))
+                            else:
+                                new_issue = json.loads(draft.strip())
+                            
+                            # legal_blocks.json 로드 + 추가
+                            blocks_path = "legal_blocks.json"
+                            with open(blocks_path, "r", encoding="utf-8") as f:
+                                blocks_db = json.load(f)
+                            
+                            if topic not in blocks_db:
+                                blocks_db[topic] = {
+                                    "label": topic,
+                                    "summary": f"{topic} 관련 법률 검토",
+                                    "risk_level_legend": "🔴 위험: 형사처벌/특허취소 / 🟡 주의: 행정제재/민사배상",
+                                    "issues": [],
+                                }
+                            
+                            # issues 배열에 추가
+                            if isinstance(new_issue, list):
+                                blocks_db[topic]["issues"].extend(new_issue)
+                            else:
+                                blocks_db[topic]["issues"].append(new_issue)
+                            
+                            # keyword_map 업데이트 (block_assembler.py에서 사용)
+                            # → 이건 코드 수정이 필요하므로 가이드만 표시
+                            
+                            # 저장
+                            with open(blocks_path, "w", encoding="utf-8") as f:
+                                json.dump(blocks_db, f, ensure_ascii=False, indent=2)
+                            
+                            st.success(f"✅ '{topic}' 토픽에 블록 추가 완료! (총 {len(blocks_db[topic]['issues'])}개 쟁점)")
+                            st.info(f"💡 block_assembler.py의 keyword_map에 키워드를 추가하세요:\n\"{topic}\": [{', '.join(repr(k.strip()) for k in keywords.split(',') if k.strip())}]")
+                            
+                            # 임시 데이터 삭제
+                            del st.session_state["_draft_block"]
+                            del st.session_state["_draft_topic"]
+                            del st.session_state["_draft_keywords"]
+                            
+                        except Exception as save_err:
+                            st.error(f"❌ 저장 실패: {save_err}")
+                            st.code(str(save_err)[:300], language="text")
 
             st.markdown("─" * 30)
 
