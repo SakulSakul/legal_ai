@@ -713,13 +713,32 @@ def call_mcp_law_direct(query):
     if not mcp.initialize():
         return False, "MCP 서버 연결 실패"
 
-    # 법령명 추출
-    law_match = _re.search(r"['\"]?([가-힣ㆍ·\s]+(?:법률?|법|고시))['\"]?", query)
+    # 법령명 추출 (영문 포함: AI기본법, AI 기본법 시행령 등)
+    law_match = _re.search(r"['\"]?([A-Za-z0-9가-힣ㆍ·\s]+(?:법률?|법|고시|시행령|가이드라인|지침|예규))['\"]?", query)
     if not law_match:
-        law_match = _re.search(r"['\"]?([가-힣]{2,})['\"]?", query)
+        law_match = _re.search(r"['\"]?([A-Za-z가-힣]{2,}[A-Za-z0-9가-힣ㆍ·\s]*)", query)
     if not law_match:
         return False, "법령명 추출 실패"
     law_name = law_match.group(1).strip()
+
+    # 약칭 → 정식명칭 변환 (동명이법 혼동 방지)
+    _LAW_ALIAS_MCP = {
+        "표시광고법": "표시·광고의 공정화에 관한 법률",
+        "표시·광고법": "표시·광고의 공정화에 관한 법률",
+        "식품표시광고법": "식품 등의 표시·광고에 관한 법률",
+        "정보통신망법": "정보통신망 이용촉진 및 정보보호 등에 관한 법률",
+        "부정경쟁방지법": "부정경쟁방지 및 영업비밀보호에 관한 법률",
+        "환경기술산업법": "환경기술 및 환경산업 지원법",
+        "자본시장법": "자본시장과 금융투자업에 관한 법률",
+        "전자상거래법": "전자상거래 등에서의 소비자보호에 관한 법률",
+        "개인정보보호법": "개인정보 보호법",
+    }
+    _clean_name = law_name.replace(" ", "").replace("·", "")
+    for _alias, _full in _LAW_ALIAS_MCP.items():
+        if _alias in _clean_name:
+            logger.info(f"법령 약칭 변환: {law_name} → {_full}")
+            law_name = _full
+            break
 
     # 조문번호 추출
     art_match = _re.search(r'(제\d+조(?:의\d+)?)', query)
@@ -805,7 +824,9 @@ def call_mcp_law(query, max_tokens=2048):
         response = client.beta.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=max_tokens,
-            system=f"법제처 API 키: {law_api_key}. 도구 호출 시 apiKey에 이 키를 사용하세요.",
+            system=f"법제처 API 키: {law_api_key}. 도구 호출 시 apiKey에 이 키를 사용하세요.\n"
+                   "⚠️ 약칭 주의: '표시광고법'은 '표시·광고의 공정화에 관한 법률'(공정거래법 계열)이다. "
+                   "'식품 등의 표시·광고에 관한 법률'과 혼동하지 말 것. 검색 결과의 법령명을 반드시 확인하라.",
             messages=[{"role": "user", "content": query}],
             mcp_servers=[{
                 "type": "url",
@@ -3537,22 +3558,254 @@ def main():
                         with st.spinner("MCP로 조문 조회 + Claude로 블록 초안 생성 중..."):
                             try:
                                 # MCP로 조문 원문 가져오기
+                                import re as _re_block
                                 law_texts = []
+                                prev_law_name = ""  # 이전 줄의 법령명 컨텍스트 유지
+
+                                # ── 법령 약칭 → 정식명칭 매핑 (동명이법 혼동 방지) ──
+                                _LAW_ALIAS = {
+                                    "표시광고법": "표시·광고의 공정화에 관한 법률",
+                                    "표시·광고법": "표시·광고의 공정화에 관한 법률",
+                                    "표시광고의공정화에관한법률": "표시·광고의 공정화에 관한 법률",
+                                    "식품표시광고법": "식품 등의 표시·광고에 관한 법률",
+                                    "정보통신망법": "정보통신망 이용촉진 및 정보보호 등에 관한 법률",
+                                    "개인정보보호법": "개인정보 보호법",
+                                    "부정경쟁방지법": "부정경쟁방지 및 영업비밀보호에 관한 법률",
+                                    "환경기술산업법": "환경기술 및 환경산업 지원법",
+                                    "자본시장법": "자본시장과 금융투자업에 관한 법률",
+                                    "전자상거래법": "전자상거래 등에서의 소비자보호에 관한 법률",
+                                    "소비자기본법": "소비자기본법",
+                                }
+
+                                def _resolve_law_name(name):
+                                    """약칭을 정식명칭으로 변환. 괄호 안 설명 제거 후 매칭."""
+                                    clean = _re_block.sub(r'\s*\(.*?\)\s*', '', name).strip()
+                                    # 약칭 매핑에서 찾기
+                                    for alias, full in _LAW_ALIAS.items():
+                                        if alias in clean.replace(" ", "").replace("·", ""):
+                                            return full
+                                    return name  # 매핑 없으면 원본 유지
+
+                                # 입력 전처리: 슬래시 구분 조문 분리, 컨텍스트 계승
+                                parsed_queries = []
                                 for law_line in topic_laws.strip().split("\n"):
                                     law_line = law_line.strip()
-                                    if law_line:
-                                        success, raw = call_mcp_law(f"'{law_line}' 조문 전문 알려줘")
-                                        if success:
-                                            law_texts.append(f"[{law_line}]\n{raw[:500]}")
+                                    if not law_line:
+                                        continue
+
+                                    # 괄호 안 설명 분리 보존 (예: "환경기술산업법 제16조의10 (환경성 표시·광고)")
+                                    paren_note = ""
+                                    paren_match = _re_block.search(r'\(([^)]+)\)\s*$', law_line)
+                                    if paren_match:
+                                        paren_note = paren_match.group(1)
+                                        law_line = law_line[:paren_match.start()].strip()
+
+                                    # 슬래시 구분 조문 분리 (예: "표시광고법 제3조/제7조/제17조")
+                                    slash_match = _re_block.search(r'(.+?)\s*(제\d+조(?:의\d+)?(?:\s*/\s*제\d+조(?:의\d+)?)+)', law_line)
+                                    if slash_match:
+                                        base_name = _resolve_law_name(slash_match.group(1).strip())
+                                        articles = _re_block.findall(r'제\d+조(?:의\d+)?', slash_match.group(2))
+                                        for art in articles:
+                                            parsed_queries.append(f"{base_name} {art}")
+                                        prev_law_name = base_name
+                                        continue
+
+                                    # 법령명 추출 시도
+                                    name_match = _re_block.search(
+                                        r'([A-Za-z0-9가-힣ㆍ·\s]+(?:법률?|법|고시|시행령|가이드라인|지침|예규))', law_line)
+                                    art_match = _re_block.search(r'(제\d+조(?:의\d+)?)', law_line)
+
+                                    if name_match:
+                                        cur_law = _resolve_law_name(name_match.group(1).strip())
+                                        # "시행령 제22조" → "AI 기본법 시행령 제22조" (이전 법령 컨텍스트 활용)
+                                        if cur_law in ("시행령",) and prev_law_name:
+                                            parent = _re_block.sub(r'\s*시행령$', '', prev_law_name).strip()
+                                            if parent:
+                                                cur_law = f"{parent} 시행령"
+                                        prev_law_name = cur_law
+                                        if art_match:
+                                            parsed_queries.append(f"{cur_law} {art_match.group(1)}")
                                         else:
-                                            law_texts.append(f"[{law_line}] (조회 실패)")
+                                            parsed_queries.append(cur_law)
+                                    elif art_match and prev_law_name:
+                                        # 조문번호만 있으면 이전 법령명 계승
+                                        parsed_queries.append(f"{prev_law_name} {art_match.group(1)}")
+                                    else:
+                                        # 가이드라인 등 비정형 참조 (괄호 설명 복원)
+                                        full_ref = law_line
+                                        if paren_note:
+                                            full_ref += f" ({paren_note})"
+                                        parsed_queries.append(full_ref)
+
+                                # ── 제재 관련 조문 자동 보강 ──
+                                # 키워드에 제재 관련 용어가 있으면 인접 조문 자동 추가
+                                _penalty_keywords = {"과태료", "과징금", "시정조치", "벌칙", "제재", "형사", "처벌", "벌금"}
+                                _has_penalty_kw = bool(_penalty_keywords & set(topic_keywords.replace(",", " ").split()))
+                                _extra_articles = []
+                                if _has_penalty_kw:
+                                    for pq in list(parsed_queries):
+                                        art_m = _re_block.search(r'(.+?)\s+제(\d+)조의(\d+)$', pq)
+                                        if art_m:
+                                            base, art_num, sub_num = art_m.group(1), int(art_m.group(2)), int(art_m.group(3))
+                                            # 인접 조문 (의+1 ~ 의+4) 중 미포함 건 추가
+                                            for delta in range(1, 5):
+                                                neighbor = f"{base} 제{art_num}조의{sub_num + delta}"
+                                                if neighbor not in parsed_queries and neighbor not in _extra_articles:
+                                                    _extra_articles.append(neighbor)
+                                if _extra_articles:
+                                    parsed_queries.extend(_extra_articles)
+
+                                st.caption(f"📋 파싱된 조회 목록: {len(parsed_queries)}건")
+                                for pq in parsed_queries:
+                                    is_extra = pq in _extra_articles if _extra_articles else False
+                                    st.caption(f"  → {pq}" + (" ⚡자동추가(제재조항)" if is_extra else ""))
+
+                                # ── 배치 조회 시도 (get_batch_articles) ──
+                                # 법령별로 그룹핑: {법령명: [조문번호, ...]}
+                                _law_groups = {}
+                                _non_article_queries = []  # 조문번호 없는 항목 (가이드라인 등)
+                                for pq in parsed_queries:
+                                    _am = _re_block.search(r'(.+?)\s+(제\d+조(?:의\d+)?)\s*$', pq)
+                                    if _am:
+                                        _lname, _art = _am.group(1).strip(), _am.group(2)
+                                        _law_groups.setdefault(_lname, []).append(_art)
+                                    else:
+                                        _non_article_queries.append(pq)
+
+                                _batch_done = False
+                                if _law_groups:
+                                    try:
+                                        mcp = _get_mcp_client()
+                                        if mcp.initialize():
+                                            # Step 1: 법령별 MST 조회
+                                            _mst_map = {}  # {법령명: mst}
+                                            for lname in _law_groups:
+                                                sr = mcp.call_tool("search_law", {"query": lname, "display": 3})
+                                                if sr:
+                                                    _mm = _re_block.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', sr)
+                                                    if _mm:
+                                                        _mst_map[lname] = _mm.group(1)
+                                                        logger.info(f"배치 MST 확보: {lname} → {_mm.group(1)}")
+
+                                            # Step 2: get_batch_articles 일괄 호출
+                                            if _mst_map:
+                                                _laws_param = []
+                                                for lname, arts in _law_groups.items():
+                                                    if lname in _mst_map:
+                                                        _laws_param.append({"mst": _mst_map[lname], "articles": arts})
+
+                                                if _laws_param:
+                                                    batch_result = mcp.call_tool("get_batch_articles", {"laws": _laws_param})
+                                                    if batch_result and len(batch_result) > 50:
+                                                        # 배치 결과를 법령+조문별로 분리
+                                                        _batch_done = True
+                                                        # 배치 결과에서 각 조문 텍스트 추출
+                                                        for lname, arts in _law_groups.items():
+                                                            for art in arts:
+                                                                # 배치 결과에서 해당 조문 찾기
+                                                                _art_num = _re_block.sub(r'[^0-9]', '', art.split("조의")[0])
+                                                                _pattern = _re_block.compile(
+                                                                    rf'(?:제{_art_num}조|{art}).*?(?=제\d+조[의\s]|$)',
+                                                                    _re_block.DOTALL
+                                                                )
+                                                                _found = _pattern.search(batch_result)
+                                                                if _found:
+                                                                    law_texts.append(f"[{lname} {art}]\n{_found.group()[:3000]}")
+                                                                else:
+                                                                    # 배치 결과에 포함되어 있지만 패턴 매칭 실패 시
+                                                                    if art in batch_result or _art_num in batch_result:
+                                                                        law_texts.append(f"[{lname} {art}]\n{batch_result[:3000]}")
+                                                                    else:
+                                                                        law_texts.append(f"[{lname} {art}] (배치 조회에서 미발견)")
+                                                        logger.info(f"get_batch_articles 성공: {len(_laws_param)}개 법령, {sum(len(a) for a in _law_groups.values())}건 조문")
+
+                                            # MST 못 찾은 법령은 개별 조회로 폴백
+                                            for lname, arts in _law_groups.items():
+                                                if lname not in _mst_map:
+                                                    for art in arts:
+                                                        q = f"{lname} {art}"
+                                                        success, raw = call_mcp_law(f"'{q}' 조문 전문 알려줘")
+                                                        if success:
+                                                            law_texts.append(f"[{q}]\n{raw[:3000]}")
+                                                        else:
+                                                            law_texts.append(f"[{q}] (조회 실패)")
+                                    except Exception as batch_err:
+                                        logger.warning(f"배치 조회 실패, 개별 폴백: {batch_err}")
+
+                                # 배치 실패 시 기존 개별 호출 폴백
+                                if not _batch_done:
+                                    for pq in parsed_queries:
+                                        # 이미 law_texts에 추가된 항목은 스킵
+                                        if any(pq in lt for lt in law_texts):
+                                            continue
+                                        success, raw = call_mcp_law(f"'{pq}' 조문 전문 알려줘")
+                                        if success:
+                                            law_texts.append(f"[{pq}]\n{raw[:3000]}")
+                                        else:
+                                            law_texts.append(f"[{pq}] (조회 실패)")
+
+                                # 비조문 항목 (가이드라인, 예규, 심사지침 등) — 3단계 폴백
+                                for naq in _non_article_queries:
+                                    if any(naq in lt for lt in law_texts):
+                                        continue
+                                    _found_naq = False
+
+                                    # 1차: call_mcp_law (search_law → get_article_detail)
+                                    success, raw = call_mcp_law(f"'{naq}' 조문 전문 알려줘")
+                                    if success and raw and len(raw) > 30:
+                                        law_texts.append(f"[{naq}]\n{raw[:3000]}")
+                                        _found_naq = True
+
+                                    # 2차: search_ai_law (자연어 의미검색 — 행정규칙 대상)
+                                    if not _found_naq:
+                                        try:
+                                            mcp = _get_mcp_client()
+                                            # search=2: 행정규칙 조문 검색
+                                            ai_result = mcp.call_tool("search_ai_law", {
+                                                "query": naq, "search": "2", "display": 5, "page": 1
+                                            })
+                                            if ai_result and len(ai_result) > 30:
+                                                law_texts.append(f"[{naq}] (AI검색·행정규칙)\n{ai_result[:3000]}")
+                                                _found_naq = True
+                                        except Exception:
+                                            pass
+
+                                    # 3차: chain_full_research (AI검색→법령→판례→유권해석 일괄)
+                                    if not _found_naq:
+                                        try:
+                                            mcp = _get_mcp_client()
+                                            chain_result = mcp.call_tool("chain_full_research", {
+                                                "query": naq
+                                            })
+                                            if chain_result and len(chain_result) > 50:
+                                                law_texts.append(f"[{naq}] (종합검색)\n{chain_result[:3000]}")
+                                                _found_naq = True
+                                        except Exception:
+                                            pass
+
+                                    if not _found_naq:
+                                        law_texts.append(f"[{naq}] (조회 실패)")
                                 
+                                # 조회 실패 건수 확인
+                                fail_count = sum(1 for t in law_texts if "(조회 실패)" in t)
+                                if fail_count > 0:
+                                    st.warning(f"⚠️ {fail_count}건 조문 조회 실패 — 해당 조문은 AI가 추정할 수 있으므로 반드시 검증하세요.")
+
                                 # Claude로 블록 초안 생성 (실패 시 Gemini 폴백)
                                 block_prompt = f"""legal_blocks.json 형식에 맞는 법률 분석 블록 초안을 생성하세요.
 
 토픽: {topic_name}
+키워드: {topic_keywords}
 관련 법령 조문 원문:
 {chr(10).join(law_texts)}
+
+██ 핵심 규칙 ██
+1. "(조회 실패)"로 표시된 조문은 원문을 확보하지 못한 것이다. 해당 조문의 내용을 추측하지 말고, applicable_laws에는 포함하되 legal_analysis에서는 "원문 미확보 — 전문가 확인 필요"로 표기하라.
+2. 조문 원문이 확보된 조항만 법리 분석에 인용하라. 형량·과태료 금액·조문번호를 절대 변형하지 말 것.
+3. 토픽 및 키워드와 관련된 쟁점만 분석하라.
+4. 제재 수단(시정조치, 과징금, 과태료, 벌칙 등)이 조회된 조문에 포함되어 있으면 반드시 legal_analysis에 기술하라.
+5. 제재 조항이 확보되지 않았지만 해당 법률에 존재할 것으로 추정되는 경우, legal_analysis 말미에 "⚠️ 추가 확인 필요: [법령명] 제재 조항(시정조치/과징금 등) 원문 미확보"로 표기하라.
+6. 법령 약칭 주의: "표시광고법"은 "표시·광고의 공정화에 관한 법률"이며, "식품 등의 표시·광고에 관한 법률"과 다른 법률이다. 검색 결과의 법령 정식명칭을 반드시 확인하라.
 
 아래 JSON 형식으로만 출력 (마크다운 설명 없이):
 ```json
@@ -3562,7 +3815,7 @@ def main():
   "risk_level": "🔴 또는 🟡",
   "risk_label": "위험 또는 주의",
   "applicable_laws": "법령명 제X조",
-  "legal_analysis": "법리 분석 (조문 원문의 형량을 정확히 인용. 숫자를 변형하지 말 것.)"
+  "legal_analysis": "법리 분석 (조문 원문의 형량을 정확히 인용. 숫자를 변형하지 말 것. 제재 수단 반드시 포함.)"
 }}
 ```
 """
