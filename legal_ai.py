@@ -754,14 +754,34 @@ def call_mcp_law_direct(query):
     logger.info(f"MCP search_law 결과: {str(search_result)[:200]}")
 
     # MST 추출 (응답 텍스트에서 mst 또는 법령일련번호 파싱)
+    # 시행령 검색 시: 검색 결과에서 "시행령" 포함 항목의 MST를 우선 선택
     mst = None
     law_id = None
-    mst_match = _re.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', search_result)
-    if mst_match:
-        mst = mst_match.group(1)
-    lawid_match = _re.search(r'(?:lawId|법령ID)[:\s]*["\']?(\d{4,7})', search_result)
-    if lawid_match:
-        law_id = lawid_match.group(1)
+    _is_sihaengryeong = "시행령" in law_name
+
+    if _is_sihaengryeong:
+        # 시행령 전용: 결과를 줄 단위로 파싱하여 "시행령" 포함 블록의 MST 찾기
+        _blocks = _re.split(r'(?=법령명|lawNm)', search_result)
+        for _blk in _blocks:
+            if "시행령" in _blk:
+                _sm = _re.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', _blk)
+                if _sm:
+                    mst = _sm.group(1)
+                    logger.info(f"시행령 MST 매칭: {mst} (블록에서 '시행령' 확인)")
+                    break
+                _lid = _re.search(r'(?:lawId|법령ID)[:\s]*["\']?(\d{4,7})', _blk)
+                if _lid:
+                    law_id = _lid.group(1)
+                    break
+
+    if not mst and not law_id:
+        # 기본 매칭 (첫 번째 MST)
+        mst_match = _re.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', search_result)
+        if mst_match:
+            mst = mst_match.group(1)
+        lawid_match = _re.search(r'(?:lawId|법령ID)[:\s]*["\']?(\d{4,7})', search_result)
+        if lawid_match:
+            law_id = lawid_match.group(1)
 
     if not art_str:
         # 조문번호 없으면 검색 결과만 반환
@@ -3658,35 +3678,65 @@ def main():
                                                     _extra_articles.append(neighbor)
 
                                     # 방법 2: search_ai_law로 법령별 제재 조항 탐색
-                                    _seen_laws = set()
+                                    # 법령별 기존 조문번호 범위 수집 (범위 밖 조문 필터링용)
+                                    _seen_laws = {}  # {법령명: [조문번호int, ...]}
                                     for pq in parsed_queries:
-                                        _lm = _re_block.search(r'(.+?)\s+제\d+조', pq)
+                                        _lm = _re_block.search(r'(.+?)\s+제(\d+)조', pq)
                                         if _lm:
-                                            _seen_laws.add(_lm.group(1).strip())
+                                            _lname = _lm.group(1).strip()
+                                            _anum = int(_lm.group(2))
+                                            _seen_laws.setdefault(_lname, []).append(_anum)
                                     try:
                                         mcp = _get_mcp_client()
                                         if mcp.initialize():
-                                            for _sl in _seen_laws:
-                                                # "법령명 + 과징금/시정조치/벌칙" 검색
+                                            for _sl, _existing_arts in _seen_laws.items():
+                                                _sl_short = _sl.split()[-1] if len(_sl) > 10 else _sl  # 약칭 추출 (마지막 단어)
                                                 for _pkw in ["과징금", "시정조치", "벌칙"]:
                                                     _ai_r = mcp.call_tool("search_ai_law", {
                                                         "query": f"{_sl} {_pkw}",
                                                         "search": "0", "display": 3, "page": 1
                                                     })
-                                                    if _ai_r:
-                                                        # 결과에서 조문번호 추출
-                                                        _found_arts = _re_block.findall(r'제(\d+)조(?:의(\d+))?', _ai_r)
+                                                    if not _ai_r:
+                                                        continue
+                                                    # 결과를 줄 단위로 파싱 — 해당 법령명이 포함된 줄에서만 조문번호 추출
+                                                    for _line in _ai_r.split("\n"):
+                                                        # 해당 법령명(정식 또는 약칭)이 같은 줄에 있어야 함
+                                                        if _sl not in _line and _sl_short not in _line:
+                                                            continue
+                                                        _found_arts = _re_block.findall(r'제(\d+)조(?:의(\d+))?', _line)
                                                         for _fa in _found_arts:
+                                                            _art_num = int(_fa[0])
                                                             _art_str = f"제{_fa[0]}조" + (f"의{_fa[1]}" if _fa[1] else "")
                                                             _full_q = f"{_sl} {_art_str}"
-                                                            if _full_q not in parsed_queries and _full_q not in _extra_articles:
-                                                                _extra_articles.append(_full_q)
+                                                            if _full_q in parsed_queries or _full_q in _extra_articles:
+                                                                continue
+                                                            _extra_articles.append(_full_q)
                                     except Exception as _pen_err:
                                         logger.warning(f"제재 조항 AI 탐색 실패: {_pen_err}")
 
                                 if _extra_articles:
                                     # 중복 제거 + 최대 10건 제한
                                     _extra_articles = list(dict.fromkeys(_extra_articles))[:10]
+                                    # 존재 검증: 자동추가 조문이 실제 존재하는지 MCP로 확인
+                                    _verified_extras = []
+                                    try:
+                                        mcp = _get_mcp_client()
+                                        if mcp.initialize():
+                                            for _eq in _extra_articles:
+                                                _vr = mcp.call_tool("search_ai_law", {
+                                                    "query": _eq, "search": "0", "display": 1, "page": 1
+                                                })
+                                                if _vr and len(_vr) > 30:
+                                                    # "찾을 수 없" 또는 "해당 조문" 에러 체크
+                                                    if "찾을 수 없" not in _vr and "존재하지 않" not in _vr:
+                                                        _verified_extras.append(_eq)
+                                                    else:
+                                                        logger.info(f"자동추가 조문 미존재 확인: {_eq}")
+                                                else:
+                                                    logger.info(f"자동추가 조문 검증 실패: {_eq}")
+                                    except Exception:
+                                        _verified_extras = _extra_articles  # 검증 실패 시 전체 유지
+                                    _extra_articles = _verified_extras
                                     parsed_queries.extend(_extra_articles)
 
                                 st.caption(f"📋 파싱된 조회 목록: {len(parsed_queries)}건")
@@ -3837,9 +3887,10 @@ def main():
 1. "(조회 실패)"로 표시된 조문은 원문을 확보하지 못한 것이다. 해당 조문의 내용을 추측하지 말고, applicable_laws에는 포함하되 legal_analysis에서는 "원문 미확보 — 전문가 확인 필요"로 표기하라.
 2. 조문 원문이 확보된 조항만 법리 분석에 인용하라. 형량·과태료 금액·조문번호를 절대 변형하지 말 것.
 3. 토픽 및 키워드와 관련된 쟁점만 분석하라.
-4. 제재 수단(시정조치, 과징금, 과태료, 벌칙 등)이 조회된 조문에 포함되어 있으면 반드시 legal_analysis에 기술하라.
-5. 제재 조항이 확보되지 않았지만 해당 법률에 존재할 것으로 추정되는 경우, legal_analysis 말미에 "⚠️ 추가 확인 필요: [법령명] 제재 조항(시정조치/과징금 등) 원문 미확보"로 표기하라.
-6. 법령 약칭 주의: "표시광고법"은 "표시·광고의 공정화에 관한 법률"이며, "식품 등의 표시·광고에 관한 법률"과 다른 법률이다. 검색 결과의 법령 정식명칭을 반드시 확인하라.
+4. 원문이 확보된 모든 조문을 applicable_laws와 legal_analysis에 빠짐없이 포함하라. 특히 사전검토·실증의무 등 예방적 조항도 반드시 기술하라.
+5. 제재 수단(시정조치, 과징금, 과태료, 벌칙 등)이 조회된 조문에 포함되어 있으면 반드시 legal_analysis에 기술하라.
+6. 제재 조항이 확보되지 않았지만 해당 법률에 존재할 것으로 추정되는 경우, legal_analysis 말미에 "⚠️ 추가 확인 필요: [법령명] 제재 조항(시정조치/과징금 등) 원문 미확보"로 표기하라.
+7. 법령 약칭 주의: "표시광고법"은 "표시·광고의 공정화에 관한 법률"이며, "식품 등의 표시·광고에 관한 법률"과 다른 법률이다. 검색 결과의 법령 정식명칭을 반드시 확인하라.
 
 아래 JSON 형식으로만 출력 (마크다운 설명 없이):
 ```json
