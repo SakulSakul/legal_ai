@@ -732,6 +732,8 @@ def call_mcp_law_direct(query):
         "자본시장법": "자본시장과 금융투자업에 관한 법률",
         "전자상거래법": "전자상거래 등에서의 소비자보호에 관한 법률",
         "개인정보보호법": "개인정보 보호법",
+        "AI기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+        "인공지능기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
     }
     _clean_name = law_name.replace(" ", "").replace("·", "")
     for _alias, _full in _LAW_ALIAS_MCP.items():
@@ -3575,6 +3577,9 @@ def main():
                                     "자본시장법": "자본시장과 금융투자업에 관한 법률",
                                     "전자상거래법": "전자상거래 등에서의 소비자보호에 관한 법률",
                                     "소비자기본법": "소비자기본법",
+                                    "AI기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+                                    "AI 기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+                                    "인공지능기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
                                 }
 
                                 def _resolve_law_name(name):
@@ -3638,21 +3643,50 @@ def main():
                                         parsed_queries.append(full_ref)
 
                                 # ── 제재 관련 조문 자동 보강 ──
-                                # 키워드에 제재 관련 용어가 있으면 인접 조문 자동 추가
                                 _penalty_keywords = {"과태료", "과징금", "시정조치", "벌칙", "제재", "형사", "처벌", "벌금"}
                                 _has_penalty_kw = bool(_penalty_keywords & set(topic_keywords.replace(",", " ").split()))
                                 _extra_articles = []
                                 if _has_penalty_kw:
+                                    # 방법 1: 제X조의N → 인접 의N+1~N+4 자동 추가
                                     for pq in list(parsed_queries):
                                         art_m = _re_block.search(r'(.+?)\s+제(\d+)조의(\d+)$', pq)
                                         if art_m:
                                             base, art_num, sub_num = art_m.group(1), int(art_m.group(2)), int(art_m.group(3))
-                                            # 인접 조문 (의+1 ~ 의+4) 중 미포함 건 추가
                                             for delta in range(1, 5):
                                                 neighbor = f"{base} 제{art_num}조의{sub_num + delta}"
                                                 if neighbor not in parsed_queries and neighbor not in _extra_articles:
                                                     _extra_articles.append(neighbor)
+
+                                    # 방법 2: search_ai_law로 법령별 제재 조항 탐색
+                                    _seen_laws = set()
+                                    for pq in parsed_queries:
+                                        _lm = _re_block.search(r'(.+?)\s+제\d+조', pq)
+                                        if _lm:
+                                            _seen_laws.add(_lm.group(1).strip())
+                                    try:
+                                        mcp = _get_mcp_client()
+                                        if mcp.initialize():
+                                            for _sl in _seen_laws:
+                                                # "법령명 + 과징금/시정조치/벌칙" 검색
+                                                for _pkw in ["과징금", "시정조치", "벌칙"]:
+                                                    _ai_r = mcp.call_tool("search_ai_law", {
+                                                        "query": f"{_sl} {_pkw}",
+                                                        "search": "0", "display": 3, "page": 1
+                                                    })
+                                                    if _ai_r:
+                                                        # 결과에서 조문번호 추출
+                                                        _found_arts = _re_block.findall(r'제(\d+)조(?:의(\d+))?', _ai_r)
+                                                        for _fa in _found_arts:
+                                                            _art_str = f"제{_fa[0]}조" + (f"의{_fa[1]}" if _fa[1] else "")
+                                                            _full_q = f"{_sl} {_art_str}"
+                                                            if _full_q not in parsed_queries and _full_q not in _extra_articles:
+                                                                _extra_articles.append(_full_q)
+                                    except Exception as _pen_err:
+                                        logger.warning(f"제재 조항 AI 탐색 실패: {_pen_err}")
+
                                 if _extra_articles:
+                                    # 중복 제거 + 최대 10건 제한
+                                    _extra_articles = list(dict.fromkeys(_extra_articles))[:10]
                                     parsed_queries.extend(_extra_articles)
 
                                 st.caption(f"📋 파싱된 조회 목록: {len(parsed_queries)}건")
