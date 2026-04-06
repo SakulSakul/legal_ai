@@ -878,24 +878,60 @@ def call_mcp_law(query, max_tokens=2048):
         art_match = _re.search(r'(제\d+조(?:의\d+)?)', query)
         art_str = art_match.group(1) if art_match else None
 
+        # 쿼리에서 법령명 추출 (약칭 변환 후)
+        _q_law_match = _re.search(r"['\"]?([A-Za-z0-9가-힣ㆍ·\s]+(?:법률?|법|고시|시행령|가이드라인|지침|예규))['\"]?", query)
+        _q_law_name = _q_law_match.group(1).strip() if _q_law_match else ""
+        # 약칭 변환 적용
+        _q_clean = _q_law_name.replace(" ", "").replace("·", "")
+        for _a, _f in _LAW_ALIAS_MCP.items():
+            if _a in _q_clean:
+                _q_law_name = _f
+                break
+
         if art_str:
             laws_db = load_laws()
             if laws_db:
+                # 일반 조사/접속사 제외 — 느슨 매칭 방지
+                _STOP_WORDS = {"및", "에", "관한", "등에", "대한", "위한", "따른", "의한", "등의", "등을", "에서"}
                 for law in laws_db:
                     art_no = law.get("article_no", "")
-                    if art_str in art_no or art_no in art_str:
-                        law_name = law.get("law_name", "")
-                        law_short = law.get("law_short", "")
-                        query_clean = query.replace("'", "").replace('"', '')
-                        if (law_short and law_short in query_clean) or \
-                           (law_name and any(part in query_clean for part in law_name.split() if len(part) >= 2)):
-                            content = law.get("content", "")
-                            title = law.get("article_title", "")
-                            header = f"{law_short} {art_no}"
-                            if title:
-                                header += f"({title})"
-                            logger.info(f"Supabase DB 폴백 성공: {header} — {len(content)}자")
-                            return True, f"[DB 캐시] {header}\n{content}"
+                    if art_str not in art_no and art_no not in art_str:
+                        continue
+                    law_name_db = law.get("law_name", "")
+                    law_short = law.get("law_short", "")
+                    query_clean = query.replace("'", "").replace('"', '')
+
+                    # 엄격 매칭: law_short 또는 law_name의 핵심 단어(3자 이상)가 쿼리에 포함
+                    _matched = False
+                    if law_short and len(law_short) >= 2 and law_short in query_clean:
+                        _matched = True
+                    elif law_name_db:
+                        # 핵심 단어만 추출 (3자 이상, 불용어 제외)
+                        _key_parts = [p for p in law_name_db.split() if len(p) >= 3 and p not in _STOP_WORDS]
+                        if _key_parts:
+                            # 핵심 단어 중 과반수가 쿼리에 포함되어야 매칭
+                            _match_count = sum(1 for p in _key_parts if p in query_clean)
+                            _matched = _match_count >= max(1, len(_key_parts) // 2)
+
+                    # 추가 검증: 쿼리의 법령명과 DB 법령명이 동일 법률인지 확인
+                    if _matched and _q_law_name:
+                        # 쿼리 법령명의 핵심 단어가 DB 법령명에도 있어야 함
+                        _q_key = [p for p in _q_law_name.split() if len(p) >= 3 and p not in _STOP_WORDS]
+                        if _q_key:
+                            _cross = sum(1 for p in _q_key if p in law_name_db)
+                            if _cross == 0:
+                                # 쿼리 법령과 DB 법령이 전혀 다른 법률 → 매칭 거부
+                                logger.info(f"DB 캐시 매칭 거부: 쿼리={_q_law_name} ≠ DB={law_name_db}")
+                                _matched = False
+
+                    if _matched:
+                        content = law.get("content", "")
+                        title = law.get("article_title", "")
+                        header = f"{law_short} {art_no}"
+                        if title:
+                            header += f"({title})"
+                        logger.info(f"Supabase DB 폴백 성공: {header} — {len(content)}자")
+                        return True, f"[DB 캐시] {header}\n{content}"
     except Exception as db_err:
         logger.warning(f"Supabase DB 폴백 실패: {db_err}")
 
