@@ -767,11 +767,13 @@ def call_mcp_law_direct(query):
     art_str = art_match.group(1) if art_match else None
 
     # ━━━ MST 사전 조회 (search_law 생략 — 토큰 0, 지연 0) ━━━
+    # 시행령/시행규칙은 본법과 별도 법령이므로 MST 사전 스킵 → search_law 폴백
     mst = None
     law_id = None
     _dict_hit = False
+    _is_subordinate = any(kw in law_name for kw in ("시행령", "시행규칙"))
 
-    if law_name in _MST_DICT:
+    if not _is_subordinate and law_name in _MST_DICT:
         mst = _MST_DICT[law_name]["mst"]
         law_id = _MST_DICT[law_name]["law_id"]
         _dict_hit = True
@@ -3742,6 +3744,30 @@ def main():
                                 _penalty_keywords = {"과태료", "과징금", "시정조치", "벌칙", "제재", "형사", "처벌", "벌금"}
                                 _has_penalty_kw = bool(_penalty_keywords & set(topic_keywords.replace(",", " ").split()))
                                 _extra_articles = []
+
+                                # 핵심 법령의 알려진 제재 조항 맵 (search_ai_law 미스 방지)
+                                _KNOWN_PENALTY_ARTICLES = {
+                                    "표시·광고의 공정화에 관한 법률": ["제7조", "제9조", "제17조"],
+                                    "환경기술 및 환경산업 지원법": ["제16조의11", "제16조의12", "제16조의13", "제16조의14"],
+                                    "부정경쟁방지 및 영업비밀보호에 관한 법률": ["제4조", "제18조"],
+                                    "전자상거래 등에서의 소비자보호에 관한 법률": ["제32조", "제34조", "제45조"],
+                                    "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법": ["제43조"],
+                                    "개인정보 보호법": ["제64조", "제71조", "제75조"],
+                                }
+                                if _has_penalty_kw:
+                                    # 방법 0: 알려진 제재 조항 직접 추가 (가장 확실)
+                                    _seen_law_names = set()
+                                    for pq in parsed_queries:
+                                        _lm = _re_block.search(r'(.+?)\s+제\d+조', pq)
+                                        if _lm:
+                                            _seen_law_names.add(_lm.group(1).strip())
+                                    for _sln in _seen_law_names:
+                                        if _sln in _KNOWN_PENALTY_ARTICLES:
+                                            for _kpa in _KNOWN_PENALTY_ARTICLES[_sln]:
+                                                _full_kpa = f"{_sln} {_kpa}"
+                                                if _full_kpa not in parsed_queries and _full_kpa not in _extra_articles:
+                                                    _extra_articles.append(_full_kpa)
+
                                 if _has_penalty_kw:
                                     # 방법 1: 제X조의N → 인접 의N+1~N+4 자동 추가
                                     for pq in list(parsed_queries):
@@ -3981,8 +4007,8 @@ def main():
 ██ 핵심 규칙 ██
 1. "(조회 실패)"로 표시된 조문은 원문을 확보하지 못한 것이다. 해당 조문의 내용을 추측하지 말고, applicable_laws에는 포함하되 legal_analysis에서는 "원문 미확보 — 전문가 확인 필요"로 표기하라.
 2. 조문 원문이 확보된 조항만 법리 분석에 인용하라. 형량·과태료 금액·조문번호를 절대 변형하지 말 것.
-3. 토픽 및 키워드와 관련된 쟁점만 분석하라.
-4. 원문이 확보된 모든 조문을 applicable_laws와 legal_analysis에 빠짐없이 포함하라. 특히 사전검토·실증의무 등 예방적 조항도 반드시 기술하라.
+3. 토픽 및 키워드와 관련된 쟁점만 분석하라. 토픽과 직접 관련 없는 조항(국제협력, 일반원칙 등)은 applicable_laws와 legal_analysis에서 제외하라.
+4. 원문이 확보된 조문 중 토픽과 관련된 모든 조문을 applicable_laws와 legal_analysis에 빠짐없이 포함하라. 특히 사전검토·실증의무 등 예방적 조항과 시정조치·과징금·벌칙 등 제재 조항은 반드시 기술하라.
 5. 제재 수단(시정조치, 과징금, 과태료, 벌칙 등)이 조회된 조문에 포함되어 있으면 반드시 legal_analysis에 기술하라.
 6. 제재 조항이 확보되지 않았지만 해당 법률에 존재할 것으로 추정되는 경우, legal_analysis 말미에 "⚠️ 추가 확인 필요: [법령명] 제재 조항(시정조치/과징금 등) 원문 미확보"로 표기하라.
 7. 법령 약칭 주의: "표시광고법"은 "표시·광고의 공정화에 관한 법률"이며, "식품 등의 표시·광고에 관한 법률"과 다른 법률이다. 검색 결과의 법령 정식명칭을 반드시 확인하라.
