@@ -701,13 +701,46 @@ def _get_mcp_client():
 def call_mcp_law_direct(query):
     """MCP 서버를 직접 호출하여 법령 조회 (Claude API 불필요).
 
-    1. search_law로 법령 MST 확보
-    2. get_article_detail로 조문 원문 조회
-    3. 실패 시 get_law_text 시도
+    1. MST 사전에서 즉시 조회 (search_law 생략 → 토큰/시간 절감)
+    2. 사전 미스 시 search_law 폴백
+    3. get_article_detail → get_law_text 순서로 조문 원문 조회
 
     Returns: (success: bool, text: str)
     """
     import re as _re
+
+    # ━━━ MST 사전 (legalize-kr YAML frontmatter 기반, search_law 호출 제거) ━━━
+    _MST_DICT = {
+        # 정식명칭 → {mst, law_id}  (출처: github.com/legalize-kr/legalize-kr)
+        "표시·광고의 공정화에 관한 법률":     {"mst": "268659", "law_id": "002011"},
+        "식품 등의 표시·광고에 관한 법률":    {"mst": "269957", "law_id": "013094"},
+        "관세법":                             {"mst": "280363", "law_id": "001556"},
+        "상표법":                             {"mst": "279819", "law_id": "001870"},
+        "부정경쟁방지 및 영업비밀보호에 관한 법률": {"mst": "277201", "law_id": "000308"},
+        "형법":                               {"mst": "284025", "law_id": "001692"},
+        "소비자기본법":                       {"mst": "283837", "law_id": "001589"},
+        "정보통신망 이용촉진 및 정보보호 등에 관한 법률": {"mst": "285199", "law_id": "000030"},
+        "환경기술 및 환경산업 지원법":        {"mst": "276823", "law_id": "001774"},
+        "개인정보 보호법":                    {"mst": "283839", "law_id": "011357"},
+        "전자상거래 등에서의 소비자보호에 관한 법률": {"mst": "282793", "law_id": "009318"},
+        "자본시장과 금융투자업에 관한 법률":  {"mst": "285183", "law_id": "010513"},
+        "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법": {"mst": "282791", "law_id": "014820"},
+    }
+
+    # 약칭 → 정식명칭 매핑 (MST 사전 키로 변환)
+    _ALIAS_TO_FULL = {
+        "표시광고법": "표시·광고의 공정화에 관한 법률",
+        "표시·광고법": "표시·광고의 공정화에 관한 법률",
+        "식품표시광고법": "식품 등의 표시·광고에 관한 법률",
+        "정보통신망법": "정보통신망 이용촉진 및 정보보호 등에 관한 법률",
+        "부정경쟁방지법": "부정경쟁방지 및 영업비밀보호에 관한 법률",
+        "환경기술산업법": "환경기술 및 환경산업 지원법",
+        "자본시장법": "자본시장과 금융투자업에 관한 법률",
+        "전자상거래법": "전자상거래 등에서의 소비자보호에 관한 법률",
+        "개인정보보호법": "개인정보 보호법",
+        "AI기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+        "인공지능기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+    }
 
     mcp = _get_mcp_client()
     if not mcp.initialize():
@@ -721,22 +754,9 @@ def call_mcp_law_direct(query):
         return False, "법령명 추출 실패"
     law_name = law_match.group(1).strip()
 
-    # 약칭 → 정식명칭 변환 (동명이법 혼동 방지)
-    _LAW_ALIAS_MCP = {
-        "표시광고법": "표시·광고의 공정화에 관한 법률",
-        "표시·광고법": "표시·광고의 공정화에 관한 법률",
-        "식품표시광고법": "식품 등의 표시·광고에 관한 법률",
-        "정보통신망법": "정보통신망 이용촉진 및 정보보호 등에 관한 법률",
-        "부정경쟁방지법": "부정경쟁방지 및 영업비밀보호에 관한 법률",
-        "환경기술산업법": "환경기술 및 환경산업 지원법",
-        "자본시장법": "자본시장과 금융투자업에 관한 법률",
-        "전자상거래법": "전자상거래 등에서의 소비자보호에 관한 법률",
-        "개인정보보호법": "개인정보 보호법",
-        "AI기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
-        "인공지능기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
-    }
+    # 약칭 → 정식명칭 변환
     _clean_name = law_name.replace(" ", "").replace("·", "")
-    for _alias, _full in _LAW_ALIAS_MCP.items():
+    for _alias, _full in _ALIAS_TO_FULL.items():
         if _alias in _clean_name:
             logger.info(f"법령 약칭 변환: {law_name} → {_full}")
             law_name = _full
@@ -746,68 +766,76 @@ def call_mcp_law_direct(query):
     art_match = _re.search(r'(제\d+조(?:의\d+)?)', query)
     art_str = art_match.group(1) if art_match else None
 
-    # Step 1: search_law → MST 확보
-    search_result = mcp.call_tool("search_law", {"query": law_name, "display": 5})
-    if not search_result:
-        return False, f"MCP search_law 실패: {law_name}"
-
-    logger.info(f"MCP search_law 결과: {str(search_result)[:200]}")
-
-    # MST 추출 (응답 텍스트에서 mst 또는 법령일련번호 파싱)
-    # 시행령 검색 시: 검색 결과에서 "시행령" 포함 항목의 MST를 우선 선택
+    # ━━━ MST 사전 조회 (search_law 생략 — 토큰 0, 지연 0) ━━━
     mst = None
     law_id = None
-    _is_sihaengryeong = "시행령" in law_name
+    _dict_hit = False
 
-    if _is_sihaengryeong:
-        # 시행령 전용: 결과를 줄 단위로 파싱하여 "시행령" 포함 블록의 MST 찾기
-        _blocks = _re.split(r'(?=법령명|lawNm)', search_result)
-        for _blk in _blocks:
-            if "시행령" in _blk:
-                _sm = _re.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', _blk)
-                if _sm:
-                    mst = _sm.group(1)
-                    logger.info(f"시행령 MST 매칭: {mst} (블록에서 '시행령' 확인)")
-                    break
-                _lid = _re.search(r'(?:lawId|법령ID)[:\s]*["\']?(\d{4,7})', _blk)
-                if _lid:
-                    law_id = _lid.group(1)
-                    break
+    if law_name in _MST_DICT:
+        mst = _MST_DICT[law_name]["mst"]
+        law_id = _MST_DICT[law_name]["law_id"]
+        _dict_hit = True
+        logger.info(f"MST 사전 히트: {law_name} → mst={mst}")
 
-    if not mst and not law_id:
-        # 기본 매칭 (첫 번째 MST)
-        mst_match = _re.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', search_result)
-        if mst_match:
-            mst = mst_match.group(1)
-        lawid_match = _re.search(r'(?:lawId|법령ID)[:\s]*["\']?(\d{4,7})', search_result)
-        if lawid_match:
-            law_id = lawid_match.group(1)
+    # ━━━ 사전 미스 시 search_law 폴백 ━━━
+    if not _dict_hit:
+        search_result = mcp.call_tool("search_law", {"query": law_name, "display": 5})
+        if not search_result:
+            return False, f"MCP search_law 실패: {law_name}"
+
+        logger.info(f"MCP search_law 폴백: {str(search_result)[:200]}")
+
+        # 시행령 검색 시: "시행령" 포함 블록의 MST 우선 선택
+        _is_sihaengryeong = "시행령" in law_name
+        if _is_sihaengryeong:
+            _blocks = _re.split(r'(?=법령명|lawNm)', search_result)
+            for _blk in _blocks:
+                if "시행령" in _blk:
+                    _sm = _re.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', _blk)
+                    if _sm:
+                        mst = _sm.group(1)
+                        logger.info(f"시행령 MST 매칭: {mst}")
+                        break
+                    _lid = _re.search(r'(?:lawId|법령ID)[:\s]*["\']?(\d{4,7})', _blk)
+                    if _lid:
+                        law_id = _lid.group(1)
+                        break
+
+        if not mst and not law_id:
+            mst_match = _re.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', search_result)
+            if mst_match:
+                mst = mst_match.group(1)
+            lawid_match = _re.search(r'(?:lawId|법령ID)[:\s]*["\']?(\d{4,7})', search_result)
+            if lawid_match:
+                law_id = lawid_match.group(1)
+
+        if not art_str:
+            return True, f"[MCP 직접] {law_name} 검색 결과:\n{search_result[:800]}"
 
     if not art_str:
-        # 조문번호 없으면 검색 결과만 반환
-        return True, f"[MCP 직접] {law_name} 검색 결과:\n{search_result[:800]}"
+        return True, f"[MST사전] {law_name} (mst={mst}) — 조문번호 미지정"
 
-    # Step 2: get_article_detail → 조문 원문 조회
+    # ━━━ 조문 조회: get_article_detail → get_law_text ━━━
     args = {"jo": art_str}
     if mst:
         args["mst"] = mst
     if law_id:
         args["lawId"] = law_id
 
+    _src = "MST사전" if _dict_hit else "MCP 직접"
+
     detail_result = mcp.call_tool("get_article_detail", args)
     if detail_result and len(detail_result) > 20:
-        logger.info(f"MCP get_article_detail 성공: {law_name} {art_str} — {len(detail_result)}자")
-        return True, f"[MCP 직접] {law_name} {art_str}\n{detail_result}"
+        logger.info(f"get_article_detail 성공 ({_src}): {law_name} {art_str} — {len(detail_result)}자")
+        return True, f"[{_src}] {law_name} {art_str}\n{detail_result}"
 
-    # Step 3: get_law_text 폴백
     if mst:
         text_result = mcp.call_tool("get_law_text", {"mst": mst, "jo": art_str})
         if text_result and len(text_result) > 20:
-            logger.info(f"MCP get_law_text 성공: {law_name} {art_str} — {len(text_result)}자")
-            return True, f"[MCP 직접] {law_name} {art_str}\n{text_result}"
+            logger.info(f"get_law_text 성공 ({_src}): {law_name} {art_str} — {len(text_result)}자")
+            return True, f"[{_src}] {law_name} {art_str}\n{text_result}"
 
-    # 검색 결과는 있지만 조문 상세 실패
-    return True, f"[MCP 직접] {law_name} 검색 성공, {art_str} 조문 조회 실패\n{search_result[:500]}"
+    return True, f"[{_src}] {law_name} mst={mst}, {art_str} 조문 조회 실패"
 
 
 def call_mcp_law(query, max_tokens=2048):
@@ -882,8 +910,20 @@ def call_mcp_law(query, max_tokens=2048):
         _q_law_match = _re.search(r"['\"]?([A-Za-z0-9가-힣ㆍ·\s]+(?:법률?|법|고시|시행령|가이드라인|지침|예규))['\"]?", query)
         _q_law_name = _q_law_match.group(1).strip() if _q_law_match else ""
         # 약칭 변환 적용
+        _DB_ALIAS = {
+            "표시광고법": "표시·광고의 공정화에 관한 법률",
+            "식품표시광고법": "식품 등의 표시·광고에 관한 법률",
+            "정보통신망법": "정보통신망 이용촉진 및 정보보호 등에 관한 법률",
+            "부정경쟁방지법": "부정경쟁방지 및 영업비밀보호에 관한 법률",
+            "환경기술산업법": "환경기술 및 환경산업 지원법",
+            "자본시장법": "자본시장과 금융투자업에 관한 법률",
+            "전자상거래법": "전자상거래 등에서의 소비자보호에 관한 법률",
+            "개인정보보호법": "개인정보 보호법",
+            "AI기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+            "인공지능기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+        }
         _q_clean = _q_law_name.replace(" ", "").replace("·", "")
-        for _a, _f in _LAW_ALIAS_MCP.items():
+        for _a, _f in _DB_ALIAS.items():
             if _a in _q_clean:
                 _q_law_name = _f
                 break
@@ -3797,15 +3837,34 @@ def main():
                                     try:
                                         mcp = _get_mcp_client()
                                         if mcp.initialize():
-                                            # Step 1: 법령별 MST 조회
+                                            # Step 1: MST 사전 → search_law 폴백
+                                            _MST_DICT_REF = {
+                                                "표시·광고의 공정화에 관한 법률": "268659",
+                                                "식품 등의 표시·광고에 관한 법률": "269957",
+                                                "관세법": "280363", "상표법": "279819",
+                                                "부정경쟁방지 및 영업비밀보호에 관한 법률": "277201",
+                                                "형법": "284025", "소비자기본법": "283837",
+                                                "정보통신망 이용촉진 및 정보보호 등에 관한 법률": "285199",
+                                                "환경기술 및 환경산업 지원법": "276823",
+                                                "개인정보 보호법": "283839",
+                                                "전자상거래 등에서의 소비자보호에 관한 법률": "282793",
+                                                "자본시장과 금융투자업에 관한 법률": "285183",
+                                                "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법": "282791",
+                                            }
                                             _mst_map = {}  # {법령명: mst}
                                             for lname in _law_groups:
-                                                sr = mcp.call_tool("search_law", {"query": lname, "display": 3})
-                                                if sr:
-                                                    _mm = _re_block.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', sr)
-                                                    if _mm:
-                                                        _mst_map[lname] = _mm.group(1)
-                                                        logger.info(f"배치 MST 확보: {lname} → {_mm.group(1)}")
+                                                # 1차: MST 사전 (API 0회)
+                                                if lname in _MST_DICT_REF:
+                                                    _mst_map[lname] = _MST_DICT_REF[lname]
+                                                    logger.info(f"배치 MST 사전히트: {lname} → {_MST_DICT_REF[lname]}")
+                                                else:
+                                                    # 2차: search_law 폴백 (API 1회)
+                                                    sr = mcp.call_tool("search_law", {"query": lname, "display": 3})
+                                                    if sr:
+                                                        _mm = _re_block.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', sr)
+                                                        if _mm:
+                                                            _mst_map[lname] = _mm.group(1)
+                                                            logger.info(f"배치 MST 폴백: {lname} → {_mm.group(1)}")
 
                                             # Step 2: get_batch_articles 일괄 호출
                                             if _mst_map:
