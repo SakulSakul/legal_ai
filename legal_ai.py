@@ -1149,7 +1149,11 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
                     _found_any = True
                     refined_parts.append(f"📄 [{label}] — 키워드 매칭 {len(matched_paragraphs)}건")
                     for mp in matched_paragraphs[:20]:  # 최대 20개 문단
-                        refined_parts.append(f"  → {mp}")
+                        refined_parts.append(
+                            f"  【사규 원문 시작 — 출처: {label}】\n"
+                            f"  {mp}\n"
+                            f"  【사규 원문 끝】"
+                        )
                     logger.info(f"Gatekeeper 사규 키워드 검색: [{label}] {len(matched_paragraphs)}건 매칭 (키워드: {_keywords})")
 
             if not _found_any:
@@ -1370,7 +1374,7 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "██ 규칙 1 — 추측 금지 ██\n"
         "DB 원문이 없는 법령의 형량을 추측하지 마라. '원문 확인 필요'로만 표기.\n\n"
         "██ 규칙 2 — 검증 데이터만 사용 ██\n"
-        "【DB 원문 시작】~【DB 원문 끝】 안에서만 추론. 외부 지식 금지.\n\n"
+        "【DB 원문 시작】~【DB 원문 끝】 및 【사규 원문 시작】~【사규 원문 끝】 안에서만 추론. 외부 지식 금지.\n\n"
         "██ 규칙 3 — 판례 창작 금지 ██\n"
         "판결 요지 원문 미확보 시 해석 서술 금지. '(판결 요지 — 원문 확인 필요)' 표기.\n\n"
         "██ 규칙 4 — 형량 Placeholder (절대 규칙) ██\n"
@@ -1391,6 +1395,12 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "① 검증 데이터에 실제 존재하는 사규명만 인용 가능. 존재하지 않는 사규를 창작하는 것은 금지.\n"
         "② 검증 데이터에 해당 사규가 없으면 '해당 없음'으로 기재.\n"
         "③ '반품 절차 지침', '보세물품 관리지침' 등 존재하지 않는 가상의 사규명을 만들어내지 마라.\n\n"
+        "██ 규칙 5.7 — 사규 원문 인용 필수 (절대 규칙) ██\n"
+        "검증 데이터에 【사규 원문 시작】~【사규 원문 끝】으로 감싸진 사규/계약서 조항이 있을 때:\n"
+        "① 해당 문서에서 질문과 관련된 조항을 찾아 applicable_rule에 반드시 인용할 것.\n"
+        "② rule_analysis에 해당 조항의 구체적 내용을 서술할 것.\n"
+        "③ 사규 원문이 제공되어 있음에도 'applicable_rule: 해당 없음'으로 처리하는 것은 오류임.\n"
+        "④ 사규 문서명은 반드시 꺾쇠「」로 감싸서 인용 (예: 「특약매입거래 기본계약서」 제X조).\n\n"
         "██ 규칙 6 — 문체 (절대 규칙) ██\n"
         "summary, law_analysis, rule_analysis, recommendation, verdict_reason, action_plan 모든 필드에 적용:\n"
         "① 개조식: 반드시 불릿('-')으로 3~4개 핵심 포인트 나열. 줄글(서술형 문단) 금지.\n"
