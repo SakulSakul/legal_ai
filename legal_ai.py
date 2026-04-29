@@ -1086,9 +1086,10 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
         for sf in saryu_findings:
             refined_parts.append(f"- [{sf.get('relevance','?')}] {sf.get('source','?')} {sf.get('clause','')}: {sf.get('content','')[:600]}")
 
-    # Gemini가 못 찾았거나, 찾은 게 적으면 → 키워드 기반 원문 검색으로 보충
-    # 임계값 5: 심층검토처럼 쟁점이 많은 경우에도 보충 원문이 주입되도록
-    if docs and len(saryu_findings) < 5:
+    # 사규 원문 키워드 검색은 항상 실행 (Gemini findings와 무관하게 보충)
+    # — Gemini가 saryu_findings를 풍부하게 채워도 키워드 원문을 추가 제공해야
+    #   Claude가 정확한 조항 문구를 인용할 수 있음
+    if docs:
         import re as _re
         # 사용자 질문 + Gemini 요약을 모두 키워드 소스로 사용
         # (Gemini 요약이 부정확해서 사용자 질문을 놓치는 버그 방지)
@@ -1142,12 +1143,12 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
                     if len(para_stripped) < 10:
                         continue
                     if any(kw in para_stripped for kw in _keywords):
-                        matched_paragraphs.append(para_stripped[:500])
+                        matched_paragraphs.append(para_stripped[:900])
 
                 if matched_paragraphs:
                     _found_any = True
                     refined_parts.append(f"📄 [{label}] — 키워드 매칭 {len(matched_paragraphs)}건")
-                    for mp in matched_paragraphs[:12]:  # 최대 12개 문단
+                    for mp in matched_paragraphs[:20]:  # 최대 20개 문단
                         refined_parts.append(f"  → {mp}")
                     logger.info(f"Gatekeeper 사규 키워드 검색: [{label}] {len(matched_paragraphs)}건 매칭 (키워드: {_keywords})")
 
@@ -2576,9 +2577,28 @@ def _filter_b2b_consumer_issues(json_data, user_query=""):
 def _validate_saryu_names(json_data, docs=None):
     """AI가 창작한 허구 사규명을 '해당 없음'으로 교체.
     docs가 전달되면 실제 등록된 문서명을 기준으로 검증 (동적 화이트리스트).
+
+    매칭 전략 (3단계 — 너그러운 순):
+      1) 부분문자열 일치 (양방향)
+      2) 핵심 토큰(2자+ 한글) 1개 이상 공통
+      3) 모두 실패 시 → '해당 없음' 처리
     """
     if not json_data or "issues" not in json_data:
         return json_data
+
+    import re as _re
+
+    # 일반 접미사·접두사 (변별력 없음)
+    _GENERIC_TOKENS = {
+        "지침", "규정", "규칙", "내규", "규정집", "매뉴얼", "계약서", "약정서",
+        "표준", "기본", "당사", "회사", "사규", "관리", "운영", "절차",
+        "에관한", "관한", "관련", "위한", "대한", "등의", "등에", "관해",
+    }
+
+    def _tokenize(name):
+        """이름에서 변별력 있는 토큰만 추출 (2자+ 한글, 일반어 제외)"""
+        toks = _re.findall(r'[가-힣A-Za-z0-9]{2,}', name)
+        return [t for t in toks if t not in _GENERIC_TOKENS]
 
     # 실제 등록 문서명으로 화이트리스트 구성 (동적)
     if docs:
@@ -2590,9 +2610,11 @@ def _validate_saryu_names(json_data, docs=None):
             if d.get("cat") in ("saryu", "contract", "yakjeong") and d.get("label")
         ]
     else:
-        known_names = KNOWN_SARYU_NAMES
+        known_names = list(KNOWN_SARYU_NAMES)
 
-    import re as _re
+    known_names = [k for k in known_names if k]
+    known_tokens_list = [(k, set(_tokenize(k))) for k in known_names]
+
     for iss in json_data["issues"]:
         rule_text = iss.get("applicable_rule", "")
         if not rule_text or rule_text in ("해당 없음", "없음", "해당 규정 없음"):
@@ -2601,19 +2623,22 @@ def _validate_saryu_names(json_data, docs=None):
         # 꺾쇠「」안의 사규명 추출
         found_names = _re.findall(r"「([^」]+)」", rule_text)
         if not found_names:
-            suspicious_patterns = _re.findall(r"([\w\s]+(?:지침|규정|계약서|내규|규정집|매뉴얼))", rule_text)
+            suspicious_patterns = _re.findall(r"([\w\s]+(?:지침|규정|계약서|내규|규정집|매뉴얼|약정서))", rule_text)
             found_names = [p.strip() for p in suspicious_patterns]
 
         if not found_names:
             continue
 
-        # 알려진 사규 목록과 대조
         is_valid = False
         for name in found_names:
-            for known in known_names:
-                if not known:
-                    continue
+            name_tokens = set(_tokenize(name))
+            for known, ktoks in known_tokens_list:
+                # 1) 부분문자열 일치
                 if known in name or name in known:
+                    is_valid = True
+                    break
+                # 2) 핵심 토큰 공통 1개 이상
+                if name_tokens and ktoks and (name_tokens & ktoks):
                     is_valid = True
                     break
             if is_valid:
@@ -2621,7 +2646,7 @@ def _validate_saryu_names(json_data, docs=None):
 
         if not is_valid:
             hallucinated = ", ".join(found_names)
-            logger.warning(f"사규 검증 실패 — 허구 사규 감지: {hallucinated}")
+            logger.warning(f"사규 검증 실패 — 허구 사규 감지: {hallucinated} | 등록명: {known_names[:3]}")
             iss["applicable_rule"] = "해당 없음"
             iss["rule_analysis"] = "검증 데이터에 해당 사규 존재하지 않음"
 
