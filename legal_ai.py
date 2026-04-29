@@ -127,24 +127,40 @@ def apply_auto_masking(text, target_partner=""):
 # ── Supabase CRUD ────────────────────────────────────────────
 def load_docs():
     try:
-        res = init_supabase().table("docs").select("*").order("created_at").execute()
+        sb = init_supabase()
+        # created_at 컬럼이 없는 테이블 대비 — order 없이 먼저 시도, 실패 시 재시도
+        try:
+            res = sb.table("docs").select("*").order("created_at").execute()
+        except Exception:
+            res = sb.table("docs").select("*").execute()
         return res.data or []
     except Exception as e:
-        logger.error(f"문서 로드 실패: {e}")
-        st.warning("⚠️ 기준 문서를 불러오지 못했습니다. 새로고침 해주세요.")
+        err_msg = str(e)
+        logger.error(f"문서 로드 실패: {err_msg}")
+        st.error(f"⚠️ 기준 문서를 불러오지 못했습니다.\n\n**원인:** `{err_msg[:300]}`\n\nSupabase 대시보드에서 `docs` 테이블 존재 여부 및 RLS 정책을 확인해주세요.")
         return []
 
 def save_doc(doc):
     try:
-        init_supabase().table("docs").upsert({
-            "id": doc["id"], "name": doc["name"], "cat": doc["cat"],
-            "contract_type": doc.get("contract_type"), "label": doc["label"],
-            "text": doc["text"], "size": doc["size"],
-        }).execute()
+        sb = init_supabase()
+        payload = {
+            "id": doc["id"],
+            "name": doc["name"],
+            "cat": doc["cat"],
+            "label": doc["label"],
+            "text": doc["text"],
+        }
+        # 선택 컬럼 — 테이블에 없어도 에러 안 나도록 분리
+        if doc.get("contract_type") is not None:
+            payload["contract_type"] = doc["contract_type"]
+        if doc.get("size") is not None:
+            payload["size"] = doc["size"]
+        sb.table("docs").upsert(payload).execute()
         return True
     except Exception as e:
-        logger.error(f"문서 저장 실패: {e}")
-        st.warning(f"⚠️ 문서 저장 실패: {doc['name']}")
+        err_msg = str(e)
+        logger.error(f"문서 저장 실패: {err_msg}")
+        st.error(f"⚠️ 문서 저장 실패: `{doc['name']}`\n\n**원인:** `{err_msg[:300]}`\n\nSupabase `docs` 테이블 스키마(컬럼명/RLS 정책)를 확인해주세요.")
         return False
 
 def delete_doc(doc_id):
@@ -152,8 +168,9 @@ def delete_doc(doc_id):
         init_supabase().table("docs").delete().eq("id", doc_id).execute()
         return True
     except Exception as e:
-        logger.error(f"문서 삭제 실패: {e}")
-        st.warning("⚠️ 문서 삭제에 실패했습니다.")
+        err_msg = str(e)
+        logger.error(f"문서 삭제 실패: {err_msg}")
+        st.warning(f"⚠️ 문서 삭제에 실패했습니다: `{err_msg[:200]}`")
         return False
 
 def load_sessions():
