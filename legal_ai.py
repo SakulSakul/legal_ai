@@ -1090,21 +1090,38 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
     # 임계값 5: 심층검토처럼 쟁점이 많은 경우에도 보충 원문이 주입되도록
     if docs and len(saryu_findings) < 5:
         import re as _re
-        # 사용자 질문에서 핵심 키워드 추출
-        query_text = gemini_raw_json.get("query_summary", "")
-        if not query_text and user_query:
-            query_text = user_query
+        # 사용자 질문 + Gemini 요약을 모두 키워드 소스로 사용
+        # (Gemini 요약이 부정확해서 사용자 질문을 놓치는 버그 방지)
+        gemini_summary = gemini_raw_json.get("query_summary", "")
+        query_text = (user_query or "") + " " + (gemini_summary or "")
         # 키워드: 질문의 명사/동사 핵심어
         _keywords = set()
-        for kw in ["반품", "반출", "반입", "직매입", "특정매입", "위탁매입", "납품", "인도",
-                    "입점", "퇴점", "판촉", "감액", "수수료", "인테리어", "리뉴얼",
-                    "파견", "임대", "계약", "해지", "해제", "위약", "손해배상",
-                    "환불", "교환", "하자", "검수", "정산", "마진", "단가"]:
+        for kw in [
+            "반품", "반출", "반입", "직매입", "특정매입", "위탁매입", "납품", "인도",
+            "입점", "퇴점", "판촉", "판촉비", "감액", "수수료", "인테리어", "리뉴얼",
+            "파견", "임대", "계약", "해지", "해제", "위약", "손해배상",
+            "환불", "교환", "하자", "검수", "정산", "마진", "단가",
+            # 심층검토에서 자주 나오는 추가 키워드
+            "분담", "분담률", "비용", "부담", "공동판촉", "행사",
+            "광고", "표시", "허위", "과장", "과대",
+            "개인정보", "정보보호", "보안",
+            "약정", "약정서", "협력", "협력사", "공급",
+            "상표", "위조", "모조", "가품", "병행수입",
+            "관세", "통관", "수입", "수출", "면세",
+            "보세", "보세판매장", "특허",
+            "징벌", "과징금", "시정명령", "영업정지",
+            "환급", "재고", "물품",
+        ]:
             if kw in query_text:
                 _keywords.add(kw)
         if not _keywords:
-            # 질문이 짧으면 단어 전부 키워드로
-            _keywords = set(query_text.replace(" ", ""))
+            # 프리셋 미매칭 → 한국어 명사(2자 이상)를 키워드로 추출
+            # (단일 글자로 잘라내던 기존 버그 수정)
+            _korean_words = _re.findall(r'[가-힣]{2,}', query_text)
+            _stop = {"면세점", "검토", "분석", "법률", "이게", "맞음", "맞나요", "어떻게",
+                     "되나요", "여부", "관련", "대한", "경우", "위해", "통해", "수용",
+                     "가능", "어떤", "어때", "문제", "기준", "내용", "사항"}
+            _keywords = {w for w in _korean_words if w not in _stop and len(w) >= 2}
 
         if _keywords:
             refined_parts.append("━━━ [사규/계약서 원문 — 키워드 기반 검색 결과] ━━━")
