@@ -34,8 +34,8 @@ def get_secret(key, default=""):
 # 모델명 외부 설정 지원 (Secrets에 없으면 기본값 사용)
 CLAUDE_MODEL = get_secret("CLAUDE_MODEL", "claude-sonnet-4-20250514")
 GEMINI_MODELS = [
-    get_secret("GEMINI_MODEL_PRIMARY", "gemini-3.1-pro-preview"),
-    get_secret("GEMINI_MODEL_FALLBACK", "gemini-3-flash-preview"),
+    get_secret("GEMINI_MODEL_PRIMARY", "gemini-2.5-pro-preview-05-06"),
+    get_secret("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash-preview-04-17"),
 ]
 
 # ── Lazy 클라이언트 초기화 ────────────────────────────────────
@@ -56,7 +56,7 @@ def init_gemini():
     if not key:
         st.error("⚠️ Gemini API 키가 없습니다.")
         st.stop()
-    return genai.Client(api_key=key)
+    return genai.Client(api_key=key, http_options={"timeout": 120})
 
 @st.cache_resource
 def init_anthropic():
@@ -403,6 +403,8 @@ def classify_api_error(error):
         return "context_overflow", "입력이 너무 길어 처리할 수 없습니다."
     elif any(kw in error_lower for kw in ["500", "502", "503", "504", "unavailable", "timeout"]):
         return "server", "서버가 일시적으로 응답하지 않습니다."
+    elif any(kw in error_lower for kw in ["404", "not found", "model not found", "invalid model"]):
+        return "model_not_found", "지정된 모델을 찾을 수 없습니다. Secrets의 GEMINI_MODEL_PRIMARY 설정을 확인해주세요."
     else:
         return "unknown", f"{type(error).__name__}: {error_msg[:300]}"
 
@@ -1684,24 +1686,26 @@ def call_gemini(system_prompt, messages, is_fallback=False):
                 ),
             )
             result = response.text
+            if not result:
+                raise ValueError("Gemini 응답이 비어 있습니다 (response.text is None).")
             # HTML 새니타이징 (Gemini가 HTML을 생성했을 경우 방어)
             result = sanitize_html(result)
             return result
         except Exception as e:
             logger.error(f"Gemini ({model_name}) 오류: {e}")
             last_error_type, last_err_msg = classify_api_error(e)
-            
+
             is_last = (model_name == GEMINI_MODELS[-1])
+            # 모델 미존재·인증 오류는 폴백해도 의미 없으므로 즉시 반환
+            if last_error_type in ("auth", "model_not_found"):
+                return f"⚠️ [{last_error_type}] Gemini: {last_err_msg}"
             if is_last or last_error_type == "rate_limit":
                 label_map = {
                     "rate_limit": "API 한도 초과",
-                    "auth": "API 인증 오류",
                     "server": "서버 통신 장애",
                     "unknown": "통신 오류",
                 }
                 return f"⚠️ [{label_map.get(last_error_type, '오류')}] Gemini: {last_err_msg}"
-            if last_error_type == "auth":
-                return f"⚠️ [API 인증 오류] Gemini: {last_err_msg}"
             continue
     
     return "⚠️ Gemini 응답을 가져오지 못했습니다."
