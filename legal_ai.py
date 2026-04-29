@@ -4174,21 +4174,42 @@ def main():
             uploaded_files = st.file_uploader("Word 파일 첨부", type=["docx"], accept_multiple_files=True, label_visibility="collapsed")
             if uploaded_files:
                 if st.button("DB에 규칙 등록", use_container_width=True):
-                    for f in uploaded_files:
-                        label = f"계약서({contract_type})" if contract_type else f"약정서({yakjeong_type})" if yakjeong_type else DOC_CATS[doc_cat]["label"]
-                        label += f": {f.name}"
-                        file_bytes = f.read()
-                        new_doc = {
-                            "id": str(uuid.uuid4()),
-                            "name": f.name,
-                            "cat": doc_cat,
-                            "contract_type": contract_type or yakjeong_type,
-                            "label": label,
-                            "text": extract_text(file_bytes),
-                            "size": len(file_bytes),
-                        }
-                        if save_doc(new_doc): st.session_state.docs.append(new_doc)
-                    st.rerun()
+                    success_count = 0
+                    fail_count = 0
+                    with st.status("문서 처리 중...", expanded=True) as status:
+                        for f in uploaded_files:
+                            st.write(f"📄 처리 중: `{f.name}`")
+                            label = f"계약서({contract_type})" if contract_type else f"약정서({yakjeong_type})" if yakjeong_type else DOC_CATS[doc_cat]["label"]
+                            label += f": {f.name}"
+                            try:
+                                file_bytes = f.read()
+                                extracted = extract_text(file_bytes)
+                                st.write(f"  텍스트 추출: {len(extracted):,}자")
+                                new_doc = {
+                                    "id": str(uuid.uuid4()),
+                                    "name": f.name,
+                                    "cat": doc_cat,
+                                    "contract_type": contract_type or yakjeong_type,
+                                    "label": label,
+                                    "text": extracted,
+                                    "size": len(file_bytes),
+                                }
+                                if save_doc(new_doc):
+                                    st.session_state.docs.append(new_doc)
+                                    st.write(f"  ✅ 저장 성공")
+                                    success_count += 1
+                                else:
+                                    st.write(f"  ❌ 저장 실패 (위 에러 메시지 확인)")
+                                    fail_count += 1
+                            except Exception as e:
+                                st.write(f"  ❌ 처리 중 예외: `{type(e).__name__}: {str(e)[:200]}`")
+                                fail_count += 1
+                        status.update(label=f"완료: 성공 {success_count}건 / 실패 {fail_count}건",
+                                      state="complete" if fail_count == 0 else "error",
+                                      expanded=(fail_count > 0))
+                    if success_count > 0 and fail_count == 0:
+                        # 전부 성공 시에만 rerun (실패 시 에러 메시지 보이도록 유지)
+                        st.rerun()
 
             if st.session_state.docs:
                 st.markdown("**📋 적용 중인 문서**")
