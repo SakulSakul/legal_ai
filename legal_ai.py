@@ -492,9 +492,9 @@ def build_system_gemini_stage1(docs, laws_db):
     # 토큰 최적화: 사규/계약서/약정서 원문 한도 축소 (v2.1 → v2.2)
     # 기존 50k+60k+30k=140k자(~93k tok) → 30k+40k+20k=90k자(~60k tok)
     # Stage1은 데이터 수집 역할이므로 원문 전체가 필요하지 않음
-    saryu_text    = truncate_at_boundary(fmt_docs(by_cat("saryu")), 30000)
-    contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 40000)
-    yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 20000)
+    saryu_text    = truncate_at_boundary(fmt_docs(by_cat("saryu")), 45000)
+    contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 45000)
+    yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 25000)
 
     laws_list = ""
     if laws_db:
@@ -1084,10 +1084,11 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
     if saryu_findings:
         refined_parts.append("━━━ [사규 분석 결과 (Gemini 확인)] ━━━")
         for sf in saryu_findings:
-            refined_parts.append(f"- [{sf.get('relevance','?')}] {sf.get('source','?')} {sf.get('clause','')}: {sf.get('content','')[:200]}")
+            refined_parts.append(f"- [{sf.get('relevance','?')}] {sf.get('source','?')} {sf.get('clause','')}: {sf.get('content','')[:600]}")
 
     # Gemini가 못 찾았거나, 찾은 게 적으면 → 키워드 기반 원문 검색으로 보충
-    if docs and len(saryu_findings) < 2:
+    # 임계값 5: 심층검토처럼 쟁점이 많은 경우에도 보충 원문이 주입되도록
+    if docs and len(saryu_findings) < 5:
         import re as _re
         # 사용자 질문에서 핵심 키워드 추출
         query_text = gemini_raw_json.get("query_summary", "")
@@ -2555,22 +2556,34 @@ def _filter_b2b_consumer_issues(json_data, user_query=""):
     return json_data
 
 
-def _validate_saryu_names(json_data):
-    """AI가 창작한 허구 사규명을 '해당 없음'으로 교체"""
+def _validate_saryu_names(json_data, docs=None):
+    """AI가 창작한 허구 사규명을 '해당 없음'으로 교체.
+    docs가 전달되면 실제 등록된 문서명을 기준으로 검증 (동적 화이트리스트).
+    """
     if not json_data or "issues" not in json_data:
         return json_data
 
+    # 실제 등록 문서명으로 화이트리스트 구성 (동적)
+    if docs:
+        known_names = KNOWN_SARYU_NAMES + [
+            d.get("name", "") for d in docs
+            if d.get("cat") in ("saryu", "contract", "yakjeong") and d.get("name")
+        ] + [
+            d.get("label", "") for d in docs
+            if d.get("cat") in ("saryu", "contract", "yakjeong") and d.get("label")
+        ]
+    else:
+        known_names = KNOWN_SARYU_NAMES
+
+    import re as _re
     for iss in json_data["issues"]:
         rule_text = iss.get("applicable_rule", "")
         if not rule_text or rule_text in ("해당 없음", "없음", "해당 규정 없음"):
             continue
 
         # 꺾쇠「」안의 사규명 추출
-        import re as _re
         found_names = _re.findall(r"「([^」]+)」", rule_text)
         if not found_names:
-            # 꺾쇠 없이 사규명처럼 보이는 텍스트 체크
-            # "~지침", "~규정", "~계약서" 패턴이 있지만 알려진 목록에 없으면 할루시네이션
             suspicious_patterns = _re.findall(r"([\w\s]+(?:지침|규정|계약서|내규|규정집|매뉴얼))", rule_text)
             found_names = [p.strip() for p in suspicious_patterns]
 
@@ -2580,7 +2593,9 @@ def _validate_saryu_names(json_data):
         # 알려진 사규 목록과 대조
         is_valid = False
         for name in found_names:
-            for known in KNOWN_SARYU_NAMES:
+            for known in known_names:
+                if not known:
+                    continue
                 if known in name or name in known:
                     is_valid = True
                     break
@@ -4403,7 +4418,7 @@ def main():
 
                         # ██ 후처리 필터: AI 할루시네이션 강제 차단 ██
                         json_data = _filter_b2b_consumer_issues(json_data, user_query=safe_query)
-                        json_data = _validate_saryu_names(json_data)
+                        json_data = _validate_saryu_names(json_data, docs=st.session_state.get("docs", []))
 
                         citation_results = verify_citations(json_data.get("cited_laws", []), st.session_state.laws_db)
                         precedent_results = verify_precedents(json_data.get("cited_precedents", []))
