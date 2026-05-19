@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 # ============================================================
 #  📚 법령 DB 자동 업데이트 — update_laws.py
-#  공공데이터포털(data.go.kr) API → Supabase laws 테이블
+#  v2.0 통일: MCP 경유 — 모든 법령/행정규칙 조회를 LawAPI(MCP) 경유로 통일
+#  (Streamlit Cloud IP 차단 회피, OC 후보 순회 제거)
 #
-#  ★ 일반인 즉시 사용 가능 (공무원 인증 불필요) ★
+#  데이터 흐름: LawAPI(korean-law-mcp) → Supabase laws 테이블
 #
 #  사전 준비:
-#    1. https://www.data.go.kr 회원가입 (일반인 OK, 즉시)
-#    2. "법제처_국가법령정보 공유서비스" 활용 신청 → 즉시 인증키 발급
-#       URL: https://www.data.go.kr/data/15000115/openapi.do
-#    3. .streamlit/secrets.toml에 추가:
-#       DATA_GO_KR_KEY = "발급받은인코딩키"
-#    4. python update_laws.py 실행
+#    1. .streamlit/secrets.toml 또는 환경변수에 ANTHROPIC_API_KEY 등록
+#    2. python update_laws.py 실행
 #
 #  자동화: GitHub Actions (update-laws.yml) 으로 주 1회 자동 실행
 # ============================================================
@@ -202,311 +199,139 @@ ADMRUL_ID_PREFIX = {
 }
 
 
-# ── 행정규칙 검색 → 행정규칙ID ────────────────────────────────
+# ── 행정규칙 검색 → 행정규칙ID (LawAPI/MCP 경유) ────────────────────────────────
 def search_admrul_id(service_key, admrul_name):
-    """data.go.kr 행정규칙 목록 API로 검색"""
-    import requests
-    
-    url = "http://apis.data.go.kr/1170000/law/admrulSearchList.do"
-    params = {
-        "serviceKey": service_key,
-        "target": "admrul",
-        "query": admrul_name,
-        "numOfRows": "10",
-        "pageNo": "1",
-    }
-    
+    """LawAPI(MCP)로 행정규칙 검색. service_key는 v1.x 호환 인자(사용 안 함)."""
+    from law_api_module import LawAPI
+
     info(f"행정규칙 검색: {admrul_name}")
     try:
-        res = requests.get(url, params=params, timeout=30)
-        res.raise_for_status()
+        results = LawAPI().search_admin_rule(admrul_name, display=10)
     except Exception as e:
-        fail(f"행정규칙 검색 API 실패: {e}")
+        fail(f"행정규칙 검색 실패: {e}")
         return None, None
-    
-    try:
-        root = ET.fromstring(res.text)
-    except ET.ParseError:
-        fail(f"XML 파싱 실패")
+
+    if not results or (isinstance(results[0], dict) and "error" in results[0]):
+        msg = results[0]["error"] if results else "결과 없음"
+        fail(f"행정규칙 검색 실패: {msg}")
         return None, None
-    
-    err = root.findtext('.//resultCode')
-    if err and err not in ("00", "0"):
-        msg = root.findtext('.//resultMsg') or ""
-        fail(f"API 오류 ({err}): {msg}")
+
+    # 정확 매칭 우선, 그 다음 부분 매칭
+    exact = [r for r in results if r.get("행정규칙명") == admrul_name and r.get("행정규칙ID")]
+    partial = [
+        r for r in results
+        if r.get("행정규칙ID") and r.get("행정규칙명")
+        and (admrul_name in r["행정규칙명"] or r["행정규칙명"] in admrul_name)
+    ]
+    chosen = (exact + partial + [r for r in results if r.get("행정규칙ID")])
+    if not chosen:
+        warn("행정규칙ID 미발견")
         return None, None
-    
-    # 행정규칙 ID 탐색 (현행 우선)
-    candidates = []
-    for item in root.iter():
-        children = list(item)
-        if len(children) < 2:
-            continue
-        
-        name_val = ""
-        serial_no = ""
-        admrul_id = ""
-        detail_link = ""
-        is_current = False
-        
-        for child in children:
-            tag = child.tag or ""
-            text = (child.text or "").strip()
-            if not text:
-                continue
-            if '행정규칙명' in tag:
-                name_val = text
-            if '행정규칙일련번호' in tag:
-                serial_no = text
-            if '행정규칙ID' in tag or tag == 'admRulId':
-                admrul_id = text
-            if '행정규칙상세링크' in tag:
-                detail_link = text
-            if '현행연혁구분' in tag and '현행' in text:
-                is_current = True
-        
-        if name_val and (serial_no or admrul_id):
-            if admrul_name in name_val or name_val in admrul_name:
-                mst = serial_no or admrul_id
-                candidates.append({
-                    "name": name_val, "mst": mst, "link": detail_link,
-                    "is_current": is_current
-                })
-    
-    if candidates:
-        current = [c for c in candidates if c["is_current"]]
-        chosen = current[0] if current else candidates[0]
-        ok(f"발견: {chosen['name']} (ID: {chosen['mst']}, 현행: {chosen['is_current']})")
-        return chosen["mst"], chosen["link"]
-    
-    warn("행정규칙ID 미발견")
-    tags = [(e.tag, (e.text or "")[:25]) for e in root.iter() if e.text and e.text.strip()]
-    info(f"응답 샘플: {tags[:15]}")
-    return None, None
+    c = chosen[0]
+    ok(f"발견: {c.get('행정규칙명', '?')} (ID: {c['행정규칙ID']})")
+    return c["행정규칙ID"], c.get("상세링크", "")
 
 
 def fetch_admrul_articles(service_key, admrul_id, detail_link=""):
-    """행정규칙 본문 조회 — law.go.kr DRF 사용"""
-    import requests
-    
-    oc_candidates = []
-    if detail_link:
-        import re as _re
-        oc_match = _re.search(r'OC=([^&]+)', detail_link)
-        if oc_match:
-            oc_candidates.append(oc_match.group(1))
-    oc_candidates.extend(["sapphire_5", "test"])
-    seen = set()
-    oc_candidates = [x for x in oc_candidates if not (x in seen or seen.add(x))]
-    
-    for oc in oc_candidates:
-        url = "http://www.law.go.kr/DRF/lawService.do"
-        params = {
-            "OC": oc,
-            "target": "admrul",
-            "ID": admrul_id,
-            "type": "XML",
-        }
-        try:
-            res = requests.get(url, params=params, timeout=60)
-            if res.status_code != 200:
-                info(f"  OC={oc} → HTTP {res.status_code}")
-                continue
-            root = ET.fromstring(res.text)
-            if root.tag == "Response" or root.findtext('.//msg'):
-                info(f"  OC={oc} → 인증 실패")
-                continue
-            
-            # 조문 태그 확인 (행정규칙은 다양한 구조)
-            has_articles = bool(
-                root.findall('.//조문단위') or root.findall('.//조문') or
-                root.findall('.//본문') or root.findall('.//조') or
-                root.findall('.//조문내용')
-            )
-            if has_articles:
-                ok(f"  행정규칙 조문 조회 성공 (OC={oc})")
-                return root
-            
-            # 조문 태그는 없지만 응답이 있는 경우 — 태그 구조 로그
-            all_tags = sorted(set(e.tag for e in root.iter()))
-            info(f"  OC={oc} → 조문 태그 없음. 태그: {all_tags[:20]}")
-            
-            # 본문 텍스트가 있으면 일단 반환 (extract_articles에서 처리)
-            if len(all_tags) > 3:
-                return root
-                
-        except ET.ParseError:
-            info(f"  OC={oc} → XML 파싱 실패")
-            continue
-        except Exception as e:
-            info(f"  OC={oc} → 오류: {e}")
-            continue
-    
-    fail("행정규칙 조문 조회 실패 — 모든 OC 후보 소진")
-    return None
+    """행정규칙 본문 조회 (LawAPI/MCP 경유). 반환: dict {"법령명","시행일자","조문목록"} 또는 None."""
+    from law_api_module import LawAPI
+    try:
+        detail = LawAPI().get_admin_rule_text(admrul_id)
+    except Exception as e:
+        fail(f"행정규칙 조문 조회 실패: {e}")
+        return None
+    if isinstance(detail, dict) and "error" in detail:
+        fail(f"행정규칙 조문 조회 실패: {detail['error']}")
+        return None
+    ok("  행정규칙 조문 조회 성공")
+    return detail
 
-# ── API: 법령 검색 → 법령ID + 상세링크 ─────────────────────────
+# ── API: 법령 검색 → MST + 상세링크 (LawAPI/MCP 경유) ─────────────────────────
 def search_law_id(service_key, law_name):
-    import requests
-    
-    url = "http://apis.data.go.kr/1170000/law/lawSearchList.do"
-    params = {
-        "serviceKey": service_key,
-        "target": "law",
-        "query": law_name,
-        "numOfRows": "20",
-        "pageNo": "1",
-    }
-    
+    """LawAPI(MCP)로 법령명 → MST 조회. service_key는 v1.x 호환 인자(사용 안 함)."""
+    from law_api_module import LawAPI
+
     info(f"검색: {law_name}")
     try:
-        res = requests.get(url, params=params, timeout=30)
-        res.raise_for_status()
+        results = LawAPI().search_law(law_name, display=20)
     except Exception as e:
-        fail(f"검색 API 실패: {e}")
+        fail(f"검색 실패: {e}")
         return None, None
-    
-    try:
-        root = ET.fromstring(res.text)
-    except ET.ParseError:
-        if "SERVICE_KEY" in res.text or "인증" in res.text:
-            fail("API 인증키 오류 — 인코딩 키를 확인하세요")
-        else:
-            fail(f"XML 파싱 실패 — {res.text[:200]}")
+
+    if not results or (isinstance(results[0], dict) and "error" in results[0]):
+        msg = results[0]["error"] if results else "결과 없음"
+        fail(f"검색 실패: {msg}")
         return None, None
-    
-    # 에러 체크
-    err = root.findtext('.//returnReasonCode') or root.findtext('.//resultCode')
-    if err and err not in ("00", "0"):
-        msg = root.findtext('.//returnAuthMsg') or root.findtext('.//resultMsg') or ""
-        fail(f"API 오류 ({err}): {msg}")
+
+    # 정확 매칭 → 부분 매칭(앞 10자) → 첫 결과
+    exact = [r for r in results if r.get("법령명") == law_name and r.get("MST")]
+    partial = [
+        r for r in results
+        if r.get("MST") and r.get("법령명")
+        and (law_name in r["법령명"] or r["법령명"] in law_name
+             or r["법령명"][:10] in law_name or law_name[:10] in r["법령명"])
+    ]
+    chosen = (exact + partial + [r for r in results if r.get("MST")])
+    if not chosen:
+        warn("법령ID 미발견")
         return None, None
-    
-    # 법령ID + 법령상세링크 탐색 (현행 법령 우선)
-    candidates = []
-    for item in root.iter():
-        children = list(item)
-        if len(children) < 2:
-            continue
-        
-        name_val = ""
-        serial_no = ""   # 법령일련번호 (MST로 사용)
-        law_id_val = ""  # 법령ID
-        detail_link = ""
-        is_current = False
-        for child in children:
-            tag = child.tag or ""
-            text = (child.text or "").strip()
-            if not text:
-                continue
-            if any(k in tag for k in ['법령명한글', '법령명', 'lawNm']):
-                name_val = text
-            if '법령일련번호' in tag:
-                serial_no = text
-            if tag == '법령ID' or tag == 'lsId':
-                law_id_val = text
-            if '법령상세링크' in tag:
-                detail_link = text
-            if '현행연혁코드' in tag and '현행' in text:
-                is_current = True
-        
-        # 이름 매칭 체크 (정확 매칭 + 부분 매칭 + 잘린 이름 대응)
-        if name_val and (
-            law_name in name_val or name_val in law_name or
-            name_val[:10] in law_name or law_name[:10] in name_val
-        ):
-            mst = serial_no or law_id_val
-            if mst:
-                candidates.append({
-                    "name": name_val, "mst": mst, "link": detail_link,
-                    "is_current": is_current
-                })
-    
-    if candidates:
-        # 현행 법령 우선 선택
-        current = [c for c in candidates if c["is_current"]]
-        chosen = current[0] if current else candidates[0]
-        ok(f"발견: {chosen['name']} (MST: {chosen['mst']}, 현행: {chosen['is_current']})")
-        return chosen["mst"], chosen["link"]
-    
-    warn("법령ID 미발견 — 태그 구조 확인 필요")
-    tags = [(e.tag, (e.text or "")[:25]) for e in root.iter() if e.text and e.text.strip()]
-    info(f"응답 샘플: {tags[:15]}")
-    return None, None
+    c = chosen[0]
+    ok(f"발견: {c.get('법령명', '?')} (MST: {c['MST']})")
+    return c["MST"], c.get("상세링크", "")
 
 
-# ── API: 법령 본문(조문) 조회 ────────────────────────────────
+# ── API: 법령 본문(조문) 조회 (LawAPI/MCP 경유) ────────────────────────────────
 def fetch_law_articles(service_key, law_id, detail_link=""):
-    """법령 조문 XML 조회. 
-    상세링크에서 OC를 추출하여 시도하고, 실패 시 여러 OC 후보로 폴백.
+    """법령 조문 조회 (LawAPI/MCP 경유). 반환: dict {"법령명","시행일자","조문목록"} 또는 None.
+    service_key/detail_link는 v1.x 호환 인자(사용 안 함)."""
+    from law_api_module import LawAPI
+    try:
+        detail = LawAPI().get_law_text(law_id)
+    except Exception as e:
+        fail(f"조문 조회 실패: {e}")
+        return None
+    if isinstance(detail, dict) and "error" in detail:
+        fail(f"조문 조회 실패: {detail['error']}")
+        return None
+    ok("  조문 조회 성공")
+    return detail
+
+
+# ── 조문 번호 정규화 ───────────────────────────────────────
+def _normalize_article_no(raw):
+    """다양한 조문번호 표기를 '제N조' 또는 '제N조의M' 형식으로 정규화.
+    예: '2' → '제2조', '000200' → '제2조', '000201' → '제2조의1',
+        '2의3' → '제2조의3', '제3조' → '제3조' (그대로)
     """
-    import requests
-    
-    # 상세링크에서 OC 추출
-    oc_candidates = []
-    if detail_link:
-        import re as _re
-        oc_match = _re.search(r'OC=([^&]+)', detail_link)
-        if oc_match:
-            oc_candidates.append(oc_match.group(1))
-    
-    # 폴백 OC 후보들 (가이드 문서 샘플에서 발견된 값들)
-    oc_candidates.extend(["sapphire_5", "test", ""])
-    # 중복 제거 + 순서 유지
-    seen = set()
-    oc_candidates = [x for x in oc_candidates if not (x in seen or seen.add(x))]
-    
-    for oc in oc_candidates:
-        url = "http://www.law.go.kr/DRF/lawService.do"
-        params = {
-            "OC": oc,
-            "target": "law",
-            "MST": law_id,
-            "type": "XML",
-        }
-        
-        try:
-            res = requests.get(url, params=params, timeout=60)
-            if res.status_code != 200:
-                continue
-            
-            root = ET.fromstring(res.text)
-            
-            # 인증 실패 응답 체크 (Response > msg 구조)
-            if root.tag == "Response" or root.findtext('.//msg'):
-                info(f"  OC={oc} → 인증 실패, 다음 시도...")
-                continue
-            
-            # 조문 태그가 있는지 확인
-            has_articles = bool(
-                root.findall('.//조문단위') or 
-                root.findall('.//조문') or
-                root.findall('.//Article')
-            )
-            if has_articles:
-                ok(f"  조문 조회 성공 (OC={oc})")
-                return root
-            else:
-                # 조문은 없지만 법령 정보는 있을 수 있음
-                all_tags = [e.tag for e in root.iter()]
-                if len(all_tags) > 5:
-                    info(f"  OC={oc} → 응답 있으나 조문 태그 없음: {all_tags[:10]}")
-                continue
-                
-        except ET.ParseError:
-            continue
-        except Exception as e:
-            info(f"  OC={oc} → 오류: {e}")
-            continue
-    
-    fail("모든 OC 후보 실패 — open.law.go.kr 승인 대기 필요")
-    return None
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if s.startswith("제"):
+        if not s.endswith("조") and not re.search(r'조의\d+$', s):
+            s = s + "조"
+        return s
+    # 6자리 코드 ("000200")
+    if s.isdigit() and len(s) >= 4:
+        main = int(s[:-2]) if len(s) >= 5 else int(s)
+        sub = int(s[-2:]) if len(s) >= 5 else 0
+        if sub == 0:
+            return f"제{main}조"
+        return f"제{main}조의{sub}"
+    # "2의3" 형태
+    if "의" in s:
+        return f"제{s}조"
+    # 단순 숫자
+    return f"제{s}조"
 
 
 # ── 조문 추출 ─────────────────────────────────────────────
 def extract_articles(law_root, target_articles):
+    # v2.0: LawAPI 반환 dict 처리
+    if isinstance(law_root, dict):
+        return _extract_from_lawapi_dict(law_root, target_articles)
+
     results = []
-    
+
     # 조문 태그 탐색 (다양한 XML 구조 대응)
     article_elems = []
     for tag in ['조문단위', '조문', 'Article', 'Jo', '조']:
@@ -609,6 +434,81 @@ def extract_articles(law_root, target_articles):
         else:
             warn(f"  {no} — 내용 비어있음")
     
+    return results
+
+
+def _extract_from_lawapi_dict(detail: dict, target_articles):
+    """LawAPI(MCP) 반환 dict에서 target_articles에 해당하는 조문만 추출.
+    detail: {"법령명","시행일자","조문목록":[{"조문번호","조문제목","조문내용",...}, ...]}
+    """
+    results = []
+    target_set = set(target_articles)
+    raw_articles = detail.get("조문목록") or []
+    info(f"  MCP 조문 {len(raw_articles)}개 수신")
+
+    # 1차: 구조화된 조문 매칭
+    structured_hits = {}
+    for art in raw_articles:
+        if not isinstance(art, dict):
+            continue
+        raw_no = str(art.get("조문번호", "") or "").strip()
+        content = str(art.get("조문내용", "") or "").strip()
+        if not content:
+            continue
+        no = _normalize_article_no(raw_no)
+        if no in target_set:
+            structured_hits[no] = {
+                "title": str(art.get("조문제목", "") or "").strip(),
+                "content": content,
+            }
+
+    for no in target_articles:
+        if no in structured_hits:
+            data = structured_hits[no]
+            results.append({
+                "article_no": no,
+                "article_title": data["title"],
+                "content": data["content"],
+            })
+            ok(f"  {no} {data['title']} — {len(data['content'])}자")
+
+    # 2차: 행정규칙처럼 조문번호가 본문 앞부분에 인라인된 경우
+    if len(results) < len(target_articles):
+        missing = target_set - {r["article_no"] for r in results}
+        if missing:
+            inline_pool = []
+            for art in raw_articles:
+                if not isinstance(art, dict):
+                    continue
+                content = str(art.get("조문내용", "") or "").strip()
+                if content:
+                    inline_pool.append(content)
+            for art_no in list(missing):
+                merged_parts = []
+                title = ""
+                for text in inline_pool:
+                    if text.startswith(art_no) or re.match(
+                        rf"^{re.escape(art_no)}\b", text
+                    ):
+                        m = re.match(rf"^{re.escape(art_no)}\s*[\(（]([^)）]+)[\)）]", text)
+                        if m and not title:
+                            title = m.group(1)
+                        merged_parts.append(text)
+                if merged_parts:
+                    content = "\n\n".join(merged_parts)
+                    results.append({
+                        "article_no": art_no,
+                        "article_title": title,
+                        "content": content,
+                    })
+                    ok(f"  {art_no} {title} — {len(content)}자 (인라인 매칭)")
+
+    if not results:
+        seen_nos = [
+            _normalize_article_no(str(a.get("조문번호", "") or ""))
+            for a in raw_articles if isinstance(a, dict)
+        ]
+        warn(f"대상 조문 미발견. MCP 응답의 조문번호 샘플: {seen_nos[:20]}")
     return results
 
 
@@ -770,9 +670,7 @@ def main():
     except Exception as e:
         fail(f"Supabase 실패: {e}")
         sys.exit(1)
-    
-    import requests
-    
+
     total_up = total_unch = total_fail = 0
     
     for law in TARGET_LAWS:

@@ -534,6 +534,16 @@ class LawAPI:
             })
         return results
 
+    def get_admin_rule_text(self, admrul_id: str) -> dict:
+        """행정규칙 본문 조회 (MCP 경유). get_law_text 도구에 target='admrul' 힌트 전달."""
+        try:
+            raw = _mcp_call("get_law_text", {"id": admrul_id, "target": "admrul"})
+        except Exception as e:
+            return {"error": f"API 호출 실패: {e}"}
+        if isinstance(raw, list) and raw:
+            raw = raw[0]
+        return _map_law_text(raw)
+
     @staticmethod
     def jo_to_code(jo_num: int) -> str:
         return f"{jo_num:04d}00"
