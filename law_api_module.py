@@ -1,7 +1,33 @@
 """
-법제처 Open API 연동 모듈 v1.6
+법제처 Open API 연동 모듈 v1.7
 ========================
-v1.6 변경사항 (안정성 강화):
+v1.7 변경사항 (큰 법령 ConnectionReset 대응):
+  - 실제 원인 분석: law.go.kr 서버가 큰 EUC-KR 응답 전송 중 connection을 끊는 동작
+    (작은 법령은 OK / 관세법·상표법 등 300조+ 법령에서 ConnectionResetError 발생)
+  - urllib3 Retry에 connect=3, read=3 추가 (status 외에 네트워크 단계 재시도)
+  - backoff_factor 1.5로 상향
+  - 요청 헤더 추가: User-Agent, Accept, Accept-Encoding, Connection: close
+    (keep-alive 비활성화로 큰 응답 안정성 확보)
+  - ConnectionResetError / ChunkedEncodingError 명시적 retry (2초 후 1회 재시도)
+  - 응답 크기 로깅 (프로토콜·바이트 수)
+  - get_law_text 청크 폴백: 큰 법령 실패 시 JO 파라미터로 50조씩 끊어 재조회
+    (_get_law_text_chunked)
+  - 진단 패널 강화: 작은 요청과 큰 법령(관세법) 요청을 동시 테스트
+    (large_request_ok / large_request_error)
+  - 큰 응답 끊김 에러 메시지 도메인화
+
+v1.6:
+  - HTTPS 우선 + HTTP 자동 폴백 (Streamlit Cloud / 회사망 방화벽 대응)
+  - urllib3 Retry 정책 적용 (5xx/408/429 → 3회 백오프 재시도, 1s→2s→4s)
+  - requests.Session() + HTTPAdapter 공용 캐싱 (_get_session)
+  - REQUEST_TIMEOUT 30초로 상향
+  - HTTP status code 체크 (200 외 응답 파싱 시도 안 함)
+  - 응답 디코딩 견고화: bytes → UTF-8 → EUC-KR → CP949 폴백
+  - API 진단 도구 신규: run_api_diagnostics() / render_api_diagnostics_panel()
+  - 사이드바에 "🔧 법령 API 연결 진단" 버튼 추가
+  - 약어 매핑 fallback: resolved 키워드 실패 시 원본 키워드로 재시도
+  - 일부 API 호출 실패 시 사이드바에 카테고리별 실패 사유 표시
+  - get_oc() 안정화: st.secrets.get() + 환경변수 폴백
   - HTTPS 우선 + HTTP 자동 폴백 (Streamlit Cloud / 회사망 방화벽 대응)
   - urllib3 Retry 정책 적용 (5xx/408/429 → 3회 백오프 재시도, 1s→2s→4s)
   - requests.Session() + HTTPAdapter 공용 캐싱 (_get_session)
@@ -23,6 +49,7 @@ v1.4:
 """
 
 import os
+import time
 import requests
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
@@ -56,6 +83,16 @@ DETAIL_URL_HTTP = "http://www.law.go.kr/DRF/lawService.do"
 
 REQUEST_TIMEOUT = 30
 
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (legal_ai compliance; +https://github.com/SakulSakul/legal_ai)",
+    "Accept": "application/xml, text/xml, */*",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "close",
+}
+
+# 진단 시 사용할 큰 법령 MST (관세법)
+DIAG_LARGE_MST_FALLBACK = "280363"
+
 ABBREVIATIONS = {
     "표시광고법": "표시광고", "전상법": "전자상거래", "관세법": "관세법",
     "외환법": "외국환거래법", "관광진흥법": "관광진흥법", "개인정보보호법": "개인정보보호법",
@@ -82,7 +119,9 @@ def _resolve_keyword(keyword):
 def _get_session() -> requests.Session:
     retry = Retry(
         total=3,
-        backoff_factor=1.0,
+        connect=3,
+        read=3,
+        backoff_factor=1.5,
         status_forcelist=[500, 502, 503, 504, 408, 429],
         allowed_methods=["GET"],
         raise_on_status=False,
@@ -113,25 +152,66 @@ def _build_url(base_url: str, params_dict: dict) -> str:
     return base_url + "?" + "&".join(parts)
 
 
-def _try_request(url: str, label: str):
-    """단일 URL 요청. (tree, error_message) 반환."""
+def _is_connection_reset(exc: BaseException) -> bool:
+    """ConnectionResetError 계열 여부 (중첩 원인 포함)."""
+    cur = exc
+    seen = 0
+    while cur is not None and seen < 6:
+        if isinstance(cur, ConnectionResetError):
+            return True
+        msg = str(cur).lower()
+        if "connection reset" in msg or "connection aborted" in msg:
+            return True
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+        seen += 1
+    return False
+
+
+def _single_request(url: str, label: str):
+    """단일 URL 한 번 요청. (tree, error_message) 반환. 예외는 호출자에게 전파."""
+    sess = _get_session()
+    res = sess.get(url, timeout=REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
+    if res.status_code != 200:
+        return None, f"HTTP {res.status_code} ({label})"
+    content = _decode_response(res)
+    logger.info(f"법제처 API 응답 ({label}, {len(content)} bytes)")
+    if not content or len(content.strip()) < 10:
+        return None, f"빈 응답 ({label})"
     try:
-        sess = _get_session()
-        res = sess.get(url, timeout=REQUEST_TIMEOUT)
-        if res.status_code != 200:
-            return None, f"HTTP {res.status_code} ({label})"
-        content = _decode_response(res)
-        if not content or len(content.strip()) < 10:
-            return None, f"빈 응답 ({label})"
-        try:
-            return ET.fromstring(content), None
-        except ET.ParseError as e:
-            logger.error(f"XML 파싱 실패 ({label}): {e}")
-            return None, f"XML 파싱 실패 ({label})"
+        return ET.fromstring(content), None
+    except ET.ParseError as e:
+        logger.error(f"XML 파싱 실패 ({label}): {e}")
+        return None, f"XML 파싱 실패 ({label})"
+
+
+def _try_request(url: str, label: str):
+    """단일 URL 요청 + ConnectionReset/ChunkedEncoding 명시적 재시도. (tree, error_message)."""
+    try:
+        return _single_request(url, label)
     except requests.Timeout:
         return None, f"요청 시간 초과 ({label})"
-    except requests.ConnectionError:
-        return None, f"서버 연결 실패 ({label})"
+    except (requests.exceptions.ChunkedEncodingError, requests.ConnectionError) as e:
+        if _is_connection_reset(e) or isinstance(e, requests.exceptions.ChunkedEncodingError):
+            logger.warning(
+                f"{label} 응답 중 connection 끊김 감지 ({type(e).__name__}), 2초 후 1회 재시도"
+            )
+            time.sleep(2)
+            try:
+                return _single_request(url, label)
+            except requests.Timeout:
+                return None, f"요청 시간 초과 ({label}) — 재시도 후"
+            except (requests.exceptions.ChunkedEncodingError, requests.ConnectionError) as e2:
+                if _is_connection_reset(e2) or isinstance(
+                    e2, requests.exceptions.ChunkedEncodingError
+                ):
+                    return None, (
+                        f"응답 크기 초과로 서버가 연결 종료 ({label}) "
+                        "— 큰 응답에서 law.go.kr 서버가 connection을 끊음"
+                    )
+                return None, f"서버 연결 실패 ({label}): {type(e2).__name__}"
+            except Exception as e2:
+                return None, f"요청 실패: {type(e2).__name__} ({label}) — 재시도 후"
+        return None, f"서버 연결 실패 ({label}): {type(e).__name__}"
     except Exception as e:
         return None, f"요청 실패: {type(e).__name__} ({label})"
 
@@ -400,6 +480,16 @@ class LawAPI:
         if jo: params["JO"] = jo
         tree, error = _make_request(DETAIL_URL_HTTPS, DETAIL_URL_HTTP, params)
         if error:
+            # 큰 응답에서 connection 끊김으로 실패한 경우 → 청크 폴백
+            if jo is None and ("연결 종료" in error or "Connection" in error
+                               or "서버 연결 실패" in error):
+                logger.warning(
+                    f"{mst}: 전체 조회 실패({error}), 청크 모드로 폴백 시도"
+                )
+                chunked = self._get_law_text_chunked(mst)
+                if "error" not in chunked:
+                    return chunked
+                return {"error": f"API 호출 실패: {error} / 청크 폴백도 실패: {chunked['error']}"}
             return {"error": f"API 호출 실패: {error}"}
         law_name = tree.findtext(".//법령명_한글", "") or tree.findtext(".//법령명한글", "")
         articles = []
@@ -415,6 +505,54 @@ class LawAPI:
         if not articles and not law_name:
             return {"error": "조문을 파싱하지 못했습니다."}
         return {"법령명": law_name, "시행일자": tree.findtext(".//시행일자", ""), "조문목록": articles}
+
+    def _get_law_text_chunked(self, mst: str) -> dict:
+        """큰 법령용 청크 폴백: JO 파라미터로 조문 1~300을 50개씩 끊어 개별 요청."""
+        law_name = ""
+        sihaeng = ""
+        articles = []
+        total_attempted = 0
+
+        for chunk_start in range(1, 301, 50):
+            chunk_hits = 0
+            for jo_num in range(chunk_start, chunk_start + 50):
+                jo_code = LawAPI.jo_to_code(jo_num)
+                params = {
+                    "OC": self.oc, "target": "law", "type": "XML",
+                    "MST": mst, "JO": jo_code,
+                }
+                tree, error = _make_request(DETAIL_URL_HTTPS, DETAIL_URL_HTTP, params)
+                total_attempted += 1
+                if error or tree is None:
+                    continue
+                if not law_name:
+                    law_name = (tree.findtext(".//법령명_한글", "")
+                                or tree.findtext(".//법령명한글", ""))
+                if not sihaeng:
+                    sihaeng = tree.findtext(".//시행일자", "")
+                for article in tree.iter("조문단위"):
+                    content = article.findtext("조문내용", "")
+                    if content:
+                        articles.append({
+                            "조문번호": article.findtext("조문번호", ""),
+                            "조문제목": article.findtext("조문제목", ""),
+                            "조문내용": content,
+                            "조문시행일자": article.findtext("조문시행일자", ""),
+                        })
+                        chunk_hits += 1
+            # 한 청크(50개)에서 한 건도 못 받았다면 더 이상 조문이 없을 가능성 높음
+            if chunk_hits == 0 and articles:
+                break
+            if chunk_hits == 0 and chunk_start >= 51:
+                break
+
+        if not articles:
+            return {"error": "청크 모드로도 조문을 가져오지 못했습니다."}
+        logger.warning(
+            f"{mst}: 큰 법령으로 청크 모드 사용 (조문 {len(articles)}건 / "
+            f"시도 {total_attempted}회)"
+        )
+        return {"법령명": law_name, "시행일자": sihaeng, "조문목록": articles}
 
     def get_precedent_detail(self, prec_id: str) -> dict:
         params = {"OC": self.oc, "target": "prec", "type": "XML", "ID": prec_id}
@@ -491,7 +629,7 @@ class LawAPI:
 # API 진단
 # ──────────────────────────────────────────────
 def run_api_diagnostics() -> dict:
-    """법제처 API 연결 상태를 진단."""
+    """법제처 API 연결 상태를 진단 (작은 검색 + 큰 법령 조회 두 단계)."""
     oc = get_oc()
     masked = ""
     if oc:
@@ -505,27 +643,37 @@ def run_api_diagnostics() -> dict:
         "https_error": None,
         "http_error": None,
         "sample_result": None,
+        "large_request_ok": False,
+        "large_request_error": None,
+        "large_request_articles": 0,
     }
 
     if not oc:
         result["https_error"] = "LAW_OC 미설정"
         result["http_error"] = "LAW_OC 미설정"
+        result["large_request_error"] = "LAW_OC 미설정"
         return result
 
+    # 1) 작은 검색 요청 (lawSearch.do, display=1)
     params = {"OC": oc, "target": "law", "type": "XML",
               "query": "관세법", "display": "1"}
+
+    large_mst = ""
 
     https_url = _build_url(BASE_URL_HTTPS, params)
     tree, err = _try_request(https_url, "HTTPS")
     if tree is not None:
         result["https_ok"] = True
-        sample = None
         for item in tree.iter():
             sample = item.findtext("법령명한글")
             if sample:
+                result["sample_result"] = sample
+                detail_link = item.findtext("법령상세링크", "") or ""
+                if "MST=" in detail_link:
+                    large_mst = detail_link.split("MST=")[1].split("&")[0]
+                if not large_mst:
+                    large_mst = item.findtext("법령일련번호", "") or ""
                 break
-        if sample:
-            result["sample_result"] = sample
     else:
         result["https_error"] = err
 
@@ -538,9 +686,27 @@ def run_api_diagnostics() -> dict:
                 s = item.findtext("법령명한글")
                 if s:
                     result["sample_result"] = s
+                    detail_link = item.findtext("법령상세링크", "") or ""
+                    if "MST=" in detail_link and not large_mst:
+                        large_mst = detail_link.split("MST=")[1].split("&")[0]
+                    if not large_mst:
+                        large_mst = item.findtext("법령일련번호", "") or ""
                     break
     else:
         result["http_error"] = err2
+
+    # 2) 큰 법령 조회 테스트 (lawService.do, 관세법 MST)
+    if not large_mst:
+        large_mst = DIAG_LARGE_MST_FALLBACK
+
+    large_params = {"OC": oc, "target": "law", "type": "XML", "MST": large_mst}
+    tree3, err3 = _make_request(DETAIL_URL_HTTPS, DETAIL_URL_HTTP, large_params)
+    if tree3 is not None:
+        cnt = sum(1 for _ in tree3.iter("조문단위"))
+        result["large_request_ok"] = True
+        result["large_request_articles"] = cnt
+    else:
+        result["large_request_error"] = err3
 
     return result
 
@@ -575,8 +741,23 @@ def render_api_diagnostics_panel():
             if diag.get("sample_result"):
                 st.caption(f"📄 샘플 응답: {diag['sample_result']}")
 
-            if diag["oc_configured"] and not diag["https_ok"] and not diag["http_ok"]:
+            st.markdown("**📦 큰 법령 조회 테스트** (관세법)")
+            if diag.get("large_request_ok"):
+                cnt = diag.get("large_request_articles", 0)
+                st.success(f"큰 법령 조회 성공 (조문 {cnt}건)")
+            else:
+                st.error(f"큰 법령 조회 실패: {diag.get('large_request_error') or '알 수 없음'}")
+
+            small_ok = diag["https_ok"] or diag["http_ok"]
+            large_ok = diag.get("large_request_ok", False)
+
+            if diag["oc_configured"] and not small_ok and not large_ok:
                 st.warning("회사망 프록시·방화벽·Streamlit Cloud 정책 점검 필요")
+            elif small_ok and not large_ok:
+                st.info(
+                    "🔍 작은 요청은 OK, 큰 법령 조회만 실패 → "
+                    "v1.7 청크 폴백이 자동 처리"
+                )
 
 
 # ──────────────────────────────────────────────
