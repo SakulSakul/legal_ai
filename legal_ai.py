@@ -4,6 +4,9 @@
 #  보안: 자동 DLP(개인/기업정보) + 협력사명 지정 마스킹 탑재
 #  디자인: 신세계그룹 뉴스룸 테마 적용 (Noto Sans KR, #E02B20)
 #
+#  v2.0 통일: MCP 경유 — 모든 법령 API 호출을 LawAPI(korean-law-mcp) 경유로 통일
+#  (Streamlit Cloud IP 차단 회피, 잔여 직접 호출 제거)
+#
 #  v2.1 변경사항:
 #  - Claude 모델 버전 설정값 외부화 (Secrets 지원)
 #  - 계좌번호 DLP 정규식 오탐 수정 (은행별 패턴 정밀화)
@@ -999,66 +1002,54 @@ def call_mcp_law(query, max_tokens=2048):
 
 
 def verify_precedent_via_api(case_no, context_keywords=None):
-    """law.go.kr API로 판례 검증.
+    """LawAPI(MCP)로 판례 검증.
     Returns: (status: str, title: str)
     """
-    import requests
     import re as _re
-    
+
     num_match = _re.search(r'(\d{4}[가-힣]+\d+)', case_no)
     if not num_match:
         return "not_found", ""
-    
+
     query = num_match.group(1)
     try:
-        url = "https://www.law.go.kr/DRF/lawSearch.do"
-        params = {"OC": "ocwhip3122", "target": "prec", "type": "XML", "query": query}
-        res = requests.get(url, params=params, timeout=10)
-        if res.status_code != 200:
-            return "error", ""
-        
-        root = ET.fromstring(res.text)
-        total = root.findtext('.//totalCnt') or root.findtext('.//TotalCnt') or "0"
-        if int(total) == 0:
-            return "not_found", ""
-        
-        title = ""
-        for elem in root.iter():
-            if '사건명' in elem.tag and elem.text:
-                title = elem.text.strip()
-                break
-        
-        if context_keywords and title:
-            title_lower = title.lower()
-            if not any(kw in title_lower for kw in context_keywords):
-                return "wrong_context", title
-        
-        return "verified", title
+        from law_api_module import LawAPI
+        results = LawAPI().search_precedent(query, display=5)
     except Exception as e:
         logger.warning(f"판례 API 검증 실패 ({query}): {e}")
         return "error", ""
 
+    if not results or (isinstance(results[0], dict) and "error" in results[0]):
+        return ("error", "") if (results and "error" in results[0]) else ("not_found", "")
+
+    title = ""
+    for r in results:
+        title = r.get("사건명") or ""
+        if title:
+            break
+
+    if context_keywords and title:
+        title_lower = title.lower()
+        if not any(kw in title_lower for kw in context_keywords):
+            return "wrong_context", title
+
+    return "verified", title
+
 
 def verify_law_via_api(law_name, article):
-    """law.go.kr API로 법령 존재 여부 검증.
+    """LawAPI(MCP)로 법령 존재 여부 검증.
     Returns: (exists: bool, content_preview: str)
     """
-    import requests
     try:
-        url = "https://www.law.go.kr/DRF/lawSearch.do"
-        params = {"OC": "ocwhip3122", "target": "law", "type": "XML", "query": law_name}
-        res = requests.get(url, params=params, timeout=10)
-        if res.status_code != 200:
-            return False, ""
-        
-        root = ET.fromstring(res.text)
-        total = root.findtext('.//totalCnt') or "0"
-        if int(total) > 0:
-            return True, f"{law_name} 법령 존재 확인"
-        return False, ""
+        from law_api_module import LawAPI
+        results = LawAPI().search_law(law_name, display=3)
     except Exception as e:
         logger.warning(f"법령 API 검증 실패 ({law_name}): {e}")
         return False, ""
+
+    if not results or (isinstance(results[0], dict) and "error" in results[0]):
+        return False, ""
+    return True, f"{law_name} 법령 존재 확인"
 
 
 def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
@@ -3299,43 +3290,29 @@ def main():
             st.caption(f"🤖 Claude: `{CLAUDE_MODEL}`")
             st.caption(f"🤖 Gemini: `{GEMINI_MODELS[0]}` → `{GEMINI_MODELS[1]}`")
 
-            # law.go.kr API 연결 상태 확인 + 법령 DB 수동 업데이트
-            st.markdown("**🔗 law.go.kr API 상태**")
+            # 법령 API 연결 상태 확인 (MCP 경유) + 법령 DB 수동 업데이트
+            st.markdown("**🔗 법령 API 상태 (korean-law-mcp 경유)**")
             col_api1, col_api2 = st.columns(2)
             with col_api1:
                 if st.button("🔍 법령 API 연결 테스트", use_container_width=True, key="api_test"):
-                    with st.spinner("law.go.kr 연결 테스트 중..."):
+                    with st.spinner("korean-law-mcp 연결 테스트 중..."):
                         try:
-                            import requests as _req
-                            # HTTPS 사용 (Streamlit Cloud에서 HTTP 차단 가능)
-                            test_res = _req.get(
-                                "https://www.law.go.kr/DRF/lawSearch.do",
-                                params={"OC": "ocwhip3122", "target": "law", "type": "XML", "query": "관세법"},
-                                timeout=15, verify=True
-                            )
-                            if test_res.status_code == 200 and "totalCnt" in test_res.text:
-                                import xml.etree.ElementTree as _ET
-                                _root = _ET.fromstring(test_res.text)
-                                _total = _root.findtext('.//totalCnt') or "0"
-                                st.success(f"✅ law.go.kr API 연결 정상 (관세법 검색 결과: {_total}건)")
+                            from law_api_module import LawAPI, run_api_diagnostics
+                            results = LawAPI().search_law("관세법", display=1)
+                            if results and isinstance(results[0], dict) and "error" in results[0]:
+                                st.error(f"❌ MCP 호출 실패: {results[0]['error']}")
+                            elif results:
+                                sample = results[0].get("법령명", "(법령명 없음)")
+                                st.success(f"✅ 법령 API 연결 정상 — 샘플: {sample}")
                             else:
-                                st.error(f"❌ API 응답 이상\n- HTTP 상태: {test_res.status_code}\n- 응답 본문: {test_res.text[:300]}")
+                                diag = run_api_diagnostics()
+                                if diag.get("mcp_ok"):
+                                    st.success("✅ MCP 연결 정상 (검색 결과 없음)")
+                                else:
+                                    st.error(f"❌ MCP 호출 실패: {diag.get('mcp_error') or '알 수 없음'}")
                         except Exception as api_err:
-                            err_msg = str(api_err)
-                            st.error(f"❌ 연결 실패")
-                            st.code(err_msg[:500], language="text")
-                            if "ConnectionReset" in err_msg or "Connection aborted" in err_msg:
-                                st.info("💡 Streamlit Cloud에서 HTTP(80) 포트가 차단될 수 있습니다. HTTPS로 재시도 중...")
-                                try:
-                                    test_res2 = _req.get(
-                                        "https://www.law.go.kr/DRF/lawSearch.do",
-                                        params={"OC": "ocwhip3122", "target": "law", "type": "XML", "query": "형법"},
-                                        timeout=15
-                                    )
-                                    if test_res2.status_code == 200:
-                                        st.success("✅ HTTPS로 연결 성공!")
-                                except Exception as e2:
-                                    st.error(f"HTTPS도 실패: {str(e2)[:200]}")
+                            st.error("❌ 연결 실패")
+                            st.code(str(api_err)[:500], language="text")
                 
                 if st.button("🧪 MCP 연결 디버그", use_container_width=True, key="mcp_debug"):
                     with st.spinner("korean-law-mcp 테스트 중..."):
@@ -3383,11 +3360,15 @@ def main():
                             _client = init_anthropic()
                             
                             try:
-                                _law_key = get_secret("LAW_OC") or "ocwhip3122"
+                                _law_key = get_secret("LAW_OC") or ""
                                 resp = _client.beta.messages.create(
                                     model="claude-sonnet-4-20250514",
                                     max_tokens=500,
-                                    system=f"법제처 API 키: {_law_key}. 도구 호출 시 apiKey에 이 키를 사용하세요.",
+                                    system=(
+                                        f"법제처 API 키: {_law_key}. 도구 호출 시 apiKey에 이 키를 사용하세요."
+                                        if _law_key else
+                                        "법제처 OC 키 없이 MCP 도구를 호출하세요."
+                                    ),
                                     messages=[{"role": "user", "content": "관세법 제1조 조문 원문 알려줘"}],
                                     mcp_servers=[{
                                         "type": "url",
@@ -3584,80 +3565,68 @@ def main():
                 
                 if st.button("📥 API에서 조문 가져오기", key="manual_fetch"):
                     if manual_law and manual_art and manual_short:
-                        with st.spinner(f"{manual_law} {manual_art} 조회 중..."):
+                        with st.spinner(f"{manual_law} {manual_art} 조회 중... (MCP 경유)"):
                             try:
-                                import requests as _req
                                 import re as _re
-                                
-                                # 1. 법령 검색 → MST 번호 획득
-                                search_res = _req.get("https://www.law.go.kr/DRF/lawSearch.do",
-                                    params={"OC": "ocwhip3122", "target": "law", "type": "XML", "query": manual_law}, timeout=10)
-                                search_root = ET.fromstring(search_res.text)
-                                mst = None
-                                for item in search_root.iter():
-                                    children = {c.tag: (c.text or "").strip() for c in item}
-                                    name_val = children.get("법령명한글", "")
-                                    serial = children.get("법령일련번호", "")
-                                    current = children.get("현행연혁코드", "")
-                                    if name_val == manual_law and serial and "현행" in current:
-                                        mst = serial
+                                from law_api_module import LawAPI
+
+                                api = LawAPI()
+
+                                # 1. LawAPI 검색 → MST 획득 (정확 매칭 우선)
+                                search_results = api.search_law(manual_law, display=10)
+                                if search_results and isinstance(search_results[0], dict) and "error" in search_results[0]:
+                                    st.error(f"❌ 검색 실패: {search_results[0]['error']}")
+                                    raise RuntimeError("검색 실패")
+
+                                mst = ""
+                                for r in search_results:
+                                    if r.get("법령명") == manual_law and r.get("MST"):
+                                        mst = r["MST"]
                                         break
                                 if not mst:
-                                    for item in search_root.iter():
-                                        children = {c.tag: (c.text or "").strip() for c in item}
-                                        name_val = children.get("법령명한글", "")
-                                        serial = children.get("법령일련번호", "")
-                                        if name_val and manual_law in name_val and serial:
-                                            mst = serial
+                                    for r in search_results:
+                                        name = r.get("법령명", "")
+                                        if name and manual_law in name and r.get("MST"):
+                                            mst = r["MST"]
                                             break
-                                
+
                                 if not mst:
                                     st.error(f"❌ '{manual_law}' 법령을 찾을 수 없습니다.")
                                 else:
-                                    # 2. 조문 상세 조회
-                                    detail_res = _req.get(f"https://www.law.go.kr/DRF/lawService.do?OC=ocwhip3122&target=law&MST={mst}&type=XML", timeout=15)
-                                    detail_root = ET.fromstring(detail_res.text)
-                                    art_num = _re.sub(r'[^0-9]', '', manual_art.split("조의")[0])
-                                    
-                                    best_match = None
-                                    for art_elem in detail_root.findall('.//조문단위') or detail_root.findall('.//조문'):
-                                        no_elem = art_elem.find('조문번호')
-                                        if no_elem is None or not no_elem.text or no_elem.text.strip() != art_num:
-                                            continue
-                                        jo_type = art_elem.findtext('조문여부') or ""
-                                        if jo_type.strip() == '전문':
-                                            continue
-                                        title = (art_elem.findtext('조문제목') or "").strip()
-                                        parts = []
-                                        ce = art_elem.find('조문내용')
-                                        if ce is not None and ce.text:
-                                            parts.append(ce.text.strip())
-                                        for hang in art_elem.findall('항'):
-                                            hc = hang.find('항내용')
-                                            if hc is not None and hc.text:
-                                                parts.append(hc.text.strip())
-                                            for ho in hang.findall('호'):
-                                                hoc = ho.find('호내용')
-                                                if hoc is not None and hoc.text:
-                                                    parts.append("  " + hoc.text.strip())
-                                        content = "\n".join(parts)
-                                        if content:
-                                            best_match = (title, content)
-                                            break
-                                    
-                                    if best_match:
-                                        title, content = best_match
-                                        law_id = f"{manual_short}_{art_num}"
-                                        row = {"id": law_id, "law_name": manual_law, "law_short": manual_short,
-                                               "article_no": manual_art, "article_title": title, "content": content,
-                                               "last_updated": datetime.now().isoformat()}
-                                        sb = init_supabase()
-                                        sb.table("laws").upsert(row).execute()
-                                        st.success(f"✅ {manual_short} {manual_art} ({title}) — {len(content)}자 저장!")
-                                        st.caption(content[:300])
-                                        st.session_state.laws_db = load_laws()
+                                    # 2. LawAPI 조문 조회
+                                    detail = api.get_law_text(mst)
+                                    if "error" in detail:
+                                        st.error(f"❌ 조문 조회 실패: {detail['error']}")
                                     else:
-                                        st.error(f"❌ {manual_law}에서 {manual_art}를 찾을 수 없습니다.")
+                                        art_num = _re.sub(r'[^0-9]', '', manual_art.split("조의")[0])
+                                        best_match = None
+                                        for art in detail.get("조문목록", []):
+                                            raw_no = str(art.get("조문번호", "") or "").strip()
+                                            # MCP가 "2" 또는 "000200" 형태로 줄 수 있음 → 둘 다 매칭
+                                            digits = _re.sub(r'[^0-9]', '', raw_no)
+                                            normalized = digits.lstrip("0") or "0"
+                                            if normalized == art_num or digits == art_num.zfill(4) + "00":
+                                                title = str(art.get("조문제목", "") or "").strip()
+                                                content = str(art.get("조문내용", "") or "").strip()
+                                                if content:
+                                                    best_match = (title, content)
+                                                    break
+
+                                        if best_match:
+                                            title, content = best_match
+                                            law_id = f"{manual_short}_{art_num}"
+                                            row = {"id": law_id, "law_name": manual_law, "law_short": manual_short,
+                                                   "article_no": manual_art, "article_title": title, "content": content,
+                                                   "last_updated": datetime.now().isoformat()}
+                                            sb = init_supabase()
+                                            sb.table("laws").upsert(row).execute()
+                                            st.success(f"✅ {manual_short} {manual_art} ({title}) — {len(content)}자 저장!")
+                                            st.caption(content[:300])
+                                            st.session_state.laws_db = load_laws()
+                                        else:
+                                            st.error(f"❌ {manual_law}에서 {manual_art}를 찾을 수 없습니다.")
+                            except RuntimeError:
+                                pass
                             except Exception as e:
                                 st.error(f"❌ 오류: {e}")
 
