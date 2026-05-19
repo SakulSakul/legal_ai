@@ -1,79 +1,45 @@
 """
-법제처 Open API 연동 모듈 v1.7.1
+법제처 Open API 연동 모듈 v2.0
 ========================
-v1.7.1 변경사항 (봇 차단 회피):
-  - 증거: v1.7에서 UA "Mozilla/5.0 (legal_ai compliance; +github.com/...)" 패턴이
-    봇 시그니처로 인식되어 차단되는 정황 (브라우저로는 같은 OC가 정상 응답)
-  - User-Agent를 일반 Chrome 브라우저로 위장
-    (Mozilla/5.0 (Windows NT 10.0; Win64; x64) ... Chrome/130.0.0.0 Safari/537.36)
-  - Accept-Language: "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7" 추가
-  - Connection: close 제거 (keep-alive 기본값) — 정부 서버 호환성 향상,
-    큰 응답은 v1.7 청크 폴백이 처리
-  - 헤더 없는 plain 요청 fallback 모드 추가: 헤더 요청 실패 시 헤더 제거 후 1회 재시도
-  - 진단 패널에 헤더 영향 진단(ua_blocked) 표시 — "일반 브라우저 UA OK / 봇 UA 차단" 안내
+v2.0 변경사항 (백엔드 전환):
+  - 백엔드를 law.go.kr 직접 호출 → korean-law-mcp 경유로 전환
+    (https://korean-law-mcp.fly.dev/mcp, 도쿄 리전)
+  - 원인: Streamlit Cloud 미국 IP가 law.go.kr에서 차단 (v1.7.1 진단으로 확인)
+  - Anthropic Claude(Haiku) + MCP connector beta로 도구 호출 후 결과 JSON 그대로 반환
+  - LawAPI 공개 메소드 시그니처 그대로 유지 (UI 코드 무수정)
+  - 직접 호출 관련 로직 전부 제거:
+    HTTPS/HTTP 폴백, urllib3 Retry/세션, 헤더 우회, 청크 폴백 등
+  - 진단 패널은 MCP 연결 상태만 표시하도록 단순화
 
-v1.7:
-  - 실제 원인 분석: law.go.kr 서버가 큰 EUC-KR 응답 전송 중 connection을 끊는 동작
-    (작은 법령은 OK / 관세법·상표법 등 300조+ 법령에서 ConnectionResetError 발생)
-  - urllib3 Retry에 connect=3, read=3 추가 (status 외에 네트워크 단계 재시도)
-  - backoff_factor 1.5로 상향
-  - 요청 헤더 추가: User-Agent, Accept, Accept-Encoding
-  - ConnectionResetError / ChunkedEncodingError 명시적 retry (2초 후 1회 재시도)
-  - 응답 크기 로깅 (프로토콜·바이트 수)
-  - get_law_text 청크 폴백: 큰 법령 실패 시 JO 파라미터로 50조씩 끊어 재조회
-    (_get_law_text_chunked)
-  - 진단 패널 강화: 작은 요청과 큰 법령(관세법) 요청을 동시 테스트
-    (large_request_ok / large_request_error)
-  - 큰 응답 끊김 에러 메시지 도메인화
-
-v1.6:
-  - HTTPS 우선 + HTTP 자동 폴백 (Streamlit Cloud / 회사망 방화벽 대응)
-  - urllib3 Retry 정책 적용 (5xx/408/429 → 3회 백오프 재시도, 1s→2s→4s)
-  - requests.Session() + HTTPAdapter 공용 캐싱 (_get_session)
-  - REQUEST_TIMEOUT 30초로 상향
-  - HTTP status code 체크 (200 외 응답 파싱 시도 안 함)
-  - 응답 디코딩 견고화: bytes → UTF-8 → EUC-KR → CP949 폴백
-  - API 진단 도구 신규: run_api_diagnostics() / render_api_diagnostics_panel()
-  - 사이드바에 "🔧 법령 API 연결 진단" 버튼 추가
-  - 약어 매핑 fallback: resolved 키워드 실패 시 원본 키워드로 재시도
-  - 일부 API 호출 실패 시 사이드바에 카테고리별 실패 사유 표시
-  - get_oc() 안정화: st.secrets.get() + 환경변수 폴백
-  - HTTPS 우선 + HTTP 자동 폴백 (Streamlit Cloud / 회사망 방화벽 대응)
-  - urllib3 Retry 정책 적용 (5xx/408/429 → 3회 백오프 재시도, 1s→2s→4s)
-  - requests.Session() + HTTPAdapter 공용 캐싱 (_get_session)
-  - REQUEST_TIMEOUT 30초로 상향
-  - HTTP status code 체크 (200 외 응답 파싱 시도 안 함)
-  - 응답 디코딩 견고화: bytes → UTF-8 → EUC-KR → CP949 폴백
-  - API 진단 도구 신규: run_api_diagnostics() / render_api_diagnostics_panel()
-  - 사이드바에 "🔧 법령 API 연결 진단" 버튼 추가
-  - 약어 매핑 fallback: resolved 키워드 실패 시 원본 키워드로 재시도
-  - 일부 API 호출 실패 시 사이드바에 카테고리별 실패 사유 표시
-  - get_oc() 안정화: st.secrets.get() + 환경변수 폴백
-
-v1.5:
-  - expander 제목 40자 제한 + 안에서 전체 제목 표시 (잘림 방지)
-v1.4:
-  - 법령 조문: 법제처 원문 링크 + 별표/서식 안내
-  - 판례: AI 요약 (결론→배경→핵심이유→실무시사점) + 원문
-  - 해석례: AI 요약 (결론→Q&A→핵심이유→실무의미) + 원문
+이전 이력:
+  v1.7.1: 봇 차단 회피용 UA 표준화 + 헤더 없는 fallback
+  v1.7:   ConnectionReset 대응 (connect/read retry, 청크 폴백, 큰 응답 헤더 튜닝)
+  v1.6:   HTTPS 폴백, 재시도, 진단 도구 추가
+  v1.5:   expander 제목 40자 제한
+  v1.4:   법령 원문 링크 / 판례·해석례 AI 요약
 """
 
 import os
-import time
-import requests
-import xml.etree.ElementTree as ET
-from urllib.parse import quote
-from urllib3.util.retry import Retry
-from requests.adapters import HTTPAdapter
-from typing import Optional
+import json
+import re
 import logging
+from typing import Optional, Any
 import streamlit as st
 
 logger = logging.getLogger(__name__)
 
 
+# ──────────────────────────────────────────────
+# 설정/시크릿
+# ──────────────────────────────────────────────
+MCP_SERVER_URL = "https://korean-law-mcp.fly.dev/mcp"
+MCP_SERVER_NAME = "korean-law"
+MCP_MODEL = "claude-haiku-4-5-20251001"
+MCP_BETA = "mcp-client-2025-11-20"
+
+
 def get_oc():
-    """LAW_OC 값을 st.secrets 또는 환경변수에서 안전하게 조회."""
+    """LAW_OC 값 조회 (HTML 원문 링크 생성 용도로만 잔존)."""
     try:
         oc = st.secrets.get("LAW_OC", "")
     except Exception:
@@ -83,30 +49,21 @@ def get_oc():
     return oc or ""
 
 
+def get_anthropic_key() -> str:
+    try:
+        key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    except Exception:
+        key = ""
+    if not key:
+        key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        raise ValueError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
+    return key
+
+
 # ──────────────────────────────────────────────
-# 엔드포인트 (HTTPS 우선 + HTTP 폴백)
+# 약어 매핑
 # ──────────────────────────────────────────────
-BASE_URL_HTTPS = "https://www.law.go.kr/DRF/lawSearch.do"
-BASE_URL_HTTP = "http://www.law.go.kr/DRF/lawSearch.do"
-DETAIL_URL_HTTPS = "https://www.law.go.kr/DRF/lawService.do"
-DETAIL_URL_HTTP = "http://www.law.go.kr/DRF/lawService.do"
-
-REQUEST_TIMEOUT = 30
-
-REQUEST_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/130.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/xml, text/xml, */*",
-    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate",
-}
-
-# 진단 시 사용할 큰 법령 MST (관세법)
-DIAG_LARGE_MST_FALLBACK = "280363"
-
 ABBREVIATIONS = {
     "표시광고법": "표시광고", "전상법": "전자상거래", "관세법": "관세법",
     "외환법": "외국환거래법", "관광진흥법": "관광진흥법", "개인정보보호법": "개인정보보호법",
@@ -116,7 +73,7 @@ ABBREVIATIONS = {
 }
 
 
-def _resolve_keyword(keyword):
+def _resolve_keyword(keyword: str) -> str:
     if keyword in ABBREVIATIONS:
         return ABBREVIATIONS[keyword]
     for abbr, resolved in ABBREVIATIONS.items():
@@ -127,170 +84,128 @@ def _resolve_keyword(keyword):
 
 
 # ──────────────────────────────────────────────
-# 요청 세션 (Retry + Adapter 공용 캐싱)
+# Anthropic MCP 클라이언트
 # ──────────────────────────────────────────────
 @st.cache_resource
-def _get_session() -> requests.Session:
-    retry = Retry(
-        total=3,
-        connect=3,
-        read=3,
-        backoff_factor=1.5,
-        status_forcelist=[500, 502, 503, 504, 408, 429],
-        allowed_methods=["GET"],
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    sess = requests.Session()
-    sess.mount("https://", adapter)
-    sess.mount("http://", adapter)
-    return sess
+def _get_anthropic_client():
+    import anthropic
+    return anthropic.Anthropic(api_key=get_anthropic_key())
 
 
-def _decode_response(res: requests.Response) -> str:
-    """응답 bytes를 UTF-8 → EUC-KR → CP949 순서로 디코딩 시도."""
-    raw = res.content or b""
-    for enc in ("utf-8", "euc-kr", "cp949"):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
+def _as_dict(obj) -> dict:
+    """SDK 객체 또는 dict 모두 dict처럼 다루기 위한 헬퍼."""
+    if isinstance(obj, dict):
+        return obj
+    try:
+        return obj.model_dump()
+    except Exception:
+        pass
+    try:
+        return dict(obj)
+    except Exception:
+        return {}
+
+
+def _get_attr(obj, name, default=None):
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _extract_mcp_result(response) -> Any:
+    """Anthropic 응답에서 mcp_tool_result 블록의 JSON 데이터 추출."""
+    content = _get_attr(response, "content", []) or []
+    for block in content:
+        btype = _get_attr(block, "type")
+        if btype != "mcp_tool_result":
             continue
-    return raw.decode("utf-8", errors="ignore")
+        if _get_attr(block, "is_error"):
+            err = _get_attr(block, "content") or "MCP tool error"
+            raise RuntimeError(f"MCP tool error: {err}")
+        inner = _get_attr(block, "content") or []
+        if isinstance(inner, str):
+            return _parse_json_loose(inner)
+        for item in inner:
+            text = _get_attr(item, "text")
+            if text:
+                return _parse_json_loose(text)
+    # fallback: 일반 text 블록에서 JSON 추출 시도
+    for block in content:
+        if _get_attr(block, "type") == "text":
+            text = _get_attr(block, "text", "")
+            if text:
+                try:
+                    return _parse_json_loose(text)
+                except Exception:
+                    continue
+    raise RuntimeError("MCP 응답에서 결과를 찾지 못함")
 
 
-def _build_url(base_url: str, params_dict: dict) -> str:
-    parts = []
-    for key, value in params_dict.items():
-        if value is not None:
-            parts.append(f"{key}={quote(str(value), safe='')}")
-    return base_url + "?" + "&".join(parts)
-
-
-def _is_connection_reset(exc: BaseException) -> bool:
-    """ConnectionResetError 계열 여부 (중첩 원인 포함)."""
-    cur = exc
-    seen = 0
-    while cur is not None and seen < 6:
-        if isinstance(cur, ConnectionResetError):
-            return True
-        msg = str(cur).lower()
-        if "connection reset" in msg or "connection aborted" in msg:
-            return True
-        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
-        seen += 1
-    return False
-
-
-def _single_request(url: str, label: str, headers: Optional[dict] = REQUEST_HEADERS):
-    """단일 URL 한 번 요청. (tree, error_message) 반환. 예외는 호출자에게 전파."""
-    sess = _get_session()
-    res = sess.get(url, timeout=REQUEST_TIMEOUT, headers=headers)
-    if res.status_code != 200:
-        return None, f"HTTP {res.status_code} ({label})"
-    content = _decode_response(res)
-    logger.info(f"법제처 API 응답 ({label}, {len(content)} bytes)")
-    if not content or len(content.strip()) < 10:
-        return None, f"빈 응답 ({label})"
+def _parse_json_loose(text: str) -> Any:
+    """JSON 파싱 (앞뒤 잡음 허용)."""
+    text = text.strip()
+    if not text:
+        return None
     try:
-        return ET.fromstring(content), None
-    except ET.ParseError as e:
-        logger.error(f"XML 파싱 실패 ({label}): {e}")
-        return None, f"XML 파싱 실패 ({label})"
-
-
-def _is_ua_block_signal(error_msg: Optional[str], exc: Optional[BaseException] = None) -> bool:
-    """봇 차단 의심 시그널 (403/429 또는 ConnectionResetError)."""
-    if error_msg:
-        if "HTTP 403" in error_msg or "HTTP 429" in error_msg:
-            return True
-    if exc is not None and _is_connection_reset(exc):
-        return True
-    return False
-
-
-def _request_without_headers(url: str, label: str):
-    """헤더 완전히 제거한 plain requests.get으로 1회 재시도. 성공 시 UA 차단 의심 로그."""
-    try:
-        tree, err = _single_request(url, f"{label}/no-UA", headers=None)
-        if tree is not None:
-            logger.warning(f"헤더 없이 성공 — UA 차단 의심 ({label})")
-            return tree, None
-        return None, err
-    except requests.Timeout:
-        return None, f"요청 시간 초과 ({label}/no-UA)"
-    except (requests.exceptions.ChunkedEncodingError, requests.ConnectionError) as e:
-        return None, f"서버 연결 실패 ({label}/no-UA): {type(e).__name__}"
-    except Exception as e:
-        return None, f"요청 실패: {type(e).__name__} ({label}/no-UA)"
-
-
-def _try_request(url: str, label: str):
-    """단일 URL 요청 + ConnectionReset/ChunkedEncoding 명시적 재시도 + 헤더 없는 fallback.
-    (tree, error_message)."""
-    try:
-        tree, err = _single_request(url, label)
-        if tree is not None:
-            return tree, None
-        # HTTP 403/429 → 봇 차단 의심, 헤더 없이 재시도
-        if _is_ua_block_signal(err):
-            tree2, err2 = _request_without_headers(url, label)
-            if tree2 is not None:
-                return tree2, None
-            return None, err
-        return None, err
-    except requests.Timeout:
-        return None, f"요청 시간 초과 ({label})"
-    except (requests.exceptions.ChunkedEncodingError, requests.ConnectionError) as e:
-        if _is_connection_reset(e) or isinstance(e, requests.exceptions.ChunkedEncodingError):
-            logger.warning(
-                f"{label} 응답 중 connection 끊김 감지 ({type(e).__name__}), 2초 후 1회 재시도"
-            )
-            time.sleep(2)
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # 코드펜스 제거
+    m = re.search(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+    # 첫 { 또는 [ 부터 끝까지
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = text.find(opener)
+        end = text.rfind(closer)
+        if start != -1 and end != -1 and end > start:
             try:
-                return _single_request(url, label)
-            except requests.Timeout:
-                return None, f"요청 시간 초과 ({label}) — 재시도 후"
-            except (requests.exceptions.ChunkedEncodingError, requests.ConnectionError) as e2:
-                if _is_ua_block_signal(None, e2):
-                    tree3, err3 = _request_without_headers(url, label)
-                    if tree3 is not None:
-                        return tree3, None
-                    if _is_connection_reset(e2) or isinstance(
-                        e2, requests.exceptions.ChunkedEncodingError
-                    ):
-                        return None, (
-                            f"응답 크기 초과로 서버가 연결 종료 ({label}) "
-                            "— 큰 응답에서 law.go.kr 서버가 connection을 끊음"
-                        )
-                return None, f"서버 연결 실패 ({label}): {type(e2).__name__}"
-            except Exception as e2:
-                return None, f"요청 실패: {type(e2).__name__} ({label}) — 재시도 후"
-        return None, f"서버 연결 실패 ({label}): {type(e).__name__}"
+                return json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                continue
+    raise json.JSONDecodeError("결과 JSON 파싱 실패", text, 0)
+
+
+def _mcp_call(tool_name: str, arguments: dict) -> Any:
+    """korean-law-mcp 서버의 지정 도구를 호출하고 결과 JSON 반환."""
+    client = _get_anthropic_client()
+    args_json = json.dumps(arguments, ensure_ascii=False)
+    user_prompt = (
+        f"korean-law MCP 서버의 `{tool_name}` 도구를 다음 인자로 정확히 1회 호출하고, "
+        f"도구 결과를 추가 설명 없이 JSON 그대로 출력해줘.\n"
+        f"arguments: {args_json}"
+    )
+    system_instruction = (
+        "당신은 korean-law MCP 도구의 결과를 그대로 전달하는 프록시입니다. "
+        "지정된 도구를 호출하고 도구 결과(JSON)만 반환하세요. 부연 설명, 요약, 마크다운 금지."
+    )
+
+    logger.info(f"MCP 호출: tool={tool_name}, args={args_json}")
+    try:
+        response = client.beta.messages.create(
+            model=MCP_MODEL,
+            max_tokens=4096,
+            betas=[MCP_BETA],
+            mcp_servers=[{
+                "type": "url",
+                "url": MCP_SERVER_URL,
+                "name": MCP_SERVER_NAME,
+            }],
+            system=system_instruction,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
     except Exception as e:
-        return None, f"요청 실패: {type(e).__name__} ({label})"
+        logger.error(f"MCP API 호출 실패: {type(e).__name__}: {e}")
+        raise RuntimeError(f"MCP 호출 실패: {type(e).__name__}: {e}")
 
-
-def _make_request(base_url_https: str, base_url_http: str, params_dict: dict):
-    """HTTPS 우선 시도 → 실패 시 HTTP 폴백.
-    Returns (ElementTree, error_message). 성공 시 error=None.
-    """
-    https_url = _build_url(base_url_https, params_dict)
-    logger.info(f"법제처 API 요청 (HTTPS): {https_url}")
-    tree, https_err = _try_request(https_url, "HTTPS")
-    if tree is not None:
-        return tree, None
-
-    http_url = _build_url(base_url_http, params_dict)
-    logger.info(f"HTTPS 실패({https_err}), HTTP 폴백: {http_url}")
-    tree, http_err = _try_request(http_url, "HTTP")
-    if tree is not None:
-        return tree, None
-
-    return None, f"{https_err} / {http_err}"
+    return _extract_mcp_result(response)
 
 
 # ──────────────────────────────────────────────
-# AI 요약 생성 (Gemini 활용)
+# AI 요약 생성 (Gemini 활용) — 기존 유지
 # ──────────────────────────────────────────────
 def _summarize_with_ai(prompt_text):
     try:
@@ -316,6 +231,7 @@ def _summarize_with_ai(prompt_text):
     except Exception as e:
         logger.warning(f"AI 요약 생성 실패: {e}")
         return None
+
 
 def _summarize_precedent(detail):
     parts = []
@@ -349,6 +265,7 @@ def _summarize_precedent(detail):
 [판례 원문]
 {raw_text}"""
     return _summarize_with_ai(prompt)
+
 
 def _summarize_interpretation(detail):
     parts = []
@@ -386,252 +303,236 @@ def _summarize_interpretation(detail):
 
 
 # ──────────────────────────────────────────────
-# 법제처 원문 링크 생성
+# 법제처 원문 링크 (HTML 직링크 — Streamlit Cloud 아닌 사용자 브라우저에서 열림)
 # ──────────────────────────────────────────────
 def _build_law_link(mst, oc):
     return f"https://www.law.go.kr/DRF/lawService.do?OC={oc}&target=law&MST={mst}&type=HTML"
 
+
 def _build_law_go_kr_link(law_name):
+    from urllib.parse import quote
     return f"https://www.law.go.kr/법령/{quote(law_name, safe='')}"
 
 
 # ──────────────────────────────────────────────
-# target별 결과 파서
+# MCP 응답 → UI 호환 dict 매핑
 # ──────────────────────────────────────────────
-def _parse_law_list(tree) -> list[dict]:
-    results = []
-    for item in tree.iter():
-        law_name = item.findtext("법령명한글")
-        if law_name:
-            detail_link = item.findtext("법령상세링크", "")
-            mst = ""
-            if "MST=" in detail_link:
-                mst = detail_link.split("MST=")[1].split("&")[0]
-            if not mst:
-                mst = item.findtext("법령일련번호", "")
-            results.append({
-                "법령명": law_name, "법령ID": item.findtext("법령일련번호", ""),
-                "MST": mst, "시행일자": item.findtext("시행일자", ""),
-                "법령종류": item.findtext("법령종류", ""),
-                "소관부처": item.findtext("소관부처", ""),
-                "상세링크": detail_link,
-            })
-    return results
+def _pick(d: dict, *keys, default=""):
+    for k in keys:
+        v = d.get(k) if isinstance(d, dict) else None
+        if v not in (None, ""):
+            return v
+    return default
 
 
-def _parse_prec_list(tree) -> list[dict]:
-    results = []
-    for item in tree.iter():
-        case_name = item.findtext("사건명")
-        if case_name:
-            results.append({
-                "판례ID": item.findtext("판례일련번호", ""),
-                "사건명": case_name, "사건번호": item.findtext("사건번호", ""),
-                "선고일자": item.findtext("선고일자", ""),
-                "법원명": item.findtext("법원명", ""),
-                "사건종류": item.findtext("사건종류명", ""),
-                "판결유형": item.findtext("판결유형", ""),
-                "상세링크": item.findtext("판례상세링크", ""),
-            })
-    return results
+def _ensure_list(data) -> list:
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for k in ("results", "items", "data", "law", "laws", "list"):
+            v = data.get(k)
+            if isinstance(v, list):
+                return v
+        return [data]
+    return []
 
 
-def _parse_interp_list(tree) -> list[dict]:
-    results = []
-    for item in tree.iter():
-        title = item.findtext("안건명")
-        if title:
-            detail_link = item.findtext("법령해석례상세링크", "")
-            interp_id = item.findtext("법령해석례일련번호", "")
-            if not interp_id and "ID=" in detail_link:
-                interp_id = detail_link.split("ID=")[1].split("&")[0]
-            results.append({
-                "해석례ID": interp_id, "안건명": title,
-                "안건번호": item.findtext("안건번호", ""),
-                "회답일자": item.findtext("회답일자", ""),
-                "회답기관": item.findtext("회답기관", ""),
-                "상세링크": detail_link,
-            })
-    return results
+def _map_law_item(item: dict) -> dict:
+    detail_link = _pick(item, "법령상세링크", "상세링크", "detail_link", "link")
+    mst = _pick(item, "MST", "mst", "법령일련번호", "law_id")
+    if not mst and isinstance(detail_link, str) and "MST=" in detail_link:
+        mst = detail_link.split("MST=")[1].split("&")[0]
+    return {
+        "법령명": _pick(item, "법령명한글", "법령명", "name", "title"),
+        "법령ID": _pick(item, "법령일련번호", "law_id"),
+        "MST": mst,
+        "시행일자": _pick(item, "시행일자", "enforce_date"),
+        "법령종류": _pick(item, "법령종류", "law_type"),
+        "소관부처": _pick(item, "소관부처", "ministry"),
+        "상세링크": detail_link,
+    }
 
 
-def _parse_admin_list(tree) -> list[dict]:
-    results = []
-    for item in tree.iter():
-        name = item.findtext("행정규칙명")
-        if name:
-            results.append({
-                "행정규칙명": name, "행정규칙ID": item.findtext("행정규칙일련번호", ""),
-                "시행일자": item.findtext("시행일자", ""), "발령기관": item.findtext("발령기관", ""),
-                "행정규칙종류": item.findtext("행정규칙종류", ""),
-            })
-    return results
+def _map_prec_item(item: dict) -> dict:
+    return {
+        "판례ID": _pick(item, "판례일련번호", "판례ID", "id", "case_id"),
+        "사건명": _pick(item, "사건명", "name", "title"),
+        "사건번호": _pick(item, "사건번호", "case_no"),
+        "선고일자": _pick(item, "선고일자", "decision_date"),
+        "법원명": _pick(item, "법원명", "court"),
+        "사건종류": _pick(item, "사건종류명", "사건종류", "case_type"),
+        "판결유형": _pick(item, "판결유형", "decision_type"),
+        "상세링크": _pick(item, "판례상세링크", "상세링크", "detail_link"),
+    }
 
 
-_PARSERS = {
-    "law": _parse_law_list,
-    "prec": _parse_prec_list,
-    "expc": _parse_interp_list,
-    "admrul": _parse_admin_list,
-}
+def _map_interp_item(item: dict) -> dict:
+    detail_link = _pick(item, "법령해석례상세링크", "상세링크", "detail_link")
+    interp_id = _pick(item, "법령해석례일련번호", "해석례ID", "id")
+    if not interp_id and isinstance(detail_link, str) and "ID=" in detail_link:
+        interp_id = detail_link.split("ID=")[1].split("&")[0]
+    return {
+        "해석례ID": interp_id,
+        "안건명": _pick(item, "안건명", "name", "title"),
+        "안건번호": _pick(item, "안건번호", "case_no"),
+        "회답일자": _pick(item, "회답일자", "answer_date"),
+        "회답기관": _pick(item, "회답기관", "agency"),
+        "상세링크": detail_link,
+    }
 
 
+def _map_law_text(data) -> dict:
+    if not isinstance(data, dict):
+        return {"error": "법령 본문 응답 형식 오류"}
+    if data.get("error"):
+        return {"error": str(data["error"])}
+    raw_articles = (data.get("조문목록") or data.get("articles")
+                    or data.get("조문") or [])
+    articles = []
+    for art in raw_articles:
+        if not isinstance(art, dict):
+            continue
+        content = _pick(art, "조문내용", "content", "text")
+        if not content:
+            continue
+        articles.append({
+            "조문번호": _pick(art, "조문번호", "num"),
+            "조문제목": _pick(art, "조문제목", "title"),
+            "조문내용": content,
+            "조문시행일자": _pick(art, "조문시행일자", "enforce_date"),
+        })
+    law_name = _pick(data, "법령명", "법령명_한글", "법령명한글", "name")
+    sihaeng = _pick(data, "시행일자", "enforce_date")
+    if not articles and not law_name:
+        return {"error": "조문을 파싱하지 못했습니다."}
+    return {"법령명": law_name, "시행일자": sihaeng, "조문목록": articles}
+
+
+def _map_prec_detail(data) -> dict:
+    if not isinstance(data, dict):
+        return {"error": "판례 응답 형식 오류"}
+    if data.get("error"):
+        return {"error": str(data["error"])}
+    return {
+        "사건명": _pick(data, "사건명", "name", "title"),
+        "사건번호": _pick(data, "사건번호", "case_no"),
+        "선고일자": _pick(data, "선고일자", "decision_date"),
+        "법원명": _pick(data, "법원명", "court"),
+        "판시사항": _pick(data, "판시사항", "holding"),
+        "판결요지": _pick(data, "판결요지", "summary"),
+        "참조조문": _pick(data, "참조조문", "referenced_articles"),
+        "참조판례": _pick(data, "참조판례", "referenced_cases"),
+        "판례내용": _pick(data, "판례내용", "content", "text"),
+    }
+
+
+def _map_interp_detail(data) -> dict:
+    if not isinstance(data, dict):
+        return {"error": "해석례 응답 형식 오류"}
+    if data.get("error"):
+        return {"error": str(data["error"])}
+    return {
+        "안건명": _pick(data, "안건명", "name", "title"),
+        "안건번호": _pick(data, "안건번호", "case_no"),
+        "회답일자": _pick(data, "회답일자", "answer_date"),
+        "회답기관": _pick(data, "회답기관", "agency"),
+        "질의요지": _pick(data, "질의요지", "question"),
+        "회답": _pick(data, "회답", "answer"),
+        "이유": _pick(data, "이유", "reasoning"),
+        "참조조문": _pick(data, "참조조문", "referenced_articles"),
+    }
+
+
+# ──────────────────────────────────────────────
+# LawAPI (공개 시그니처 유지, 백엔드만 MCP로 교체)
+# ──────────────────────────────────────────────
 class LawAPI:
     def __init__(self, oc: Optional[str] = None):
+        # oc는 v1.x 호환을 위해 받지만 MCP 호출에는 사용하지 않음
         self.oc = oc or get_oc()
-        if not self.oc:
-            raise ValueError("LAW_OC 값이 설정되지 않았습니다.")
+        # ANTHROPIC_API_KEY 사전 검증
+        get_anthropic_key()
 
-    # ── 내부 검색 헬퍼 ──
-    def _raw_search(self, target: str, query: str, display: int):
-        """단일 검색 요청. (results_list, error) 반환."""
-        params = {"OC": self.oc, "target": target, "type": "XML",
-                  "query": query, "display": str(display)}
-        tree, error = _make_request(BASE_URL_HTTPS, BASE_URL_HTTP, params)
-        if error:
-            return None, error
-        parser = _PARSERS.get(target)
-        if parser is None:
-            return None, f"알 수 없는 target: {target}"
-        return parser(tree), None
-
-    def _search_with_fallback(self, target: str, keyword: str, display: int) -> list[dict]:
-        """resolved 키워드로 먼저 시도 → 결과 없거나 에러면 원본으로 재시도."""
-        resolved = _resolve_keyword(keyword)
-        results, error = self._raw_search(target, resolved, display)
-        if error is None and results:
-            return results
-
-        if resolved != keyword:
-            logger.info(f"resolved 검색 결과 부족, 원본 키워드로 재시도: '{keyword}'")
-            results2, error2 = self._raw_search(target, keyword, display)
-            if error2 is None:
-                return results2 or []
-            if error is None:
-                return [{"error": f"API 호출 실패: {error2}"}]
-            return [{"error": f"API 호출 실패: {error}"}]
-
-        if error:
-            return [{"error": f"API 호출 실패: {error}"}]
-        return results or []
-
-    # ── 공개 검색 메소드 (시그니처 유지) ──
     def search_law(self, keyword: str, display: int = 5) -> list[dict]:
-        return self._search_with_fallback("law", keyword, display)
+        resolved = _resolve_keyword(keyword)
+        try:
+            raw = _mcp_call("search_law", {"keyword": resolved, "display": display})
+        except Exception as e:
+            return [{"error": f"API 호출 실패: {e}"}]
+        return [_map_law_item(item) for item in _ensure_list(raw) if isinstance(item, dict)]
+
+    def get_law_text(self, mst: str, jo: Optional[str] = None) -> dict:
+        args = {"mst": mst}
+        if jo:
+            args["jo"] = jo
+        try:
+            raw = _mcp_call("get_law_text", args)
+        except Exception as e:
+            return {"error": f"API 호출 실패: {e}"}
+        if isinstance(raw, list) and raw:
+            raw = raw[0]
+        return _map_law_text(raw)
 
     def search_precedent(self, keyword: str, display: int = 10) -> list[dict]:
-        return self._search_with_fallback("prec", keyword, display)
+        resolved = _resolve_keyword(keyword)
+        try:
+            raw = _mcp_call("search_decisions", {
+                "keyword": resolved, "display": display, "domain": "prec",
+            })
+        except Exception as e:
+            return [{"error": f"API 호출 실패: {e}"}]
+        return [_map_prec_item(item) for item in _ensure_list(raw) if isinstance(item, dict)]
 
     def search_interpretation(self, keyword: str, display: int = 10) -> list[dict]:
-        return self._search_with_fallback("expc", keyword, display)
-
-    def search_admin_rule(self, keyword: str, display: int = 10) -> list[dict]:
-        return self._search_with_fallback("admrul", keyword, display)
-
-    # ── 상세 조회 ──
-    def get_law_text(self, mst: str, jo: Optional[str] = None) -> dict:
-        params = {"OC": self.oc, "target": "law", "type": "XML", "MST": mst}
-        if jo: params["JO"] = jo
-        tree, error = _make_request(DETAIL_URL_HTTPS, DETAIL_URL_HTTP, params)
-        if error:
-            # 큰 응답에서 connection 끊김으로 실패한 경우 → 청크 폴백
-            if jo is None and ("연결 종료" in error or "Connection" in error
-                               or "서버 연결 실패" in error):
-                logger.warning(
-                    f"{mst}: 전체 조회 실패({error}), 청크 모드로 폴백 시도"
-                )
-                chunked = self._get_law_text_chunked(mst)
-                if "error" not in chunked:
-                    return chunked
-                return {"error": f"API 호출 실패: {error} / 청크 폴백도 실패: {chunked['error']}"}
-            return {"error": f"API 호출 실패: {error}"}
-        law_name = tree.findtext(".//법령명_한글", "") or tree.findtext(".//법령명한글", "")
-        articles = []
-        for article in tree.iter("조문단위"):
-            content = article.findtext("조문내용", "")
-            if content:
-                articles.append({
-                    "조문번호": article.findtext("조문번호", ""),
-                    "조문제목": article.findtext("조문제목", ""),
-                    "조문내용": content,
-                    "조문시행일자": article.findtext("조문시행일자", ""),
-                })
-        if not articles and not law_name:
-            return {"error": "조문을 파싱하지 못했습니다."}
-        return {"법령명": law_name, "시행일자": tree.findtext(".//시행일자", ""), "조문목록": articles}
-
-    def _get_law_text_chunked(self, mst: str) -> dict:
-        """큰 법령용 청크 폴백: JO 파라미터로 조문 1~300을 50개씩 끊어 개별 요청."""
-        law_name = ""
-        sihaeng = ""
-        articles = []
-        total_attempted = 0
-
-        for chunk_start in range(1, 301, 50):
-            chunk_hits = 0
-            for jo_num in range(chunk_start, chunk_start + 50):
-                jo_code = LawAPI.jo_to_code(jo_num)
-                params = {
-                    "OC": self.oc, "target": "law", "type": "XML",
-                    "MST": mst, "JO": jo_code,
-                }
-                tree, error = _make_request(DETAIL_URL_HTTPS, DETAIL_URL_HTTP, params)
-                total_attempted += 1
-                if error or tree is None:
-                    continue
-                if not law_name:
-                    law_name = (tree.findtext(".//법령명_한글", "")
-                                or tree.findtext(".//법령명한글", ""))
-                if not sihaeng:
-                    sihaeng = tree.findtext(".//시행일자", "")
-                for article in tree.iter("조문단위"):
-                    content = article.findtext("조문내용", "")
-                    if content:
-                        articles.append({
-                            "조문번호": article.findtext("조문번호", ""),
-                            "조문제목": article.findtext("조문제목", ""),
-                            "조문내용": content,
-                            "조문시행일자": article.findtext("조문시행일자", ""),
-                        })
-                        chunk_hits += 1
-            # 한 청크(50개)에서 한 건도 못 받았다면 더 이상 조문이 없을 가능성 높음
-            if chunk_hits == 0 and articles:
-                break
-            if chunk_hits == 0 and chunk_start >= 51:
-                break
-
-        if not articles:
-            return {"error": "청크 모드로도 조문을 가져오지 못했습니다."}
-        logger.warning(
-            f"{mst}: 큰 법령으로 청크 모드 사용 (조문 {len(articles)}건 / "
-            f"시도 {total_attempted}회)"
-        )
-        return {"법령명": law_name, "시행일자": sihaeng, "조문목록": articles}
+        resolved = _resolve_keyword(keyword)
+        try:
+            raw = _mcp_call("search_decisions", {
+                "keyword": resolved, "display": display, "domain": "expc",
+            })
+        except Exception as e:
+            return [{"error": f"API 호출 실패: {e}"}]
+        return [_map_interp_item(item) for item in _ensure_list(raw) if isinstance(item, dict)]
 
     def get_precedent_detail(self, prec_id: str) -> dict:
-        params = {"OC": self.oc, "target": "prec", "type": "XML", "ID": prec_id}
-        tree, error = _make_request(DETAIL_URL_HTTPS, DETAIL_URL_HTTP, params)
-        if error:
-            return {"error": f"API 호출 실패: {error}"}
-        return {
-            "사건명": tree.findtext(".//사건명", ""), "사건번호": tree.findtext(".//사건번호", ""),
-            "선고일자": tree.findtext(".//선고일자", ""), "법원명": tree.findtext(".//법원명", ""),
-            "판시사항": tree.findtext(".//판시사항", ""), "판결요지": tree.findtext(".//판결요지", ""),
-            "참조조문": tree.findtext(".//참조조문", ""), "참조판례": tree.findtext(".//참조판례", ""),
-            "판례내용": tree.findtext(".//판례내용", ""),
-        }
+        try:
+            raw = _mcp_call("get_decision_text", {"id": prec_id, "domain": "prec"})
+        except Exception as e:
+            return {"error": f"API 호출 실패: {e}"}
+        if isinstance(raw, list) and raw:
+            raw = raw[0]
+        return _map_prec_detail(raw)
 
     def get_interpretation_detail(self, interp_id: str) -> dict:
-        params = {"OC": self.oc, "target": "expc", "type": "XML", "ID": interp_id}
-        tree, error = _make_request(DETAIL_URL_HTTPS, DETAIL_URL_HTTP, params)
-        if error:
-            return {"error": f"API 호출 실패: {error}"}
-        return {
-            "안건명": tree.findtext(".//안건명", ""), "안건번호": tree.findtext(".//안건번호", ""),
-            "회답일자": tree.findtext(".//회답일자", ""), "회답기관": tree.findtext(".//회답기관", ""),
-            "질의요지": tree.findtext(".//질의요지", ""), "회답": tree.findtext(".//회답", ""),
-            "이유": tree.findtext(".//이유", ""), "참조조문": tree.findtext(".//참조조문", ""),
-        }
+        try:
+            raw = _mcp_call("get_decision_text", {"id": interp_id, "domain": "expc"})
+        except Exception as e:
+            return {"error": f"API 호출 실패: {e}"}
+        if isinstance(raw, list) and raw:
+            raw = raw[0]
+        return _map_interp_detail(raw)
+
+    def search_admin_rule(self, keyword: str, display: int = 10) -> list[dict]:
+        resolved = _resolve_keyword(keyword)
+        try:
+            raw = _mcp_call("search_law", {
+                "keyword": resolved, "display": display, "target": "admrul",
+            })
+        except Exception as e:
+            return [{"error": f"API 호출 실패: {e}"}]
+        results = []
+        for item in _ensure_list(raw):
+            if not isinstance(item, dict):
+                continue
+            results.append({
+                "행정규칙명": _pick(item, "행정규칙명", "name", "title"),
+                "행정규칙ID": _pick(item, "행정규칙일련번호", "id"),
+                "시행일자": _pick(item, "시행일자", "enforce_date"),
+                "발령기관": _pick(item, "발령기관", "agency"),
+                "행정규칙종류": _pick(item, "행정규칙종류", "type"),
+            })
+        return results
 
     @staticmethod
     def jo_to_code(jo_num: int) -> str:
@@ -680,190 +581,65 @@ class LawAPI:
 
 
 # ──────────────────────────────────────────────
-# API 진단
+# API 진단 (MCP 연결 테스트)
 # ──────────────────────────────────────────────
 def run_api_diagnostics() -> dict:
-    """법제처 API 연결 상태를 진단 (작은 검색 + 큰 법령 조회 두 단계)."""
-    oc = get_oc()
-    masked = ""
-    if oc:
-        masked = (oc[:3] + "***") if len(oc) > 3 else (oc[:1] + "***")
-
     result = {
-        "oc_configured": bool(oc),
-        "oc_value": masked,
-        "https_ok": False,
-        "http_ok": False,
-        "https_error": None,
-        "http_error": None,
+        "backend": "korean-law-mcp",
+        "mcp_url": MCP_SERVER_URL,
+        "anthropic_key_configured": False,
+        "mcp_ok": False,
+        "mcp_error": None,
         "sample_result": None,
-        "large_request_ok": False,
-        "large_request_error": None,
-        "large_request_articles": 0,
-        "with_headers_ok": False,
-        "without_headers_ok": False,
-        "with_headers_error": None,
-        "without_headers_error": None,
-        "ua_blocked": False,
     }
-
-    if not oc:
-        result["https_error"] = "LAW_OC 미설정"
-        result["http_error"] = "LAW_OC 미설정"
-        result["large_request_error"] = "LAW_OC 미설정"
-        result["with_headers_error"] = "LAW_OC 미설정"
-        result["without_headers_error"] = "LAW_OC 미설정"
+    try:
+        get_anthropic_key()
+        result["anthropic_key_configured"] = True
+    except Exception as e:
+        result["mcp_error"] = str(e)
         return result
 
-    # 1) 작은 검색 요청 (lawSearch.do, display=1)
-    params = {"OC": oc, "target": "law", "type": "XML",
-              "query": "관세법", "display": "1"}
-
-    large_mst = ""
-
-    https_url = _build_url(BASE_URL_HTTPS, params)
-    tree, err = _try_request(https_url, "HTTPS")
-    if tree is not None:
-        result["https_ok"] = True
-        for item in tree.iter():
-            sample = item.findtext("법령명한글")
-            if sample:
-                result["sample_result"] = sample
-                detail_link = item.findtext("법령상세링크", "") or ""
-                if "MST=" in detail_link:
-                    large_mst = detail_link.split("MST=")[1].split("&")[0]
-                if not large_mst:
-                    large_mst = item.findtext("법령일련번호", "") or ""
-                break
-    else:
-        result["https_error"] = err
-
-    http_url = _build_url(BASE_URL_HTTP, params)
-    tree2, err2 = _try_request(http_url, "HTTP")
-    if tree2 is not None:
-        result["http_ok"] = True
-        if not result["sample_result"]:
-            for item in tree2.iter():
-                s = item.findtext("법령명한글")
-                if s:
-                    result["sample_result"] = s
-                    detail_link = item.findtext("법령상세링크", "") or ""
-                    if "MST=" in detail_link and not large_mst:
-                        large_mst = detail_link.split("MST=")[1].split("&")[0]
-                    if not large_mst:
-                        large_mst = item.findtext("법령일련번호", "") or ""
-                    break
-    else:
-        result["http_error"] = err2
-
-    # 2) 큰 법령 조회 테스트 (lawService.do, 관세법 MST)
-    if not large_mst:
-        large_mst = DIAG_LARGE_MST_FALLBACK
-
-    large_params = {"OC": oc, "target": "law", "type": "XML", "MST": large_mst}
-    tree3, err3 = _make_request(DETAIL_URL_HTTPS, DETAIL_URL_HTTP, large_params)
-    if tree3 is not None:
-        cnt = sum(1 for _ in tree3.iter("조문단위"))
-        result["large_request_ok"] = True
-        result["large_request_articles"] = cnt
-    else:
-        result["large_request_error"] = err3
-
-    # 3) 헤더 영향 진단: 헤더 있는 호출 vs 헤더 없는 호출
-    head_url = _build_url(BASE_URL_HTTPS, params)
     try:
-        t_with, e_with = _single_request(head_url, "with-UA")
+        raw = _mcp_call("search_law", {"keyword": "관세법", "display": 1})
+        items = _ensure_list(raw)
+        if items:
+            mapped = _map_law_item(items[0]) if isinstance(items[0], dict) else {}
+            result["sample_result"] = mapped.get("법령명", "(법령명 없음)")
+        result["mcp_ok"] = True
     except Exception as e:
-        t_with, e_with = None, f"{type(e).__name__}"
-    if t_with is not None:
-        result["with_headers_ok"] = True
-    else:
-        result["with_headers_error"] = e_with
-
-    try:
-        t_without, e_without = _single_request(head_url, "no-UA", headers=None)
-    except Exception as e:
-        t_without, e_without = None, f"{type(e).__name__}"
-    if t_without is not None:
-        result["without_headers_ok"] = True
-    else:
-        result["without_headers_error"] = e_without
-
-    if result["without_headers_ok"] and not result["with_headers_ok"]:
-        result["ua_blocked"] = True
+        result["mcp_error"] = f"{type(e).__name__}: {e}"
 
     return result
 
 
 def render_api_diagnostics_panel():
-    """사이드바에 법령 API 진단 버튼/결과 패널 렌더."""
+    """사이드바에 MCP 백엔드 연결 진단 패널 렌더."""
     with st.sidebar:
         st.markdown("---")
         if st.button("🔧 법령 API 연결 진단", key="api_diag_btn", use_container_width=True):
-            with st.spinner("법제처 API 진단 중..."):
+            with st.spinner("korean-law-mcp 진단 중..."):
                 st.session_state["api_diag_result"] = run_api_diagnostics()
 
         diag = st.session_state.get("api_diag_result")
         if diag:
-            st.markdown("**🔧 진단 결과**")
+            st.markdown("**🔧 진단 결과 (v2.0 MCP 백엔드)**")
+            st.caption(f"백엔드: `{diag.get('backend')}` · URL: `{diag.get('mcp_url')}`")
 
-            if diag["oc_configured"]:
-                st.success(f"OC 키 설정됨: `{diag['oc_value']}`")
+            if diag.get("anthropic_key_configured"):
+                st.success("ANTHROPIC_API_KEY 설정됨")
             else:
-                st.error("OC 키 미설정 (LAW_OC)")
+                st.error("ANTHROPIC_API_KEY 미설정")
 
-            if diag["https_ok"]:
-                st.success("HTTPS 연결 성공")
+            if diag.get("mcp_ok"):
+                st.success("MCP 연결 성공")
+                if diag.get("sample_result"):
+                    st.caption(f"📄 샘플 응답: {diag['sample_result']}")
             else:
-                st.error(f"HTTPS 실패: {diag.get('https_error') or '알 수 없음'}")
-
-            if diag["http_ok"]:
-                st.success("HTTP 연결 성공")
-            else:
-                st.error(f"HTTP 실패: {diag.get('http_error') or '알 수 없음'}")
-
-            if diag.get("sample_result"):
-                st.caption(f"📄 샘플 응답: {diag['sample_result']}")
-
-            st.markdown("**📦 큰 법령 조회 테스트** (관세법)")
-            if diag.get("large_request_ok"):
-                cnt = diag.get("large_request_articles", 0)
-                st.success(f"큰 법령 조회 성공 (조문 {cnt}건)")
-            else:
-                st.error(f"큰 법령 조회 실패: {diag.get('large_request_error') or '알 수 없음'}")
-
-            st.markdown("**💡 헤더 영향 진단**")
-            if diag.get("ua_blocked"):
-                st.warning("일반 브라우저 UA 차단 — 헤더 없는 요청만 통과 (서버측 봇 차단)")
-            else:
-                if diag.get("with_headers_ok") and diag.get("without_headers_ok"):
-                    st.success("일반 브라우저 UA OK / 헤더 없는 요청도 OK")
-                elif diag.get("with_headers_ok"):
-                    st.success("일반 브라우저 UA OK")
-                    if diag.get("without_headers_error"):
-                        st.caption(f"헤더 없는 요청 실패: {diag['without_headers_error']}")
-                elif diag.get("without_headers_ok"):
-                    st.info("헤더 없는 요청만 성공 (UA 차단 의심)")
-                else:
-                    st.error(
-                        f"양쪽 모두 실패 — UA: {diag.get('with_headers_error') or '?'} / "
-                        f"no-UA: {diag.get('without_headers_error') or '?'}"
-                    )
-
-            small_ok = diag["https_ok"] or diag["http_ok"]
-            large_ok = diag.get("large_request_ok", False)
-
-            if diag["oc_configured"] and not small_ok and not large_ok:
-                st.warning("회사망 프록시·방화벽·Streamlit Cloud 정책 점검 필요")
-            elif small_ok and not large_ok:
-                st.info(
-                    "🔍 작은 요청은 OK, 큰 법령 조회만 실패 → "
-                    "v1.7 청크 폴백이 자동 처리"
-                )
+                st.error(f"MCP 호출 실패: {diag.get('mcp_error') or '알 수 없음'}")
 
 
 # ──────────────────────────────────────────────
-# UI: 사이드바 검색 위젯
+# UI: 사이드바 검색 위젯 (UI 영역 변경 없음 — v1.x 그대로)
 # ──────────────────────────────────────────────
 def render_law_search_sidebar():
     with st.sidebar:
@@ -938,7 +714,7 @@ def render_law_search_sidebar():
 
 
 # ──────────────────────────────────────────────
-# UI: 메인 영역 검색 결과 표시
+# UI: 메인 영역 검색 결과 표시 (변경 없음)
 # ──────────────────────────────────────────────
 def render_law_search_results():
     sr = st.session_state.get("law_search_results")
@@ -972,7 +748,6 @@ def render_law_search_results():
                     f"**{law_name_short}** ({law.get('법령종류', '')})",
                     expanded=(i == 0)
                 ):
-                    # 전체 제목 표시
                     st.markdown(f"**{law['법령명']}** ({law.get('법령종류', '')}) — 시행 {law.get('시행일자', '')}")
 
                     col1, col2, col3 = st.columns(3)
@@ -983,7 +758,6 @@ def render_law_search_results():
                     mst = law.get("MST", "")
                     law_name = law.get("법령명", "")
 
-                    # 법제처 원문 링크
                     if mst:
                         try:
                             oc = get_oc()
@@ -1011,7 +785,6 @@ def render_law_search_results():
                             detail = st.session_state[cache_key]
                             st.markdown(f"**{detail['법령명']}** (시행 {detail['시행일자']}) — 총 {len(detail['조문목록'])}개 조문")
 
-                            # 별표/서식 안내
                             st.info("⚠️ **별표·별지서식 안내:** 법령에 포함된 별표, 서식, 표 등은 이미지로 구성되어 있어 텍스트로 표시되지 않을 수 있습니다. 위 '법제처에서 원문 보기' 링크에서 확인하세요.")
 
                             for art in detail["조문목록"]:
@@ -1036,7 +809,6 @@ def render_law_search_results():
                     f"[{prec.get('사건번호', '')}] {case_name_short}",
                     expanded=(i == 0)
                 ):
-                    # 전체 제목 표시
                     st.markdown(f"**[{prec.get('사건번호', '')}]** {prec['사건명']}")
 
                     col1, col2, col3 = st.columns(3)
@@ -1069,14 +841,12 @@ def render_law_search_results():
                             detail = st.session_state[cache_key]
                             has_content = False
 
-                            # AI 요약
                             if summary_key in st.session_state:
                                 st.markdown("## 🤖 AI 요약")
                                 st.markdown(st.session_state[summary_key])
                                 st.markdown("---")
                                 has_content = True
 
-                            # 원문
                             raw_parts = []
                             if detail.get("판시사항"): raw_parts.append(("📌 판시사항", detail["판시사항"]))
                             if detail.get("판결요지"): raw_parts.append(("📌 판결요지", detail["판결요지"]))
@@ -1104,7 +874,6 @@ def render_law_search_results():
                     f"[{interp.get('안건번호', '')}] {interp_name_short}",
                     expanded=(i == 0)
                 ):
-                    # 전체 제목 표시
                     st.markdown(f"**[{interp.get('안건번호', '')}]** {interp['안건명']}")
 
                     col1, col2 = st.columns(2)
@@ -1136,14 +905,12 @@ def render_law_search_results():
                             detail = st.session_state[cache_key]
                             has_content = False
 
-                            # AI 요약
                             if summary_key in st.session_state:
                                 st.markdown("## 🤖 AI 요약")
                                 st.markdown(st.session_state[summary_key])
                                 st.markdown("---")
                                 has_content = True
 
-                            # 원문
                             raw_parts = []
                             if detail.get("질의요지"): raw_parts.append(("❓ 질의요지", detail["질의요지"]))
                             if detail.get("회답"): raw_parts.append(("💬 회답", detail["회답"]))
