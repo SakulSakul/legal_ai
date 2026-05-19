@@ -1,7 +1,20 @@
 """
-법제처 Open API 연동 모듈 v1.5
+법제처 Open API 연동 모듈 v1.6
 ========================
-v1.5 변경사항:
+v1.6 변경사항 (안정성 강화):
+  - HTTPS 우선 + HTTP 자동 폴백 (Streamlit Cloud / 회사망 방화벽 대응)
+  - urllib3 Retry 정책 적용 (5xx/408/429 → 3회 백오프 재시도, 1s→2s→4s)
+  - requests.Session() + HTTPAdapter 공용 캐싱 (_get_session)
+  - REQUEST_TIMEOUT 30초로 상향
+  - HTTP status code 체크 (200 외 응답 파싱 시도 안 함)
+  - 응답 디코딩 견고화: bytes → UTF-8 → EUC-KR → CP949 폴백
+  - API 진단 도구 신규: run_api_diagnostics() / render_api_diagnostics_panel()
+  - 사이드바에 "🔧 법령 API 연결 진단" 버튼 추가
+  - 약어 매핑 fallback: resolved 키워드 실패 시 원본 키워드로 재시도
+  - 일부 API 호출 실패 시 사이드바에 카테고리별 실패 사유 표시
+  - get_oc() 안정화: st.secrets.get() + 환경변수 폴백
+
+v1.5:
   - expander 제목 40자 제한 + 안에서 전체 제목 표시 (잘림 방지)
 v1.4:
   - 법령 조문: 법제처 원문 링크 + 별표/서식 안내
@@ -9,24 +22,39 @@ v1.4:
   - 해석례: AI 요약 (결론→Q&A→핵심이유→실무의미) + 원문
 """
 
+import os
 import requests
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 from typing import Optional
 import logging
 import streamlit as st
 
 logger = logging.getLogger(__name__)
 
-def get_oc():
-    try:
-        return st.secrets["LAW_OC"]
-    except Exception:
-        import os
-        return os.environ.get("LAW_OC", "")
 
-BASE_URL = "http://www.law.go.kr/DRF/lawSearch.do"
-DETAIL_URL = "http://www.law.go.kr/DRF/lawService.do"
+def get_oc():
+    """LAW_OC 값을 st.secrets 또는 환경변수에서 안전하게 조회."""
+    try:
+        oc = st.secrets.get("LAW_OC", "")
+    except Exception:
+        oc = ""
+    if not oc:
+        oc = os.environ.get("LAW_OC", "")
+    return oc or ""
+
+
+# ──────────────────────────────────────────────
+# 엔드포인트 (HTTPS 우선 + HTTP 폴백)
+# ──────────────────────────────────────────────
+BASE_URL_HTTPS = "https://www.law.go.kr/DRF/lawSearch.do"
+BASE_URL_HTTP = "http://www.law.go.kr/DRF/lawSearch.do"
+DETAIL_URL_HTTPS = "https://www.law.go.kr/DRF/lawService.do"
+DETAIL_URL_HTTP = "http://www.law.go.kr/DRF/lawService.do"
+
+REQUEST_TIMEOUT = 30
 
 ABBREVIATIONS = {
     "표시광고법": "표시광고", "전상법": "전자상거래", "관세법": "관세법",
@@ -35,6 +63,7 @@ ABBREVIATIONS = {
     "식품위생법": "식품위생법", "약사법": "약사법", "주세법": "주세법",
     "담배사업법": "담배사업법", "대규모유통업법": "대규모유통업", "하도급법": "하도급",
 }
+
 
 def _resolve_keyword(keyword):
     if keyword in ABBREVIATIONS:
@@ -45,33 +74,85 @@ def _resolve_keyword(keyword):
             return f"{resolved} {remaining}" if remaining else resolved
     return keyword
 
-def _make_request(base_url, params_dict):
-    param_parts = []
+
+# ──────────────────────────────────────────────
+# 요청 세션 (Retry + Adapter 공용 캐싱)
+# ──────────────────────────────────────────────
+@st.cache_resource
+def _get_session() -> requests.Session:
+    retry = Retry(
+        total=3,
+        backoff_factor=1.0,
+        status_forcelist=[500, 502, 503, 504, 408, 429],
+        allowed_methods=["GET"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    sess = requests.Session()
+    sess.mount("https://", adapter)
+    sess.mount("http://", adapter)
+    return sess
+
+
+def _decode_response(res: requests.Response) -> str:
+    """응답 bytes를 UTF-8 → EUC-KR → CP949 순서로 디코딩 시도."""
+    raw = res.content or b""
+    for enc in ("utf-8", "euc-kr", "cp949"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="ignore")
+
+
+def _build_url(base_url: str, params_dict: dict) -> str:
+    parts = []
     for key, value in params_dict.items():
         if value is not None:
-            param_parts.append(f"{key}={quote(str(value), safe='')}")
-    full_url = base_url + "?" + "&".join(param_parts)
-    logger.info(f"법제처 API 요청: {full_url}")
+            parts.append(f"{key}={quote(str(value), safe='')}")
+    return base_url + "?" + "&".join(parts)
+
+
+def _try_request(url: str, label: str):
+    """단일 URL 요청. (tree, error_message) 반환."""
     try:
-        res = requests.get(full_url, timeout=15)
-        if res.encoding and 'euc' in res.encoding.lower():
-            res.encoding = 'euc-kr'
-        elif res.apparent_encoding:
-            res.encoding = res.apparent_encoding
-        content = res.text
+        sess = _get_session()
+        res = sess.get(url, timeout=REQUEST_TIMEOUT)
+        if res.status_code != 200:
+            return None, f"HTTP {res.status_code} ({label})"
+        content = _decode_response(res)
         if not content or len(content.strip()) < 10:
-            return None, f"빈 응답 (HTTP {res.status_code})"
+            return None, f"빈 응답 ({label})"
         try:
             return ET.fromstring(content), None
         except ET.ParseError as e:
-            logger.error(f"XML 파싱 실패: {e}")
-            return None, "XML 파싱 실패"
+            logger.error(f"XML 파싱 실패 ({label}): {e}")
+            return None, f"XML 파싱 실패 ({label})"
     except requests.Timeout:
-        return None, "요청 시간 초과"
+        return None, f"요청 시간 초과 ({label})"
     except requests.ConnectionError:
-        return None, "서버 연결 실패"
+        return None, f"서버 연결 실패 ({label})"
     except Exception as e:
-        return None, f"요청 실패: {type(e).__name__}"
+        return None, f"요청 실패: {type(e).__name__} ({label})"
+
+
+def _make_request(base_url_https: str, base_url_http: str, params_dict: dict):
+    """HTTPS 우선 시도 → 실패 시 HTTP 폴백.
+    Returns (ElementTree, error_message). 성공 시 error=None.
+    """
+    https_url = _build_url(base_url_https, params_dict)
+    logger.info(f"법제처 API 요청 (HTTPS): {https_url}")
+    tree, https_err = _try_request(https_url, "HTTPS")
+    if tree is not None:
+        return tree, None
+
+    http_url = _build_url(base_url_http, params_dict)
+    logger.info(f"HTTPS 실패({https_err}), HTTP 폴백: {http_url}")
+    tree, http_err = _try_request(http_url, "HTTP")
+    if tree is not None:
+        return tree, None
+
+    return None, f"{https_err} / {http_err}"
 
 
 # ──────────────────────────────────────────────
@@ -84,7 +165,6 @@ def _summarize_with_ai(prompt_text):
         try:
             api_key = st.secrets["GEMINI_API_KEY"]
         except Exception:
-            import os
             api_key = os.environ.get("GEMINI_API_KEY", "")
         if not api_key:
             return None
@@ -181,41 +261,144 @@ def _build_law_go_kr_link(law_name):
     return f"https://www.law.go.kr/법령/{quote(law_name, safe='')}"
 
 
+# ──────────────────────────────────────────────
+# target별 결과 파서
+# ──────────────────────────────────────────────
+def _parse_law_list(tree) -> list[dict]:
+    results = []
+    for item in tree.iter():
+        law_name = item.findtext("법령명한글")
+        if law_name:
+            detail_link = item.findtext("법령상세링크", "")
+            mst = ""
+            if "MST=" in detail_link:
+                mst = detail_link.split("MST=")[1].split("&")[0]
+            if not mst:
+                mst = item.findtext("법령일련번호", "")
+            results.append({
+                "법령명": law_name, "법령ID": item.findtext("법령일련번호", ""),
+                "MST": mst, "시행일자": item.findtext("시행일자", ""),
+                "법령종류": item.findtext("법령종류", ""),
+                "소관부처": item.findtext("소관부처", ""),
+                "상세링크": detail_link,
+            })
+    return results
+
+
+def _parse_prec_list(tree) -> list[dict]:
+    results = []
+    for item in tree.iter():
+        case_name = item.findtext("사건명")
+        if case_name:
+            results.append({
+                "판례ID": item.findtext("판례일련번호", ""),
+                "사건명": case_name, "사건번호": item.findtext("사건번호", ""),
+                "선고일자": item.findtext("선고일자", ""),
+                "법원명": item.findtext("법원명", ""),
+                "사건종류": item.findtext("사건종류명", ""),
+                "판결유형": item.findtext("판결유형", ""),
+                "상세링크": item.findtext("판례상세링크", ""),
+            })
+    return results
+
+
+def _parse_interp_list(tree) -> list[dict]:
+    results = []
+    for item in tree.iter():
+        title = item.findtext("안건명")
+        if title:
+            detail_link = item.findtext("법령해석례상세링크", "")
+            interp_id = item.findtext("법령해석례일련번호", "")
+            if not interp_id and "ID=" in detail_link:
+                interp_id = detail_link.split("ID=")[1].split("&")[0]
+            results.append({
+                "해석례ID": interp_id, "안건명": title,
+                "안건번호": item.findtext("안건번호", ""),
+                "회답일자": item.findtext("회답일자", ""),
+                "회답기관": item.findtext("회답기관", ""),
+                "상세링크": detail_link,
+            })
+    return results
+
+
+def _parse_admin_list(tree) -> list[dict]:
+    results = []
+    for item in tree.iter():
+        name = item.findtext("행정규칙명")
+        if name:
+            results.append({
+                "행정규칙명": name, "행정규칙ID": item.findtext("행정규칙일련번호", ""),
+                "시행일자": item.findtext("시행일자", ""), "발령기관": item.findtext("발령기관", ""),
+                "행정규칙종류": item.findtext("행정규칙종류", ""),
+            })
+    return results
+
+
+_PARSERS = {
+    "law": _parse_law_list,
+    "prec": _parse_prec_list,
+    "expc": _parse_interp_list,
+    "admrul": _parse_admin_list,
+}
+
+
 class LawAPI:
     def __init__(self, oc: Optional[str] = None):
         self.oc = oc or get_oc()
         if not self.oc:
             raise ValueError("LAW_OC 값이 설정되지 않았습니다.")
 
-    def search_law(self, keyword: str, display: int = 5) -> list[dict]:
+    # ── 내부 검색 헬퍼 ──
+    def _raw_search(self, target: str, query: str, display: int):
+        """단일 검색 요청. (results_list, error) 반환."""
+        params = {"OC": self.oc, "target": target, "type": "XML",
+                  "query": query, "display": str(display)}
+        tree, error = _make_request(BASE_URL_HTTPS, BASE_URL_HTTP, params)
+        if error:
+            return None, error
+        parser = _PARSERS.get(target)
+        if parser is None:
+            return None, f"알 수 없는 target: {target}"
+        return parser(tree), None
+
+    def _search_with_fallback(self, target: str, keyword: str, display: int) -> list[dict]:
+        """resolved 키워드로 먼저 시도 → 결과 없거나 에러면 원본으로 재시도."""
         resolved = _resolve_keyword(keyword)
-        params = {"OC": self.oc, "target": "law", "type": "XML", "query": resolved, "display": str(display)}
-        tree, error = _make_request(BASE_URL, params)
+        results, error = self._raw_search(target, resolved, display)
+        if error is None and results:
+            return results
+
+        if resolved != keyword:
+            logger.info(f"resolved 검색 결과 부족, 원본 키워드로 재시도: '{keyword}'")
+            results2, error2 = self._raw_search(target, keyword, display)
+            if error2 is None:
+                return results2 or []
+            if error is None:
+                return [{"error": f"API 호출 실패: {error2}"}]
+            return [{"error": f"API 호출 실패: {error}"}]
+
         if error:
             return [{"error": f"API 호출 실패: {error}"}]
-        results = []
-        for item in tree.iter():
-            law_name = item.findtext("법령명한글")
-            if law_name:
-                detail_link = item.findtext("법령상세링크", "")
-                mst = ""
-                if "MST=" in detail_link:
-                    mst = detail_link.split("MST=")[1].split("&")[0]
-                if not mst:
-                    mst = item.findtext("법령일련번호", "")
-                results.append({
-                    "법령명": law_name, "법령ID": item.findtext("법령일련번호", ""),
-                    "MST": mst, "시행일자": item.findtext("시행일자", ""),
-                    "법령종류": item.findtext("법령종류", ""),
-                    "소관부처": item.findtext("소관부처", ""),
-                    "상세링크": detail_link,
-                })
-        return results
+        return results or []
 
+    # ── 공개 검색 메소드 (시그니처 유지) ──
+    def search_law(self, keyword: str, display: int = 5) -> list[dict]:
+        return self._search_with_fallback("law", keyword, display)
+
+    def search_precedent(self, keyword: str, display: int = 10) -> list[dict]:
+        return self._search_with_fallback("prec", keyword, display)
+
+    def search_interpretation(self, keyword: str, display: int = 10) -> list[dict]:
+        return self._search_with_fallback("expc", keyword, display)
+
+    def search_admin_rule(self, keyword: str, display: int = 10) -> list[dict]:
+        return self._search_with_fallback("admrul", keyword, display)
+
+    # ── 상세 조회 ──
     def get_law_text(self, mst: str, jo: Optional[str] = None) -> dict:
         params = {"OC": self.oc, "target": "law", "type": "XML", "MST": mst}
         if jo: params["JO"] = jo
-        tree, error = _make_request(DETAIL_URL, params)
+        tree, error = _make_request(DETAIL_URL_HTTPS, DETAIL_URL_HTTP, params)
         if error:
             return {"error": f"API 호출 실패: {error}"}
         law_name = tree.findtext(".//법령명_한글", "") or tree.findtext(".//법령명한글", "")
@@ -233,30 +416,9 @@ class LawAPI:
             return {"error": "조문을 파싱하지 못했습니다."}
         return {"법령명": law_name, "시행일자": tree.findtext(".//시행일자", ""), "조문목록": articles}
 
-    def search_precedent(self, keyword: str, display: int = 10) -> list[dict]:
-        resolved = _resolve_keyword(keyword)
-        params = {"OC": self.oc, "target": "prec", "type": "XML", "query": resolved, "display": str(display)}
-        tree, error = _make_request(BASE_URL, params)
-        if error:
-            return [{"error": f"API 호출 실패: {error}"}]
-        results = []
-        for item in tree.iter():
-            case_name = item.findtext("사건명")
-            if case_name:
-                results.append({
-                    "판례ID": item.findtext("판례일련번호", ""),
-                    "사건명": case_name, "사건번호": item.findtext("사건번호", ""),
-                    "선고일자": item.findtext("선고일자", ""),
-                    "법원명": item.findtext("법원명", ""),
-                    "사건종류": item.findtext("사건종류명", ""),
-                    "판결유형": item.findtext("판결유형", ""),
-                    "상세링크": item.findtext("판례상세링크", ""),
-                })
-        return results
-
     def get_precedent_detail(self, prec_id: str) -> dict:
         params = {"OC": self.oc, "target": "prec", "type": "XML", "ID": prec_id}
-        tree, error = _make_request(DETAIL_URL, params)
+        tree, error = _make_request(DETAIL_URL_HTTPS, DETAIL_URL_HTTP, params)
         if error:
             return {"error": f"API 호출 실패: {error}"}
         return {
@@ -267,32 +429,9 @@ class LawAPI:
             "판례내용": tree.findtext(".//판례내용", ""),
         }
 
-    def search_interpretation(self, keyword: str, display: int = 10) -> list[dict]:
-        resolved = _resolve_keyword(keyword)
-        params = {"OC": self.oc, "target": "expc", "type": "XML", "query": resolved, "display": str(display)}
-        tree, error = _make_request(BASE_URL, params)
-        if error:
-            return [{"error": f"API 호출 실패: {error}"}]
-        results = []
-        for item in tree.iter():
-            title = item.findtext("안건명")
-            if title:
-                detail_link = item.findtext("법령해석례상세링크", "")
-                interp_id = item.findtext("법령해석례일련번호", "")
-                if not interp_id and "ID=" in detail_link:
-                    interp_id = detail_link.split("ID=")[1].split("&")[0]
-                results.append({
-                    "해석례ID": interp_id, "안건명": title,
-                    "안건번호": item.findtext("안건번호", ""),
-                    "회답일자": item.findtext("회답일자", ""),
-                    "회답기관": item.findtext("회답기관", ""),
-                    "상세링크": detail_link,
-                })
-        return results
-
     def get_interpretation_detail(self, interp_id: str) -> dict:
         params = {"OC": self.oc, "target": "expc", "type": "XML", "ID": interp_id}
-        tree, error = _make_request(DETAIL_URL, params)
+        tree, error = _make_request(DETAIL_URL_HTTPS, DETAIL_URL_HTTP, params)
         if error:
             return {"error": f"API 호출 실패: {error}"}
         return {
@@ -301,23 +440,6 @@ class LawAPI:
             "질의요지": tree.findtext(".//질의요지", ""), "회답": tree.findtext(".//회답", ""),
             "이유": tree.findtext(".//이유", ""), "참조조문": tree.findtext(".//참조조문", ""),
         }
-
-    def search_admin_rule(self, keyword: str, display: int = 10) -> list[dict]:
-        resolved = _resolve_keyword(keyword)
-        params = {"OC": self.oc, "target": "admrul", "type": "XML", "query": resolved, "display": str(display)}
-        tree, error = _make_request(BASE_URL, params)
-        if error:
-            return [{"error": f"API 호출 실패: {error}"}]
-        results = []
-        for item in tree.iter():
-            name = item.findtext("행정규칙명")
-            if name:
-                results.append({
-                    "행정규칙명": name, "행정규칙ID": item.findtext("행정규칙일련번호", ""),
-                    "시행일자": item.findtext("시행일자", ""), "발령기관": item.findtext("발령기관", ""),
-                    "행정규칙종류": item.findtext("행정규칙종류", ""),
-                })
-        return results
 
     @staticmethod
     def jo_to_code(jo_num: int) -> str:
@@ -366,6 +488,98 @@ class LawAPI:
 
 
 # ──────────────────────────────────────────────
+# API 진단
+# ──────────────────────────────────────────────
+def run_api_diagnostics() -> dict:
+    """법제처 API 연결 상태를 진단."""
+    oc = get_oc()
+    masked = ""
+    if oc:
+        masked = (oc[:3] + "***") if len(oc) > 3 else (oc[:1] + "***")
+
+    result = {
+        "oc_configured": bool(oc),
+        "oc_value": masked,
+        "https_ok": False,
+        "http_ok": False,
+        "https_error": None,
+        "http_error": None,
+        "sample_result": None,
+    }
+
+    if not oc:
+        result["https_error"] = "LAW_OC 미설정"
+        result["http_error"] = "LAW_OC 미설정"
+        return result
+
+    params = {"OC": oc, "target": "law", "type": "XML",
+              "query": "관세법", "display": "1"}
+
+    https_url = _build_url(BASE_URL_HTTPS, params)
+    tree, err = _try_request(https_url, "HTTPS")
+    if tree is not None:
+        result["https_ok"] = True
+        sample = None
+        for item in tree.iter():
+            sample = item.findtext("법령명한글")
+            if sample:
+                break
+        if sample:
+            result["sample_result"] = sample
+    else:
+        result["https_error"] = err
+
+    http_url = _build_url(BASE_URL_HTTP, params)
+    tree2, err2 = _try_request(http_url, "HTTP")
+    if tree2 is not None:
+        result["http_ok"] = True
+        if not result["sample_result"]:
+            for item in tree2.iter():
+                s = item.findtext("법령명한글")
+                if s:
+                    result["sample_result"] = s
+                    break
+    else:
+        result["http_error"] = err2
+
+    return result
+
+
+def render_api_diagnostics_panel():
+    """사이드바에 법령 API 진단 버튼/결과 패널 렌더."""
+    with st.sidebar:
+        st.markdown("---")
+        if st.button("🔧 법령 API 연결 진단", key="api_diag_btn", use_container_width=True):
+            with st.spinner("법제처 API 진단 중..."):
+                st.session_state["api_diag_result"] = run_api_diagnostics()
+
+        diag = st.session_state.get("api_diag_result")
+        if diag:
+            st.markdown("**🔧 진단 결과**")
+
+            if diag["oc_configured"]:
+                st.success(f"OC 키 설정됨: `{diag['oc_value']}`")
+            else:
+                st.error("OC 키 미설정 (LAW_OC)")
+
+            if diag["https_ok"]:
+                st.success("HTTPS 연결 성공")
+            else:
+                st.error(f"HTTPS 실패: {diag.get('https_error') or '알 수 없음'}")
+
+            if diag["http_ok"]:
+                st.success("HTTP 연결 성공")
+            else:
+                st.error(f"HTTP 실패: {diag.get('http_error') or '알 수 없음'}")
+
+            if diag.get("sample_result"):
+                st.caption(f"📄 샘플 응답: {diag['sample_result']}")
+
+            if diag["oc_configured"] and not diag["https_ok"] and not diag["http_ok"]:
+                st.warning("회사망 프록시·방화벽·Streamlit Cloud 정책 점검 필요")
+
+
+# ──────────────────────────────────────────────
 # UI: 사이드바 검색 위젯
 # ──────────────────────────────────────────────
 def render_law_search_sidebar():
@@ -381,11 +595,25 @@ def render_law_search_sidebar():
         if st.button("🔍 검색", key="law_search_btn") and law_query:
             try:
                 api = LawAPI()
+                failures = {}
                 with st.spinner("법제처 API 조회 중..."):
                     law_list = api.search_law(law_query, display=5) if inc_law else []
                     prec_list = api.search_precedent(law_query, display=5) if inc_prec else []
                     interp_list = api.search_interpretation(law_query, display=5) if inc_interp else []
-                    context = api.build_ai_context(law_query, include_law=inc_law, include_precedent=inc_prec, include_interpretation=inc_interp)
+
+                    if inc_law and law_list and isinstance(law_list[0], dict) and "error" in law_list[0]:
+                        failures["법령"] = law_list[0]["error"]
+                    if inc_prec and prec_list and isinstance(prec_list[0], dict) and "error" in prec_list[0]:
+                        failures["판례"] = prec_list[0]["error"]
+                    if inc_interp and interp_list and isinstance(interp_list[0], dict) and "error" in interp_list[0]:
+                        failures["해석례"] = interp_list[0]["error"]
+
+                    context = api.build_ai_context(
+                        law_query,
+                        include_law=inc_law,
+                        include_precedent=inc_prec,
+                        include_interpretation=inc_interp,
+                    )
                 st.session_state["law_context"] = context
                 st.session_state["law_search_results"] = {
                     "query": law_query, "resolved": _resolve_keyword(law_query),
@@ -394,6 +622,13 @@ def render_law_search_sidebar():
                     "interpretations": [i for i in interp_list if "error" not in i],
                     "has_results": "찾지 못했습니다" not in context,
                 }
+
+                if failures:
+                    st.error("⚠️ 일부 API 호출 실패")
+                    for cat, msg in failures.items():
+                        st.markdown(f"- **{cat}**: {msg}")
+                    st.caption("아래 '🔧 법령 API 연결 진단' 버튼으로 점검")
+
                 if "찾지 못했습니다" in context:
                     st.warning("검색 결과 없음")
                     st.caption(f"💡 '{law_query}' → '{_resolve_keyword(law_query)}'로 검색됨")
@@ -415,6 +650,8 @@ def render_law_search_sidebar():
                 st.session_state.pop("law_search_results", None)
                 st.session_state.pop("law_context", None)
                 st.rerun()
+
+    render_api_diagnostics_panel()
 
 
 # ──────────────────────────────────────────────
