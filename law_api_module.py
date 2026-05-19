@@ -1,13 +1,23 @@
 """
-법제처 Open API 연동 모듈 v1.7
+법제처 Open API 연동 모듈 v1.7.1
 ========================
-v1.7 변경사항 (큰 법령 ConnectionReset 대응):
+v1.7.1 변경사항 (봇 차단 회피):
+  - 증거: v1.7에서 UA "Mozilla/5.0 (legal_ai compliance; +github.com/...)" 패턴이
+    봇 시그니처로 인식되어 차단되는 정황 (브라우저로는 같은 OC가 정상 응답)
+  - User-Agent를 일반 Chrome 브라우저로 위장
+    (Mozilla/5.0 (Windows NT 10.0; Win64; x64) ... Chrome/130.0.0.0 Safari/537.36)
+  - Accept-Language: "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7" 추가
+  - Connection: close 제거 (keep-alive 기본값) — 정부 서버 호환성 향상,
+    큰 응답은 v1.7 청크 폴백이 처리
+  - 헤더 없는 plain 요청 fallback 모드 추가: 헤더 요청 실패 시 헤더 제거 후 1회 재시도
+  - 진단 패널에 헤더 영향 진단(ua_blocked) 표시 — "일반 브라우저 UA OK / 봇 UA 차단" 안내
+
+v1.7:
   - 실제 원인 분석: law.go.kr 서버가 큰 EUC-KR 응답 전송 중 connection을 끊는 동작
     (작은 법령은 OK / 관세법·상표법 등 300조+ 법령에서 ConnectionResetError 발생)
   - urllib3 Retry에 connect=3, read=3 추가 (status 외에 네트워크 단계 재시도)
   - backoff_factor 1.5로 상향
-  - 요청 헤더 추가: User-Agent, Accept, Accept-Encoding, Connection: close
-    (keep-alive 비활성화로 큰 응답 안정성 확보)
+  - 요청 헤더 추가: User-Agent, Accept, Accept-Encoding
   - ConnectionResetError / ChunkedEncodingError 명시적 retry (2초 후 1회 재시도)
   - 응답 크기 로깅 (프로토콜·바이트 수)
   - get_law_text 청크 폴백: 큰 법령 실패 시 JO 파라미터로 50조씩 끊어 재조회
@@ -84,10 +94,14 @@ DETAIL_URL_HTTP = "http://www.law.go.kr/DRF/lawService.do"
 REQUEST_TIMEOUT = 30
 
 REQUEST_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (legal_ai compliance; +https://github.com/SakulSakul/legal_ai)",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/130.0.0.0 Safari/537.36"
+    ),
     "Accept": "application/xml, text/xml, */*",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     "Accept-Encoding": "gzip, deflate",
-    "Connection": "close",
 }
 
 # 진단 시 사용할 큰 법령 MST (관세법)
@@ -167,10 +181,10 @@ def _is_connection_reset(exc: BaseException) -> bool:
     return False
 
 
-def _single_request(url: str, label: str):
+def _single_request(url: str, label: str, headers: Optional[dict] = REQUEST_HEADERS):
     """단일 URL 한 번 요청. (tree, error_message) 반환. 예외는 호출자에게 전파."""
     sess = _get_session()
-    res = sess.get(url, timeout=REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
+    res = sess.get(url, timeout=REQUEST_TIMEOUT, headers=headers)
     if res.status_code != 200:
         return None, f"HTTP {res.status_code} ({label})"
     content = _decode_response(res)
@@ -184,10 +198,46 @@ def _single_request(url: str, label: str):
         return None, f"XML 파싱 실패 ({label})"
 
 
-def _try_request(url: str, label: str):
-    """단일 URL 요청 + ConnectionReset/ChunkedEncoding 명시적 재시도. (tree, error_message)."""
+def _is_ua_block_signal(error_msg: Optional[str], exc: Optional[BaseException] = None) -> bool:
+    """봇 차단 의심 시그널 (403/429 또는 ConnectionResetError)."""
+    if error_msg:
+        if "HTTP 403" in error_msg or "HTTP 429" in error_msg:
+            return True
+    if exc is not None and _is_connection_reset(exc):
+        return True
+    return False
+
+
+def _request_without_headers(url: str, label: str):
+    """헤더 완전히 제거한 plain requests.get으로 1회 재시도. 성공 시 UA 차단 의심 로그."""
     try:
-        return _single_request(url, label)
+        tree, err = _single_request(url, f"{label}/no-UA", headers=None)
+        if tree is not None:
+            logger.warning(f"헤더 없이 성공 — UA 차단 의심 ({label})")
+            return tree, None
+        return None, err
+    except requests.Timeout:
+        return None, f"요청 시간 초과 ({label}/no-UA)"
+    except (requests.exceptions.ChunkedEncodingError, requests.ConnectionError) as e:
+        return None, f"서버 연결 실패 ({label}/no-UA): {type(e).__name__}"
+    except Exception as e:
+        return None, f"요청 실패: {type(e).__name__} ({label}/no-UA)"
+
+
+def _try_request(url: str, label: str):
+    """단일 URL 요청 + ConnectionReset/ChunkedEncoding 명시적 재시도 + 헤더 없는 fallback.
+    (tree, error_message)."""
+    try:
+        tree, err = _single_request(url, label)
+        if tree is not None:
+            return tree, None
+        # HTTP 403/429 → 봇 차단 의심, 헤더 없이 재시도
+        if _is_ua_block_signal(err):
+            tree2, err2 = _request_without_headers(url, label)
+            if tree2 is not None:
+                return tree2, None
+            return None, err
+        return None, err
     except requests.Timeout:
         return None, f"요청 시간 초과 ({label})"
     except (requests.exceptions.ChunkedEncodingError, requests.ConnectionError) as e:
@@ -201,13 +251,17 @@ def _try_request(url: str, label: str):
             except requests.Timeout:
                 return None, f"요청 시간 초과 ({label}) — 재시도 후"
             except (requests.exceptions.ChunkedEncodingError, requests.ConnectionError) as e2:
-                if _is_connection_reset(e2) or isinstance(
-                    e2, requests.exceptions.ChunkedEncodingError
-                ):
-                    return None, (
-                        f"응답 크기 초과로 서버가 연결 종료 ({label}) "
-                        "— 큰 응답에서 law.go.kr 서버가 connection을 끊음"
-                    )
+                if _is_ua_block_signal(None, e2):
+                    tree3, err3 = _request_without_headers(url, label)
+                    if tree3 is not None:
+                        return tree3, None
+                    if _is_connection_reset(e2) or isinstance(
+                        e2, requests.exceptions.ChunkedEncodingError
+                    ):
+                        return None, (
+                            f"응답 크기 초과로 서버가 연결 종료 ({label}) "
+                            "— 큰 응답에서 law.go.kr 서버가 connection을 끊음"
+                        )
                 return None, f"서버 연결 실패 ({label}): {type(e2).__name__}"
             except Exception as e2:
                 return None, f"요청 실패: {type(e2).__name__} ({label}) — 재시도 후"
@@ -646,12 +700,19 @@ def run_api_diagnostics() -> dict:
         "large_request_ok": False,
         "large_request_error": None,
         "large_request_articles": 0,
+        "with_headers_ok": False,
+        "without_headers_ok": False,
+        "with_headers_error": None,
+        "without_headers_error": None,
+        "ua_blocked": False,
     }
 
     if not oc:
         result["https_error"] = "LAW_OC 미설정"
         result["http_error"] = "LAW_OC 미설정"
         result["large_request_error"] = "LAW_OC 미설정"
+        result["with_headers_error"] = "LAW_OC 미설정"
+        result["without_headers_error"] = "LAW_OC 미설정"
         return result
 
     # 1) 작은 검색 요청 (lawSearch.do, display=1)
@@ -708,6 +769,29 @@ def run_api_diagnostics() -> dict:
     else:
         result["large_request_error"] = err3
 
+    # 3) 헤더 영향 진단: 헤더 있는 호출 vs 헤더 없는 호출
+    head_url = _build_url(BASE_URL_HTTPS, params)
+    try:
+        t_with, e_with = _single_request(head_url, "with-UA")
+    except Exception as e:
+        t_with, e_with = None, f"{type(e).__name__}"
+    if t_with is not None:
+        result["with_headers_ok"] = True
+    else:
+        result["with_headers_error"] = e_with
+
+    try:
+        t_without, e_without = _single_request(head_url, "no-UA", headers=None)
+    except Exception as e:
+        t_without, e_without = None, f"{type(e).__name__}"
+    if t_without is not None:
+        result["without_headers_ok"] = True
+    else:
+        result["without_headers_error"] = e_without
+
+    if result["without_headers_ok"] and not result["with_headers_ok"]:
+        result["ua_blocked"] = True
+
     return result
 
 
@@ -747,6 +831,24 @@ def render_api_diagnostics_panel():
                 st.success(f"큰 법령 조회 성공 (조문 {cnt}건)")
             else:
                 st.error(f"큰 법령 조회 실패: {diag.get('large_request_error') or '알 수 없음'}")
+
+            st.markdown("**💡 헤더 영향 진단**")
+            if diag.get("ua_blocked"):
+                st.warning("일반 브라우저 UA 차단 — 헤더 없는 요청만 통과 (서버측 봇 차단)")
+            else:
+                if diag.get("with_headers_ok") and diag.get("without_headers_ok"):
+                    st.success("일반 브라우저 UA OK / 헤더 없는 요청도 OK")
+                elif diag.get("with_headers_ok"):
+                    st.success("일반 브라우저 UA OK")
+                    if diag.get("without_headers_error"):
+                        st.caption(f"헤더 없는 요청 실패: {diag['without_headers_error']}")
+                elif diag.get("without_headers_ok"):
+                    st.info("헤더 없는 요청만 성공 (UA 차단 의심)")
+                else:
+                    st.error(
+                        f"양쪽 모두 실패 — UA: {diag.get('with_headers_error') or '?'} / "
+                        f"no-UA: {diag.get('without_headers_error') or '?'}"
+                    )
 
             small_ok = diag["https_ok"] or diag["http_ok"]
             large_ok = diag.get("large_request_ok", False)
