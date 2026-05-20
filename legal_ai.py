@@ -2505,57 +2505,31 @@ DEFAULT_KNOWN_SARYU_NAMES = [
 ]
 
 
-@st.cache_data(ttl=60)  # 60초 캐시 — 매번 DB 조회 방지 (인메모리 docs 우선)
-def _fetch_saryu_names_cached() -> tuple:
-    """Supabase docs에서 사규/계약/약정 문서명 조회 (인메모리 docs 없을 때만).
-    st.stop() 경로(init_supabase) 회피 위해 직접 create_client 사용. tuple 반환(캐시 안전)."""
-    try:
-        url = get_secret("SUPABASE_URL")
-        key = get_secret("SUPABASE_KEY")
-        if not url or not key:
-            return tuple()
-        from supabase import create_client
-        rows = (create_client(url, key)
-                .table("docs").select("cat,label,name").execute().data) or []
-        names = set()
-        for doc in rows:
-            if doc.get("cat") in {"saryu", "contract", "yakjeong"}:
-                for k in ("title", "label", "name"):
-                    val = doc.get(k)
-                    if val and isinstance(val, str):
-                        names.add(val.strip())
-        return tuple(sorted(names))
-    except Exception as e:
-        logger.warning(f"사규 DB 직접 조회 실패: {e}")
-        return tuple()
-
-
+@st.cache_data(ttl=300)  # 5분 캐시 — 매번 DB 조회 방지
 def get_known_saryu_names_from_db() -> set:
-    """등록된 사규/계약서/약정서 문서명을 동적 추출.
-    1순위: st.session_state.docs (이미 로드된 인메모리 — STEP 체크와 동일 소스)
-    2순위: Supabase 직접 조회(_fetch_saryu_names_cached)
+    """docs 테이블에서 사규/계약서/약정서 문서의 사규명을 동적 추출.
     실패 시 DEFAULT_KNOWN_SARYU_NAMES 폴백."""
-    names_from_db = set()
     try:
-        docs = st.session_state.get("docs") or []
-        for doc in docs:
+        sb = init_supabase()
+        if not sb:
+            raise RuntimeError("Supabase 클라이언트 없음")
+        result = sb.table("docs").select("cat,label,name").execute()
+        names_from_db = set()
+        for doc in (result.data or []):
             if doc.get("cat") in {"saryu", "contract", "yakjeong"}:
-                for k in ("title", "label", "name"):
-                    val = doc.get(k)
+                for key in ("title", "label", "name"):
+                    val = doc.get(key)
                     if val and isinstance(val, str):
                         names_from_db.add(val.strip())
-        # 인메모리에 사규가 없으면 DB 직접 조회로 보강
-        if not names_from_db:
-            names_from_db |= set(_fetch_saryu_names_cached())
+        merged = names_from_db | set(DEFAULT_KNOWN_SARYU_NAMES)
+        logger.info(
+            f"사규 동적 로딩: DB {len(names_from_db)}건 + 폴백 "
+            f"{len(DEFAULT_KNOWN_SARYU_NAMES)}건 = 총 {len(merged)}건"
+        )
+        return merged
     except Exception as e:
         logger.warning(f"사규 동적 로딩 실패, 폴백 사용: {e}")
-
-    merged = names_from_db | set(DEFAULT_KNOWN_SARYU_NAMES)
-    logger.info(
-        f"사규 동적 로딩: DB {len(names_from_db)}건 + 폴백 "
-        f"{len(DEFAULT_KNOWN_SARYU_NAMES)}건 = 총 {len(merged)}건"
-    )
-    return merged
+        return set(DEFAULT_KNOWN_SARYU_NAMES)
 
 
 def _filter_b2b_consumer_issues(json_data, user_query=""):
