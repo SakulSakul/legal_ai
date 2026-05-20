@@ -1,6 +1,10 @@
 """
-법제처 Open API 연동 모듈 v2.0
+법제처 Open API 연동 모듈 v2.0.1
 ========================
+v2.0.1 변경사항 (긴급 수정):
+  - _mcp_call()에 tools=[{"type":"mcp_toolset","mcp_server_name":"korean-law"}] 추가
+    (mcp_servers만 넘기고 toolset 참조 누락 → Anthropic API 400 에러로 MCP 100% 실패하던 문제)
+
 v2.0 변경사항 (백엔드 전환):
   - 백엔드를 law.go.kr 직접 호출 → korean-law-mcp 경유로 전환
     (https://korean-law-mcp.fly.dev/mcp, 도쿄 리전)
@@ -193,6 +197,10 @@ def _mcp_call(tool_name: str, arguments: dict) -> Any:
                 "type": "url",
                 "url": MCP_SERVER_URL,
                 "name": MCP_SERVER_NAME,
+            }],
+            tools=[{
+                "type": "mcp_toolset",
+                "mcp_server_name": MCP_SERVER_NAME,
             }],
             system=system_instruction,
             messages=[{"role": "user", "content": user_prompt}],
