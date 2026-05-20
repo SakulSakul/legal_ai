@@ -2495,41 +2495,14 @@ def enforce_mandatory_issues(json_data, laws_db, user_query=""):
 # ██ 후처리 필터: AI 할루시네이션 강제 차단 ██
 # ══════════════════════════════════════════════════════════════
 
-# 사규 검증 폴백 목록 (docs 테이블 동적 로딩 실패 시에만 사용)
-DEFAULT_KNOWN_SARYU_NAMES = [
+# 실제 존재하는 사규 목록 (이 목록에 없는 사규명은 할루시네이션)
+KNOWN_SARYU_NAMES = [
     "MD 협력회사 입점 및 퇴점 지침",
     "직매입거래 기본계약서",
     "특정매입거래 기본계약서",
     "임대차계약서",
     "사내규정집",
 ]
-
-
-@st.cache_data(ttl=300)  # 5분 캐시 — 매번 DB 조회 방지
-def get_known_saryu_names_from_db() -> set:
-    """docs 테이블에서 사규/계약서/약정서 문서의 사규명을 동적 추출.
-    실패 시 DEFAULT_KNOWN_SARYU_NAMES 폴백."""
-    try:
-        sb = init_supabase()
-        if not sb:
-            raise RuntimeError("Supabase 클라이언트 없음")
-        result = sb.table("docs").select("cat,label,name").execute()
-        names_from_db = set()
-        for doc in (result.data or []):
-            if doc.get("cat") in {"saryu", "contract", "yakjeong"}:
-                for key in ("title", "label", "name"):
-                    val = doc.get(key)
-                    if val and isinstance(val, str):
-                        names_from_db.add(val.strip())
-        merged = names_from_db | set(DEFAULT_KNOWN_SARYU_NAMES)
-        logger.info(
-            f"사규 동적 로딩: DB {len(names_from_db)}건 + 폴백 "
-            f"{len(DEFAULT_KNOWN_SARYU_NAMES)}건 = 총 {len(merged)}건"
-        )
-        return merged
-    except Exception as e:
-        logger.warning(f"사규 동적 로딩 실패, 폴백 사용: {e}")
-        return set(DEFAULT_KNOWN_SARYU_NAMES)
 
 
 def _filter_b2b_consumer_issues(json_data, user_query=""):
@@ -2574,8 +2547,6 @@ def _validate_saryu_names(json_data):
     if not json_data or "issues" not in json_data:
         return json_data
 
-    known_saryu = get_known_saryu_names_from_db()
-
     for iss in json_data["issues"]:
         rule_text = iss.get("applicable_rule", "")
         if not rule_text or rule_text in ("해당 없음", "없음", "해당 규정 없음"):
@@ -2593,10 +2564,10 @@ def _validate_saryu_names(json_data):
         if not found_names:
             continue
 
-        # 알려진 사규 목록(DB 동적 로딩)과 대조
+        # 알려진 사규 목록과 대조
         is_valid = False
         for name in found_names:
-            for known in known_saryu:
+            for known in KNOWN_SARYU_NAMES:
                 if known in name or name in known:
                     is_valid = True
                     break
@@ -2605,9 +2576,7 @@ def _validate_saryu_names(json_data):
 
         if not is_valid:
             hallucinated = ", ".join(found_names)
-            logger.warning(
-                f"허구 사규 차단 (검증 대상 {len(known_saryu)}건): {hallucinated}"
-            )
+            logger.warning(f"사규 검증 실패 — 허구 사규 감지: {hallucinated}")
             iss["applicable_rule"] = "해당 없음"
             iss["rule_analysis"] = "검증 데이터에 해당 사규 존재하지 않음"
 

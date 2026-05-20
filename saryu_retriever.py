@@ -8,10 +8,7 @@ saryu_retriever.py — 지능형 사규 리트리버 (WP1)
 """
 
 import re
-import logging
 from typing import List, Dict, Tuple
-
-logger = logging.getLogger(__name__)
 
 
 def chunk_by_article(text: str, label: str = "") -> List[Dict[str, str]]:
@@ -142,13 +139,7 @@ def retrieve_relevant_saryu(
     """
     # 1. 키워드 추출
     keywords = extract_keywords(query)
-    saryu_doc_count = sum(
-        1 for d in docs if d.get("cat") in ("saryu", "contract", "yakjeong")
-    )
-    logger.info(
-        f"사규 검색 시작: 키워드 {keywords} | 사규/계약/약정 문서 {saryu_doc_count}건"
-    )
-
+    
     if not keywords:
         # 키워드 없으면 각 문서의 앞부분만
         result = []
@@ -165,9 +156,8 @@ def retrieve_relevant_saryu(
             all_chunks.extend(chunks)
     
     if not all_chunks:
-        logger.info("사규 검색 결과: 조항 청크 0건 — docs 테이블에 사규/계약/약정 문서 없음")
         return "(사규 등록 없음)"
-
+    
     # 3. 각 조항의 매칭 점수 계산
     scored = [(chunk, score_chunk(chunk, keywords)) for chunk in all_chunks]
     
@@ -190,18 +180,13 @@ def retrieve_relevant_saryu(
         result_parts.append(entry)
         total_chars += len(entry)
     
-    matched_count = len(result_parts)
     if not result_parts:
         # 매칭된 조항이 없으면 각 문서의 앞부분
-        logger.info(
-            f"사규 검색 결과: 키워드 매칭 0건 (전체 {len(all_chunks)}개 조항) — 문서 앞부분 폴백"
-        )
         for doc in docs:
             if doc.get("cat") in ("saryu", "contract", "yakjeong"):
                 result_parts.append(f"[{doc.get('label', '')}]\n{doc.get('text', '')[:500]}")
         return "\n\n".join(result_parts)[:max_chars]
-
-    logger.info(f"사규 검색 결과: {matched_count}개 조항 매칭 (전체 {len(all_chunks)}개 중)")
+    
     return "\n\n---\n\n".join(result_parts)
 
 
