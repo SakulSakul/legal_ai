@@ -19,6 +19,7 @@ block_assembler.py — 검토의견서 조립 모듈 (구조적 형량오류 방
                      형량은 DB가 보장     LLM은 형량을 건드리지 않음
 """
 
+import os
 import json
 from pathlib import Path
 from datetime import datetime
@@ -38,30 +39,76 @@ def load_legal_blocks(path: str = "legal_blocks.json") -> dict:
 # 2. 쟁점 분류 (Stage 0)
 # ============================================================
 
+# 쟁점별 고신뢰 키워드 (substring 히트 = 무조건 포함)
+KEYWORD_MAP = {
+    "모조품": ["모조품", "위조", "짝퉁", "가품", "위조상품", "모조", "fake", "counterfeit"],
+    # 향후 확장 예시:
+    # "병행수입": ["병행수입", "병행", "진정상품", "grey market"],
+    # "표시광고": ["표시광고", "허위광고", "과대광고", "부당광고"],
+}
+
+# 임베딩 의미매칭 임계값 (코사인). 키워드 미스 시 이 값 이상이면 매칭.
+#   ⚠️ negative(단가·판촉·그린워싱) 오분류를 막는 안전 파라미터.
+#   env CLASSIFY_EMB_THRESHOLD로 코드 수정 없이 튜닝 가능.
+DEFAULT_EMB_THRESHOLD = 0.62
+
+
+def _emb_threshold() -> float:
+    try:
+        return float(os.environ.get("CLASSIFY_EMB_THRESHOLD", DEFAULT_EMB_THRESHOLD))
+    except (TypeError, ValueError):
+        return DEFAULT_EMB_THRESHOLD
+
+
+def _db_topic_keys(db: dict) -> list[str]:
+    """DB에서 토픽 키만 추출 (_meta 등 메타키 제외)."""
+    return [k for k in db.keys() if not k.startswith("_")]
+
+
+def _topic_rep_text(topic_key: str, topic: dict) -> str:
+    """토픽 대표 텍스트 — label + summary + 키워드 + issue titles (임베딩 기준)."""
+    parts = [topic.get("label", ""), topic.get("summary", "")]
+    parts += KEYWORD_MAP.get(topic_key, [])
+    for iss in topic.get("issues", []):
+        parts.append(iss.get("title", ""))
+    return " ".join(p for p in parts if p)
+
+
 def classify_issues(query: str, db: dict) -> list[str]:
     """
-    질문에서 쟁점 키워드를 분류한다.
+    질문에서 쟁점을 분류한다 (하이브리드: 키워드 고신뢰 + 임베딩 의미매칭).
 
-    현재는 규칙 기반으로 구현. 쟁점 유형이 늘어나면
-    Gemini에게 분류만 시킬 수 있음 (형량 생성 없이 키 선택만).
+    1) 키워드 substring 히트 → 무조건 포함 (고신뢰, 빠름)
+    2) 키워드 미스 토픽 → 질의·토픽 대표텍스트 코사인 유사도가
+       임계값 이상이면 포함 (동의어·자연어 질의 대응)
+    임베딩 미가용(키없음/실패) 시 키워드 전용으로 graceful fallback.
 
     반환값: DB의 토픽 키 목록 (예: ["모조품"])
     """
-    # 규칙 기반 매칭 (확실하고 빠름)
-    keyword_map = {
-        "모조품": ["모조품", "위조", "짝퉁", "가품", "위조상품", "모조", "fake", "counterfeit"],
-        # 향후 확장 예시:
-        # "병행수입": ["병행수입", "병행", "진정상품", "grey market"],
-        # "표시광고": ["표시광고", "허위광고", "과대광고", "부당광고"],
-    }
-
-    matched_topics = []
     query_lower = query.lower()
+    matched_topics = []
 
-    for topic_key, keywords in keyword_map.items():
-        if any(kw in query_lower for kw in keywords):
-            if topic_key in db:
-                matched_topics.append(topic_key)
+    # 1) 고신뢰 키워드 매칭
+    for topic_key, keywords in KEYWORD_MAP.items():
+        if topic_key in db and any(kw.lower() in query_lower for kw in keywords):
+            matched_topics.append(topic_key)
+
+    # 2) 키워드 미스 토픽에 대해 임베딩 의미매칭
+    remaining = [t for t in _db_topic_keys(db) if t not in matched_topics]
+    if remaining:
+        try:
+            import embedding_util
+            q_vec = embedding_util.embed_one(query)
+            if q_vec is not None:
+                threshold = _emb_threshold()
+                for topic_key in remaining:
+                    rep_vec = embedding_util.embed_one(_topic_rep_text(topic_key, db[topic_key]))
+                    if rep_vec is None:
+                        continue
+                    if embedding_util.cosine(q_vec, rep_vec) >= threshold:
+                        matched_topics.append(topic_key)
+        except Exception:
+            pass  # 임베딩 경로 실패는 키워드 결과만 반환 (앱 안정성)
 
     return matched_topics
 
