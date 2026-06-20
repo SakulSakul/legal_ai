@@ -20,10 +20,21 @@ import pytest
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-HAS_KEY = bool(os.environ.get("GEMINI_API_KEY"))
+def _has_key() -> bool:
+    """env 또는 .streamlit/secrets.toml 어디든 키가 있으면 True."""
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        return True
+    try:
+        import embedding_util
+        return bool(embedding_util._get_api_key())
+    except Exception:
+        return False
+
+
+HAS_KEY = _has_key()
 needs_emb = pytest.mark.skipif(
     not HAS_KEY,
-    reason="GEMINI_API_KEY 없음 — 임베딩 의미매칭 게이트 skip (결정론 테스트만 검증)",
+    reason="임베딩 키 없음 — 의미매칭 게이트 skip (결정론 테스트만 검증)",
 )
 
 

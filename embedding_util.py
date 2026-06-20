@@ -6,8 +6,12 @@ embedding_util.py — 공용 임베딩 백엔드 (캐시 + graceful fallback)
       · 성공: 각 텍스트의 임베딩 벡터 리스트 (text-embedding-004 = 768차원)
       · 실패/키없음: None → 호출부가 키워드 전용 경로로 graceful fallback
 
-모델: text-embedding-004 (Gemini, 768d) — DF COMPASS와 동일 스택.
-캐시: 콘텐츠 sha256(모델명 포함) 해시 키. 인메모리 dict + eval/.emb_cache 디스크 백업.
+모델: gemini-embedding-001 (Gemini, 768d 요청).
+  ※ 지시서 §3.1은 text-embedding-004를 지정했으나, 운영 API 키에서 해당 모델이
+    404(미제공)였다. embedContent 지원 모델 조회 결과 gemini-embedding-001 계열만
+    가용하여 이를 채택. output_dimensionality=768로 본래 의도(768d)는 유지.
+    (embed() 인터페이스 불변 — 추후 모델 교체는 DEFAULT_MODEL 한 줄.)
+캐시: 콘텐츠 sha256(모델명+차원 포함) 해시 키. 인메모리 dict + eval/.emb_cache 디스크 백업.
       매 질의마다 코퍼스 전체를 재임베딩하지 않는다 (캐시 히트).
 인메모리 코사인 유사도 사용 (코퍼스 ~5만자 → pgvector 불필요).
 
@@ -24,7 +28,9 @@ import hashlib
 from typing import List, Optional, Callable
 
 # ── 설정 ────────────────────────────────────────────────
-DEFAULT_MODEL = "text-embedding-004"
+DEFAULT_MODEL = "gemini-embedding-001"
+OUTPUT_DIM = 768          # MRL 차원 축소 (<3072은 코사인 전 정규화 권장 → cosine()에서 처리)
+TASK_TYPE = "SEMANTIC_SIMILARITY"
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval", ".emb_cache")
 _CACHE_FILE = os.path.join(_CACHE_DIR, "embeddings.json")
 
@@ -97,7 +103,9 @@ def _save_disk_cache():
 
 
 def _key_for(text: str, model: str) -> str:
-    return hashlib.sha256(f"{model}\x00{text}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        f"{model}|d{OUTPUT_DIM}|{TASK_TYPE}\x00{text}".encode("utf-8")
+    ).hexdigest()
 
 
 # ── 기본 백엔드: Gemini text-embedding-004 ───────────────
@@ -111,8 +119,13 @@ def _default_backend(texts: List[str], model: str) -> Optional[List[List[float]]
     except Exception:
         return None
     try:
+        from google.genai import types
+        cfg = types.EmbedContentConfig(
+            output_dimensionality=OUTPUT_DIM,
+            task_type=TASK_TYPE,
+        )
         client = genai.Client(api_key=key)
-        resp = client.models.embed_content(model=model, contents=texts)
+        resp = client.models.embed_content(model=model, contents=texts, config=cfg)
         vecs = [list(e.values) for e in resp.embeddings]
         if len(vecs) != len(texts):
             return None

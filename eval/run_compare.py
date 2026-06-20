@@ -22,7 +22,7 @@ sys.path.insert(0, HERE)
 # baseline과 동일한 스코어링 헬퍼를 공유 (단일 진실원 → drift 방지)
 import run_baseline as RB                                                # noqa: E402
 from block_assembler import classify_issues, load_legal_blocks          # noqa: E402
-from saryu_retriever import retrieve_relevant_saryu                      # noqa: E402
+from saryu_retriever import retrieve_relevant_saryu, rank_chunk_ids      # noqa: E402
 import metrics as M                                                     # noqa: E402
 
 
@@ -50,7 +50,9 @@ def measure():
         surf = RB.surfaced_articles(out, gold)
         s_recall = M.surfaced_recall(surf, gold)
 
-        ranked = RB.rank_chunks(q, docs)
+        # 현재 시스템의 실제 랭킹(하이브리드 융합 순서)으로 Recall@5/MRR 측정.
+        # baseline_locked는 키워드 순서(당시 시스템) — 각 버전의 실제 랭킹 기준 비교.
+        ranked = rank_chunk_ids(q, docs)
         r5 = M.recall_at_k(ranked, gold, 5)
         mrr_v = M.mrr(ranked, gold)
 

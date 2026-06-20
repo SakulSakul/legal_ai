@@ -161,20 +161,16 @@ def _collect_article_chunks(docs: List[Dict]) -> List[Dict[str, str]]:
     return chunks
 
 
-def _hybrid_retrieve(query: str, docs: List[Dict], max_chars: int) -> Optional[str]:
+def _hybrid_order(query: str, docs: List[Dict]):
     """
-    키워드 랭킹 + 임베딩 코사인 랭킹을 RRF로 융합해 상위 조항을 조립.
-
-    임베딩이 미가용(키없음/실패)이면 None을 반환 → 호출부가 기존
-    키워드 전용 경로로 graceful fallback (baseline과 동일 동작 보장).
+    키워드 랭킹 + 임베딩 코사인 랭킹을 RRF로 융합한 (chunks, 순서) 반환.
+    임베딩 미가용(키없음/실패) 시 None → 호출부가 키워드 폴백.
     """
     if embedding_util is None:
         return None
-
     chunks = _collect_article_chunks(docs)
     if not chunks:
         return None
-
     # 임베딩: 청크(캐시) + 질의(1회). 미가용 시 None → 폴백.
     chunk_vecs = embedding_util.embed([_chunk_embed_text(c) for c in chunks])
     if chunk_vecs is None:
@@ -182,25 +178,51 @@ def _hybrid_retrieve(query: str, docs: List[Dict], max_chars: int) -> Optional[s
     q_vec = embedding_util.embed_one(query)
     if q_vec is None:
         return None
-
-    # 1) 키워드 랭킹
     keywords = extract_keywords(query)
     kw_scored = sorted(
         range(len(chunks)),
         key=lambda i: score_chunk(chunks[i], keywords),
         reverse=True,
     )
-    # 2) 임베딩 랭킹 (코사인)
     emb_scored = sorted(
         range(len(chunks)),
         key=lambda i: embedding_util.cosine(q_vec, chunk_vecs[i]),
         reverse=True,
     )
-    # 3) RRF 융합
     fused = _rrf_fuse(kw_scored, emb_scored)
     order = sorted(fused.keys(), key=lambda i: fused[i], reverse=True)
+    return chunks, order
 
-    # 4) max_chars 예산까지 조립 (출력 포맷 불변 — eval 파서 호환)
+
+def rank_chunk_ids(query: str, docs: List[Dict]) -> List[str]:
+    """
+    하이브리드 융합 순서의 chunk id('label|article') 리스트 (eval Recall@K용).
+    임베딩 미가용 시 키워드 점수 순서로 폴백 (baseline rank_chunks와 동일 척도).
+    """
+    try:
+        r = _hybrid_order(query, docs)
+        if r is not None:
+            chunks, order = r
+            return [f"{chunks[i]['label']}|{chunks[i]['article']}" for i in order]
+    except Exception:
+        pass
+    kws = extract_keywords(query)
+    chunks = _collect_article_chunks(docs)
+    scored = sorted(chunks, key=lambda c: score_chunk(c, kws), reverse=True)
+    return [f"{c['label']}|{c['article']}" for c in scored]
+
+
+def _hybrid_retrieve(query: str, docs: List[Dict], max_chars: int) -> Optional[str]:
+    """
+    키워드+임베딩 RRF 융합 순서로 상위 조항을 max_chars 예산까지 조립.
+    임베딩 미가용 시 None → 호출부가 기존 키워드 전용 경로로 graceful fallback.
+    """
+    r = _hybrid_order(query, docs)
+    if r is None:
+        return None
+    chunks, order = r
+
+    # max_chars 예산까지 조립 (출력 포맷 불변 — eval 파서 호환)
     result_parts = []
     total = 0
     for i in order:

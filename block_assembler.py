@@ -47,17 +47,46 @@ KEYWORD_MAP = {
     # "표시광고": ["표시광고", "허위광고", "과대광고", "부당광고"],
 }
 
-# 임베딩 의미매칭 임계값 (코사인). 키워드 미스 시 이 값 이상이면 매칭.
-#   ⚠️ negative(단가·판촉·그린워싱) 오분류를 막는 안전 파라미터.
-#   env CLASSIFY_EMB_THRESHOLD로 코드 수정 없이 튜닝 가능.
-DEFAULT_EMB_THRESHOLD = 0.62
+# 토픽별 임베딩 '개념 앵커' — 변별 핵심어 + 동의어 표면형.
+#   ⚠️ summary(관세법·행정제재 등 범용 법률어)는 일부러 제외한다.
+#      범용어를 넣으면 단가·판촉·광고 등 타 도메인 질의와의 기저 유사도가 올라
+#      negative와 겹쳐(측정상 GAP −0.05) 오분류를 유발하기 때문.
+TOPIC_ANCHORS = {
+    "모조품": (
+        "모조품 위조상품 가품 짝퉁 위조 모조 정품이 아닌 진품이 아닌 가짜 명품 "
+        "이미테이션 레플리카 브랜드 카피 짝퉁 판매 위조 상표 부착 상표권 침해 상품 "
+        "정품 위장 진품으로 속여 판매 명품 복제품"
+    ),
+}
+
+# 대조 앵커(contrastive) — 타 도메인 대표 텍스트. 질의가 토픽 앵커보다
+#   이쪽에 더 가까우면 모조품이 아니다(margin 음수). negative FP를 막는 핵심.
+#   토픽이 늘면 '다른 토픽의 앵커'도 자동으로 서로의 대조군이 된다(아래 로직).
+CONTRAST_ANCHORS = [
+    "납품단가 인하 대금 결제 정산 수수료 거래조건 단가 인하 후려치기 매입대금 대규모유통업법",
+    "판촉행사 비용 분담 전가 행사 프로모션 할인 행사비용",
+    "표시광고 친환경 그린워싱 ESG 허위광고 과장광고 실증 근거 친환경 표시 광고",
+]
+
+# margin = sim(질의, 토픽앵커) − max(sim(질의, 대조군)). 이 값 이상이면 매칭.
+#   측정 분리 band: syn/obl 최소 +0.043 / negative 최대 −0.059 (폭 0.102).
+#   기본 0.02 = FP(§5 하드제약: negative 100%) 안전 쪽 편향. floor는 무관질의 차단.
+DEFAULT_EMB_MARGIN = 0.02
+DEFAULT_EMB_FLOOR = 0.50
 
 
-def _emb_threshold() -> float:
+def _emb_margin() -> float:
     try:
-        return float(os.environ.get("CLASSIFY_EMB_THRESHOLD", DEFAULT_EMB_THRESHOLD))
+        return float(os.environ.get("CLASSIFY_EMB_MARGIN", DEFAULT_EMB_MARGIN))
     except (TypeError, ValueError):
-        return DEFAULT_EMB_THRESHOLD
+        return DEFAULT_EMB_MARGIN
+
+
+def _emb_floor() -> float:
+    try:
+        return float(os.environ.get("CLASSIFY_EMB_FLOOR", DEFAULT_EMB_FLOOR))
+    except (TypeError, ValueError):
+        return DEFAULT_EMB_FLOOR
 
 
 def _db_topic_keys(db: dict) -> list[str]:
@@ -66,8 +95,11 @@ def _db_topic_keys(db: dict) -> list[str]:
 
 
 def _topic_rep_text(topic_key: str, topic: dict) -> str:
-    """토픽 대표 텍스트 — label + summary + 키워드 + issue titles (임베딩 기준)."""
-    parts = [topic.get("label", ""), topic.get("summary", "")]
+    """토픽 대표 텍스트 — 개념 앵커가 있으면 그것, 없으면 label+키워드+issue titles.
+    (summary는 변별력을 떨어뜨려 제외.)"""
+    if topic_key in TOPIC_ANCHORS:
+        return TOPIC_ANCHORS[topic_key]
+    parts = [topic.get("label", "")]
     parts += KEYWORD_MAP.get(topic_key, [])
     for iss in topic.get("issues", []):
         parts.append(iss.get("title", ""))
@@ -76,11 +108,12 @@ def _topic_rep_text(topic_key: str, topic: dict) -> str:
 
 def classify_issues(query: str, db: dict) -> list[str]:
     """
-    질문에서 쟁점을 분류한다 (하이브리드: 키워드 고신뢰 + 임베딩 의미매칭).
+    질문에서 쟁점을 분류한다 (하이브리드: 키워드 고신뢰 + 대조 앵커 의미매칭).
 
     1) 키워드 substring 히트 → 무조건 포함 (고신뢰, 빠름)
-    2) 키워드 미스 토픽 → 질의·토픽 대표텍스트 코사인 유사도가
-       임계값 이상이면 포함 (동의어·자연어 질의 대응)
+    2) 키워드 미스 토픽 → 질의가 토픽 개념앵커에 '대조군(타 도메인 + 다른 토픽)
+       보다' 가까운지를 margin으로 판정. margin ≥ 임계 & 절대 floor 이상이면 포함.
+       (절대 임계값 대신 상대 margin → 임베딩 스케일 드리프트에 강건, 일반화)
     임베딩 미가용(키없음/실패) 시 키워드 전용으로 graceful fallback.
 
     반환값: DB의 토픽 키 목록 (예: ["모조품"])
@@ -93,19 +126,31 @@ def classify_issues(query: str, db: dict) -> list[str]:
         if topic_key in db and any(kw.lower() in query_lower for kw in keywords):
             matched_topics.append(topic_key)
 
-    # 2) 키워드 미스 토픽에 대해 임베딩 의미매칭
-    remaining = [t for t in _db_topic_keys(db) if t not in matched_topics]
+    # 2) 키워드 미스 토픽에 대해 대조 앵커 margin 판정
+    all_topics = _db_topic_keys(db)
+    remaining = [t for t in all_topics if t not in matched_topics]
     if remaining:
         try:
-            import embedding_util
-            q_vec = embedding_util.embed_one(query)
+            import embedding_util as eu
+            q_vec = eu.embed_one(query)
             if q_vec is not None:
-                threshold = _emb_threshold()
+                margin_thr = _emb_margin()
+                floor = _emb_floor()
                 for topic_key in remaining:
-                    rep_vec = embedding_util.embed_one(_topic_rep_text(topic_key, db[topic_key]))
-                    if rep_vec is None:
+                    topic_vec = eu.embed_one(_topic_rep_text(topic_key, db[topic_key]))
+                    if topic_vec is None:
                         continue
-                    if embedding_util.cosine(q_vec, rep_vec) >= threshold:
+                    sim_topic = eu.cosine(q_vec, topic_vec)
+                    # 대조군 = 타 도메인 앵커 + 다른 토픽들의 앵커
+                    comp_texts = list(CONTRAST_ANCHORS) + [
+                        _topic_rep_text(o, db[o]) for o in all_topics if o != topic_key
+                    ]
+                    sim_comp = 0.0
+                    for ct in comp_texts:
+                        cv = eu.embed_one(ct)
+                        if cv is not None:
+                            sim_comp = max(sim_comp, eu.cosine(q_vec, cv))
+                    if sim_topic >= floor and (sim_topic - sim_comp) >= margin_thr:
                         matched_topics.append(topic_key)
         except Exception:
             pass  # 임베딩 경로 실패는 키워드 결과만 반환 (앱 안정성)
