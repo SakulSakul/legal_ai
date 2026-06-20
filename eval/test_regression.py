@@ -78,20 +78,22 @@ def test_regression_negative_no_false_positive():
 
 
 def test_model_strings_unchanged():
-    """모델 문자열 가드 — 인가된 모델 집합만 존재해야(우발적 변경 차단).
-    2026-06: Claude 모델 404 픽스로 sonnet-4 → opus-4-8 변경 + 하드코딩 제거,
-    모델 호출은 CLAUDE_MODEL 단일 출처로 일원화."""
+    """모델 문자열 가드 — 인가된 GA 모델 집합만 존재해야(우발적 변경·EOL 404 차단).
+    2026-06: 속도 티어링 — 종합=Opus 유지 / 기계적 Claude=Haiku / Stage1 Gemini 3.5 Flash
+    +폴백 3.1 Flash-Lite(전부 GA, preview 금지). 모델명은 상수 한 곳에서만."""
     src = open(os.path.join(ROOT, "legal_ai.py"), encoding="utf-8").read()
     found = set(re.findall(r"(?:claude|gemini)-[A-Za-z0-9.\-]+", src))
     expected = {
         "claude-opus-4-8",
-        "gemini-3.1-pro-preview",
-        "gemini-3-flash-preview",
+        "claude-haiku-4-5-20251001",
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite",
     }
     assert found == expected, f"모델 문자열 변경 감지: {found ^ expected}"
-    # 죽은 모델 잔재 없는지 + 하드코딩이 CLAUDE_MODEL로 일원화됐는지
+    # 죽은/EOL 모델 잔재 0 + 하드코딩 일원화
     assert "claude-sonnet-4-20250514" not in src, "죽은 모델(404) 잔재"
-    assert 'model="claude' not in src, "모델 인라인 하드코딩 잔재 — CLAUDE_MODEL 사용할 것"
+    assert not any("preview" in m for m in found), "preview 모델 문자열 잔재 — GA만 허용(EOL 404 방지)"
+    assert 'model="claude' not in src and 'model="gemini' not in src, "모델 인라인 하드코딩 잔재 — 상수 사용"
 
 
 def test_retrieve_signature_unchanged():
