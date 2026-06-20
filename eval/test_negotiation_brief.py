@@ -138,3 +138,20 @@ def test_render_negotiation_brief_wired():
     src = _src()
     assert src.count("render_negotiation_brief(") >= 3  # 정의 + 2개 렌더 사이트
     assert "상세 근거" in src  # 상세 법령 근거는 강등 섹션으로 유지
+
+
+# ── 예외 절 포함 retrieval (작업1 보강 — 60% 오답 근본 원인) ───
+def test_gemini_stage1_collects_exception_clauses():
+    """Gemini 수집 프롬프트가 예외 절(적용제외 항)을 '동반 수집'하도록 지시하는지.
+    이게 없으면 제11조⑤가 검증 데이터에 안 들어와 #27 P3가 있어도 못 띄움(과보수 오답)."""
+    src = _src()
+    assert "예외 절 동반 수집" in src or "적용제외 항" in src
+    # 제11조 ④ 상한 + ⑤ 적용제외(자발+차별화)를 함께 수집하라는 명시
+    assert "제11조" in src and ("⑤" in src or "적용제외" in src)
+    assert "자발" in src and "차별화" in src
+
+
+def test_synthesis_article11_exception_anchor():
+    """합성 프롬프트(P3)에 제11조 ④만 단정하고 ⑤를 빠뜨리지 말라는 구체 앵커가 있는지."""
+    src = _src()
+    assert "④만 단정" in src and "법률 오류" in src
