@@ -155,3 +155,65 @@ def test_synthesis_article11_exception_anchor():
     """합성 프롬프트(P3)에 제11조 ④만 단정하고 ⑤를 빠뜨리지 말라는 구체 앵커가 있는지."""
     src = _src()
     assert "④만 단정" in src and "법률 오류" in src
+
+
+# ── 작업A: issues→brief 결정론 조립 (모델이 brief 빼먹어도 형태 보장) ──
+def _issue_60pct():
+    return {"verdict": "conditional", "verdict_reason": "60% 분담 — 자발+차별화 시 협의 가능",
+            "issues": [
+                {"applicable_law": "대규모유통업법 제11조",
+                 "law_analysis": "- 제11조④ 분담 50% 초과 금지(상한)\n- 제11조⑤ 예외: 자발적 요청+차별화 시 제1~4항 적용제외 → 60% 협의 가능",
+                 "recommendation": "자발적 요청 공문·차별화 기획안 확보 시 협의 가능",
+                 "applicable_rule": "「판촉비 지침」 제5조", "rule_analysis": "내부 50% 원칙"},
+                {"applicable_rule": "특약매입계약 제12조④", "rule_analysis": "⑤ 요건 첨부"},
+            ]}
+
+
+def test_assemble_brief_maps_issues_to_lanes():
+    b = N.assemble_brief(_issue_60pct())
+    srcs = {lv["source"] for lv in b["leverage"]}
+    assert "법령" in srcs and "사규" in srcs and "계약" in srcs  # 🛡/📋/📄
+    assert b["bottom_line"]
+
+
+def test_assemble_detects_exception_as_card():
+    """⑤(적용제외·자발·차별화) 신호 → 법령 레버리지가 conditional + exception(=🃏 card)."""
+    b = N.build_brief(_issue_60pct())  # sanitized — render가 받는 형태
+    law = next(lv for lv in b["leverage"] if lv["source"] == "법령")
+    assert law["has_exception"] is True
+    assert law["binding"] == "conditional"
+    assert law["conditions"]  # 자격요건 추출
+
+
+def test_assemble_no_exception_goes_no_room():
+    """예외 신호 없는 금지·상한 → no_room(못 움직임). '예외 없음'은 거짓 예외로 안 잡힘."""
+    jd = {"issues": [{"applicable_law": "X법 제1조", "law_analysis": "절대 금지·상한, 예외 없음"}]}
+    b = N.build_brief(jd)
+    assert b["no_room"]
+    assert not any(lv["has_exception"] for lv in b["leverage"])
+
+
+def test_build_brief_prefers_model_then_assembles():
+    """모델 brief 있으면 그걸, 없으면 issues 조립. 둘 다 없으면 None(미렌더)."""
+    model = {"negotiation_brief": {"bottom_line": "모델결론",
+             "leverage": [{"source": "법령", "point": "p"}]}, "issues": []}
+    assert N.build_brief(model)["bottom_line"] == "모델결론"
+    assembled = N.build_brief(_issue_60pct())
+    assert assembled and assembled["leverage"]
+    assert N.build_brief({"verdict": "approved", "issues": []}) is None
+
+
+# ── 작업B/C: relevance gate(라이브) · 1단계 제거 ────────────────
+def test_no_step1_two_tier_remnants():
+    """작업C: 1단계/2단계·'두 가지 수준' 잔재 0 (단일 목적 도구)."""
+    src = _src()
+    for bad in ("1단계", "2단계", "두 가지 수준"):
+        assert bad not in src, f"'{bad}' 잔재"
+
+
+def test_gemini_stage1_bonded_relevance_gated():
+    """작업B: Gemini stage1이 보세판매장고시를 '모든 질의 무조건'이 아니라 관련성 게이트로."""
+    src = _src()
+    assert "모든 질의에서 law_findings에 반드시 포함" not in src
+    assert "빠뜨리면 시스템 오류로 간주" not in src
+    assert "관련성 게이트" in src  # 관련 질의에서만

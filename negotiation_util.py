@@ -106,3 +106,91 @@ def is_empty_brief(brief):
     if not b:
         return True
     return not (b["bottom_line"] or b["leverage"] or b["no_room"] or b["exception_uncertain"])
+
+
+# ── issues → brief 결정론 조립 (모델이 negotiation_brief를 빼먹어도 형태 보장) ──
+# 휴리스틱 신호 — 모델이 잘 채우는 issues(applicable_law/law_analysis/applicable_rule/…)에서
+# 출처·예외·금지를 추출한다. 모델의 별도 brief emit에 의존하지 않는 게 핵심(형태 안정).
+_EXCEPTION_HINTS = ("적용제외", "적용하지 아니", "적용되지 아니", "예외", "다만", "단서",
+                    "자발적", "차별화", "협의하여 정", "제5항", "⑤", "초과하여 협의")
+_NO_ROOM_HINTS = ("상한", "초과하여서는 아니", "초과할 수 없", "원칙적 불가", "금지", "불가", "할 수 없")
+# '예외 없음/적용제외 없음'은 예외가 아님 — 부정 표현 가드(거짓 양성 차단)
+_NO_EXCEPTION = ("예외 없", "예외가 없", "예외는 없", "예외 규정 없", "예외규정 없", "적용제외 없", "적용 제외 없")
+_CONTRACT_HINTS = ("계약", "특약", "약정", "공동판촉", "거래기본", "표준계약")
+_DOC_HINTS = ("요청", "입증", "서면", "동의", "공문", "기획안", "자료", "증빙")
+
+
+def _first_line(text):
+    for ln in (text or "").replace("**", "").split("\n"):
+        ln = ln.strip().lstrip("-•·▶ ").strip()
+        if ln:
+            return ln
+    return ""
+
+
+def _line_with(text, hints):
+    for ln in (text or "").replace("**", "").split("\n"):
+        s = ln.strip().lstrip("-•·▶ ").strip()
+        if s and any(h in s for h in hints):
+            return s
+    return ""
+
+
+def assemble_brief(json_data):
+    """issues로부터 결정론 brief 조립. 매핑:
+      applicable_law → 🛡 법령(shield). 예외 신호 있으면 conditional + exception(=🃏 card).
+      applicable_rule → 📄 계약(계약 신호) 또는 📋 사규. 금지인데 예외 없음 → no_room.
+    """
+    if not isinstance(json_data, dict):
+        return None
+    leverage, no_room = [], []
+    for iss in (json_data.get("issues") or []):
+        if not isinstance(iss, dict):
+            continue
+        law = (iss.get("applicable_law") or "").strip()
+        law_an = iss.get("law_analysis") or ""
+        rec = iss.get("recommendation") or ""
+        rule = (iss.get("applicable_rule") or "").strip()
+        rule_an = iss.get("rule_analysis") or ""
+        if law and law not in ("해당 없음", "없음"):
+            exc_line = _line_with(law_an, _EXCEPTION_HINTS) or _line_with(rec, _EXCEPTION_HINTS)
+            has_exc = bool(exc_line) and not any(neg in exc_line for neg in _NO_EXCEPTION)
+            point = _first_line(law_an) or law
+            lv = {
+                "source": "법령", "role": "shield",
+                "binding": "conditional" if has_exc else "fixed",
+                "point": point if law in point else f"{law} — {point}",
+            }
+            if has_exc:
+                conds = _line_with(rec, _DOC_HINTS) or _line_with(law_an, ("요청", "입증", "차별화", "자발"))
+                lv["exception"] = exc_line
+                lv["conditions"] = [conds] if conds else []
+                lv["documents"] = []
+            leverage.append(lv)
+            if not has_exc and any(h in law_an for h in _NO_ROOM_HINTS):
+                no_room.append(point if law in point else f"{law} — {point}")
+        if rule and rule not in ("해당 없음", "없음"):
+            is_contract = any(h in (rule + rule_an) for h in _CONTRACT_HINTS)
+            leverage.append({
+                "source": "계약" if is_contract else "사규",
+                "role": "table" if is_contract else "internal",
+                "binding": "negotiable",
+                "point": f"{rule} — {_first_line(rule_an)}" if rule_an else rule,
+            })
+    return {
+        "bottom_line": _first_line(json_data.get("verdict_reason")) or _first_line(json_data.get("summary")),
+        "leverage": leverage, "no_room": no_room,
+        "exception_uncertain": [], "escalation": "",
+    }
+
+
+def build_brief(json_data):
+    """렌더용 최종 brief. 모델이 emit한 negotiation_brief가 실하면 그걸(richer·provenance 정확),
+    아니면 issues로 조립(형태 보장). 어느 경로든 sanitize 통과 → 정규화 일관. 빈 결과면 None."""
+    if not isinstance(json_data, dict):
+        return None
+    model_brief = json_data.get("negotiation_brief")
+    b = sanitize_brief(model_brief) if not is_empty_brief(model_brief) else sanitize_brief(assemble_brief(json_data))
+    if not b or not (b["bottom_line"] or b["leverage"] or b["no_room"] or b["exception_uncertain"]):
+        return None
+    return b
