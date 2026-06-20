@@ -5,17 +5,21 @@ Freshness sweep이 법령·조문·행정규칙의 '현행 시행일'을 읽기 
 네트워크·키·streamlit을 일절 import 하지 않는다 — 실제 MCP 호출은 호출부가 주입한
 call 함수로 하고, 여기서는 응답 텍스트 파싱만 한다(완전 결정론, mock 단위 테스트).
 
+라이브 확정 형식: 응답은 JSON이 아니라 '마크다운'(PR #19 스모크). 마크다운이 정상
+경로이고, JSON은 혹시 모를 대비로 먼저 시도만 한다.
+
 fail-safe: 불명확·미발견·다건이면 ok=False(추측 금지) → sweep이 NEEDS_REVIEW 처리.
 """
 import json
 import re
 
+# "1. [280363] 관세법" 형태의 항목 시작 줄
+_ITEM = re.compile(r"^\s*\d+\.\s*\[(\d+)\]\s*(.+?)\s*$")
 _DATE = re.compile(r"(\d{4})[-.]?\s*(\d{2})[-.]?\s*(\d{2})")
 
 
 def article_to_6digit(article: str):
-    """'제178조' → '017800', '제69조의5' → '006905'. 파싱 실패 시 None.
-    규칙: 본조번호*100 + 의-가지번호(없으면 0), 6자리 zero-pad."""
+    """'제178조' → '017800', '제69조의5' → '006905'. 파싱 실패 시 None."""
     m = re.search(r"제\s*(\d+)\s*조(?:\s*의\s*(\d+))?", article or "")
     if not m:
         return None
@@ -25,16 +29,19 @@ def article_to_6digit(article: str):
 
 
 def _norm_date(s):
+    """'20260401' / '2026-04-01' / '2026.04.01' → '2026-04-01'."""
     m = _DATE.search(s or "")
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else None
 
 
-def _as_items(raw):
-    """raw 텍스트를 JSON으로 파싱해 항목 리스트로 정규화. 실패 시 None."""
+def _try_json(raw):
     try:
-        data = json.loads(raw)
+        return json.loads(raw)
     except Exception:
         return None
+
+
+def _json_list(data):
     if isinstance(data, dict):
         for k in ("results", "laws", "data", "items", "list", "admin_rules"):
             if isinstance(data.get(k), list):
@@ -42,7 +49,7 @@ def _as_items(raw):
         return [data]
     if isinstance(data, list):
         return data
-    return None
+    return []
 
 
 def _get(item, *keys):
@@ -52,61 +59,117 @@ def _get(item, *keys):
     return None
 
 
+def _md_items(raw):
+    """마크다운 응답을 [{id, name, detail}]로 분해. detail = 항목 다음 비어있지 않은 줄."""
+    lines = (raw or "").split("\n")
+    n = len(lines)
+    items = []
+    i = 0
+    while i < n:
+        m = _ITEM.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        lid, name = int(m.group(1)), m.group(2).strip()
+        detail = ""
+        j = i + 1
+        while j < n and not lines[j].strip():
+            j += 1
+        if j < n and not _ITEM.match(lines[j]):
+            detail = lines[j].strip()
+        items.append({"id": lid, "name": name, "detail": detail})
+        i += 1
+    return items
+
+
+def _date_from_detail(detail, labels=("시행", "발령")):
+    for lab in labels:
+        m = re.search(lab + r"\s*[:：]?\s*(\d{8})", detail or "")
+        if m:
+            return _norm_date(m.group(1))
+    return None
+
+
+def _type_from_detail(detail):
+    """laws 상세줄 '법률 | 소관:...' → '법률'."""
+    m = re.match(r"\s*([^|:\s]+)\s*\|", detail or "")
+    return m.group(1) if m else None
+
+
+def _law_items(raw):
+    """법령 항목을 [{law_id, name, law_type, eff}]로 정규화 (JSON 우선, 마크다운 기본)."""
+    data = _try_json(raw)
+    if data is not None:
+        out = []
+        for x in _json_list(data):
+            out.append({
+                "law_id": _get(x, "law_id", "법령ID", "lawId", "id"),
+                "name": str(_get(x, "law_name", "법령명", "lawNm", "name") or "").strip(),
+                "law_type": _get(x, "law_type", "법령구분", "종류", "type"),
+                "eff": _norm_date(str(_get(x, "effective_date", "시행일자", "시행일", "enforce_date") or "")),
+            })
+        return out
+    return [{"law_id": it["id"], "name": it["name"],
+             "law_type": _type_from_detail(it["detail"]),
+             "eff": _date_from_detail(it["detail"], ("시행", "발령"))}
+            for it in _md_items(raw)]
+
+
 def parse_search_laws(raw, exact_name, law_type=None):
     """search_laws 응답에서 '정확 매칭' 1건의 law_id·시행일 추출.
     동명 다건(관세법/관세법 시행령 …) 또는 0건이면 ok=False(오선택 방지)."""
-    items = _as_items(raw)
-    if items is None:
-        return {"ok": False, "law_id": None, "effective_date": None, "reason": "응답 JSON 파싱 실패"}
+    target = str(exact_name).strip()
     matches = []
-    for it in items:
-        name = _get(it, "law_name", "법령명", "lawNm", "name")
-        if name is None or str(name).strip() != str(exact_name).strip():
+    for it in _law_items(raw):
+        if it["name"] != target:
             continue
-        if law_type:
-            t = _get(it, "law_type", "법령구분", "종류", "type")
-            if t and str(t).strip() != str(law_type).strip():
-                continue
+        if law_type and it.get("law_type") and it["law_type"] != law_type:
+            continue
         matches.append(it)
     if len(matches) != 1:
         return {"ok": False, "law_id": None, "effective_date": None,
                 "reason": f"정확 매칭 {len(matches)}건 (1건이어야 함)"}
     it = matches[0]
-    law_id = _get(it, "law_id", "법령ID", "lawId", "id")
-    eff = _norm_date(str(_get(it, "effective_date", "시행일자", "시행일", "enforce_date") or ""))
-    return {"ok": law_id is not None, "law_id": law_id, "effective_date": eff,
-            "reason": "" if law_id is not None else "law_id 없음"}
+    return {"ok": it["law_id"] is not None, "law_id": it["law_id"],
+            "effective_date": it["eff"], "reason": "" if it["law_id"] is not None else "law_id 없음"}
 
 
 def parse_article_sub(raw):
-    """get_law_article_sub 응답에서 조문 시행일자 추출."""
-    items = _as_items(raw)
-    eff = None
-    if items:
-        eff = _norm_date(str(_get(items[0], "effective_date", "시행일자", "시행일", "enforce_date") or ""))
+    """get_law_article_sub 응답에서 조문 시행일자 추출. '시행일자' 라벨 우선."""
+    raw = raw or ""
+    m = re.search(r"시행일자[^0-9]{0,6}(\d{8})", raw)
+    eff = _norm_date(m.group(1)) if m else None
+    if eff is None:
+        data = _try_json(raw)
+        if data is not None:
+            for it in _json_list(data):
+                eff = _norm_date(str(_get(it, "effective_date", "시행일자", "시행일", "enforce_date") or ""))
+                if eff:
+                    break
     if eff is None:
         eff = _norm_date(raw)  # 텍스트 폴백
-    if eff is None:
-        return {"ok": False, "effective_date": None, "reason": "시행일 파싱 실패"}
-    return {"ok": True, "effective_date": eff, "reason": ""}
+    return {"ok": eff is not None, "effective_date": eff, "reason": "" if eff else "시행일 파싱 실패"}
 
 
 def parse_admin_rules(raw, exact_name=None):
     """search_admin_rules 응답에서 admrul_id·발령/시행일 추출(정확 매칭 1건)."""
-    items = _as_items(raw)
-    if items is None:
-        return {"ok": False, "admrul_id": None, "effective_date": None, "reason": "응답 JSON 파싱 실패"}
-    cand = items
-    if exact_name:
-        cand = [it for it in items
-                if str(_get(it, "admrul_nm", "행정규칙명", "rule_name", "name") or "").strip() == str(exact_name).strip()]
+    data = _try_json(raw)
+    if data is not None:
+        items = [{"id": _get(x, "admrul_id", "행정규칙ID", "id"),
+                  "name": str(_get(x, "admrul_nm", "행정규칙명", "rule_name", "name") or "").strip(),
+                  "eff": _norm_date(str(_get(x, "effective_date", "시행일자", "시행일", "발령일자", "발령일") or ""))}
+                 for x in _json_list(data)]
+    else:
+        items = [{"id": it["id"], "name": it["name"],
+                  "eff": _date_from_detail(it["detail"], ("시행", "발령"))}
+                 for it in _md_items(raw)]
+    cand = items if not exact_name else [it for it in items if it["name"] == str(exact_name).strip()]
     if len(cand) != 1:
         return {"ok": False, "admrul_id": None, "effective_date": None, "reason": f"매칭 {len(cand)}건 (1건이어야 함)"}
     it = cand[0]
-    aid = _get(it, "admrul_id", "행정규칙ID", "id")
-    eff = _norm_date(str(_get(it, "effective_date", "시행일자", "시행일", "발령일자", "발령일") or ""))
-    return {"ok": (aid is not None or eff is not None), "admrul_id": aid, "effective_date": eff,
-            "reason": "" if (aid or eff) else "id/시행일 없음"}
+    ok = it["id"] is not None or it["eff"] is not None
+    return {"ok": ok, "admrul_id": it["id"], "effective_date": it["eff"],
+            "reason": "" if ok else "id/시행일 없음"}
 
 
 def resolve_law_effective_date(call_fn, law_name, article=None, law_type="법률"):
