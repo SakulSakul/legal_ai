@@ -91,11 +91,12 @@ def apply_auto_masking(text, target_partner=""):
         
     # 1. 개인정보 및 식별번호 차단 (자동)
     # 주민등록번호 / 외국인등록번호 (6자리-7자리, 뒷자리 1~4로 시작)
-    text = re.sub(r'\b\d{6}[-\s]*[1-4]\d{6}\b', '█주민/외국인번호█', text) 
+    # \b 대신 (?<!\d)/(?!\d) 사용: 한글 뒤에서도 매칭되도록 (word boundary는 한글에 불안정)
+    text = re.sub(r'(?<!\d)\d{6}[-\s]*[1-4]\d{6}(?!\d)', '█주민/외국인번호█', text)
+    # 법인등록번호 (6-7 형식, 반드시 하이픈 포함) — 주민번호 치환 후 처리 (잔여 6-7 패턴만 매칭)
+    text = re.sub(r'(?<!\d)\d{6}-\d{7}(?!\d)', '█법인번호█', text)
     # 사업자등록번호 (3-2-5 형식, 반드시 하이픈 포함)
-    text = re.sub(r'\b\d{3}-\d{2}-\d{5}\b', '█사업자번호█', text) 
-    # 법인등록번호 (6-7 형식, 반드시 하이픈 포함)
-    text = re.sub(r'\b\d{6}-\d{7}\b', '█법인번호█', text) 
+    text = re.sub(r'(?<!\d)\d{3}-\d{2}-\d{5}(?!\d)', '█사업자번호█', text) 
     # 휴대전화 (010/011/016/017/018/019 + 3~4자리 + 4자리)
     text = re.sub(r'\b01[016789][-\s]?\d{3,4}[-\s]?\d{4}\b', '█휴대전화█', text)
     # 일반 전화번호 (지역번호 2~3자리 + 3~4자리 + 4자리)
@@ -437,17 +438,18 @@ def build_system_claude(docs, laws_db, gemini_analysis=""):
         + gemini_section +
         "\n\n━━━ [적용 법령·행정규칙 DB 목록] ━━━\n" + laws_text +
         "\n\n━━━ [답변 형식] ━━━\n"
-        "모든 법적 리스크를 빠짐없이. high/medium 상세, low 1~2문장. 해당없으면 생략.\n\n"
+        "모든 법적 리스크를 빠짐없이. high/medium 상세, low 1~2문장. 해당없으면 생략.\n"
+        "문체 규칙: 모든 필드에 개조식(불릿 - ) + 평어체(명사형 종결: ~불가/~필요/~존재/~대상). 서술형(~입니다/~합니다) 절대 금지.\n\n"
         "```json\n"
         "{\n"
-        '  "summary": "1줄 요약",\n'
+        '  "summary": "개조식 3~4줄 요약 (불릿 - 사용, 명사형 종결: ~불가/~필요/~존재/~대상)",\n'
         '  "verdict": "approved|conditional|rejected",\n'
         '  "verdict_reason": "종합 판단 근거",\n'
         '  "issues": [{"issue_no":1,"title":"쟁점","risk_level":"high|medium|low",\n'
         '    "target_clause":"대상 원문","applicable_law":"법령/고시명 제X조",\n'
         '    "law_analysis":"법령·판례 평가 (Gemini 검색 결과 검증 포함)",\n'
-        '    "applicable_rule":"사규 조항 (Stage1 PART A 인용)",\n'
-        '    "rule_analysis":"사규 평가","recommendation":"권고안"}],\n'
+        '    "applicable_rule":"「사규명」 제X조 (예: 「MD 협력회사 입점 및 퇴점 지침」) — 꺾쇠「」필수",\n'
+        '    "rule_analysis":"사규 평가 — 사규명은 반드시 「」로 인용","recommendation":"권고안"}],\n'
         '  "action_plan":"액션 플랜","alternative_clause":"수정안 또는 null",\n'
         '  "cited_laws":["법령명 제X조"]\n'
         "}\n"
@@ -468,9 +470,12 @@ def build_system_gemini_stage1(docs, laws_db):
         if not ds: return "(등록 없음)"
         return "\n\n---\n\n".join(["[" + d["label"] + "]\n" + d["text"] for d in ds])
 
-    saryu_text    = truncate_at_boundary(fmt_docs(by_cat("saryu")), 50000)
-    contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 60000)
-    yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 30000)
+    # 토큰 최적화: 사규/계약서/약정서 원문 한도 축소 (v2.1 → v2.2)
+    # 기존 50k+60k+30k=140k자(~93k tok) → 30k+40k+20k=90k자(~60k tok)
+    # Stage1은 데이터 수집 역할이므로 원문 전체가 필요하지 않음
+    saryu_text    = truncate_at_boundary(fmt_docs(by_cat("saryu")), 30000)
+    contract_text = truncate_at_boundary(fmt_docs(by_cat("contract")), 40000)
+    yakjeong_text = truncate_at_boundary(fmt_docs(by_cat("yakjeong")), 20000)
 
     laws_list = ""
     if laws_db:
@@ -493,10 +498,21 @@ def build_system_gemini_stage1(docs, laws_db):
         "5. 구법(폐지/개정)이 아닌 현행 법령만 인용할 것.\n"
         "6. 판례 내용만 서술하고 사건번호를 생략하는 것은 금지. 번호 없으면 판례 미인용.\n\n"
 
+        "██ B2B/B2C 구분 규칙 ██\n"
+        "면세점 거래는 대부분 B2B(사업자 간)이다.\n"
+        "'직매입 반품', '납품 단가', '수수료', '입점/퇴점' 등은 B2B → 소비자기본법 적용 금지.\n"
+        "소비자기본법은 '소비자', '고객 클레임' 등 B2C 맥락이 명확할 때만 적용.\n\n"
+        "██ 사규 창작 금지 ██\n"
+        "DB에 실제 존재하는 사규명만 인용. 존재하지 않는 사규(예: '반품 절차 지침')를 만들어내지 말 것. 없으면 '해당 규정 없음'.\n\n"
         "당신은 면세점 공정거래 법률 리서처입니다.\n"
         "당신의 역할은 '최종 판단'이 아니라 '정확한 데이터 수집'입니다.\n"
         "사용자의 질문을 분석하여 관련 사규 조항과 법령/판례를 수집하고,\n"
         "반드시 아래 JSON 형식으로만 출력하세요. 마크다운 설명은 작성하지 마세요.\n\n"
+        "██ 사규 검색 필수 규칙 ██\n"
+        "사규/계약서/약정서 원문 전체를 꼼꼼히 읽고, 질문 키워드와 관련된 조항을 모두 saryu_findings에 포함시켜라.\n"
+        "예: '반품' 질문이면 사규 원문에서 '반품', '반환', '반출', '환입', '인도', '하자' 등 유사어가 포함된 조항을 빠짐없이 찾아라.\n"
+        "⚠️ saryu_findings가 빈 배열 []이면 안 된다. 관련 조항이 정말 없을 때만 빈 배열을 허용.\n"
+        "조항을 찾았으면 해당 원문을 content에 200자 이상 충분히 발췌하라.\n\n"
 
         "```json\n"
         "{\n"
@@ -561,26 +577,313 @@ def build_system_gemini_stage1(docs, laws_db):
         "━━━ [당사 사규] ━━━\n" + saryu_text +
         "\n\n━━━ [당사 표준 계약서] ━━━\n" + contract_text +
         "\n\n━━━ [당사 표준 약정서] ━━━\n" + yakjeong_text +
-        "\n\n━━━ [법령 DB 등록 목록 (참고)] ━━━\n" + laws_list
+        "\n\n━━━ [법령 DB 등록 목록 (참고)] ━━━\n" + laws_list +
+        "\n\n출력 형식 제약: 모든 출력은 순수 JSON 또는 Markdown 형식으로만 작성하세요. HTML, CSS, XML 태그를 절대 생성하지 마세요."
     )
 
+# ── MCP 직접 호출 클라이언트 (Claude API 불필요) ──────────────
+class MCPDirectClient:
+    """korean-law-mcp 서버를 Streamable HTTP로 직접 호출.
+    Claude API를 경유하지 않으므로 Claude 한도와 무관하게 작동.
+    """
+    MCP_URL = "https://korean-law-mcp.fly.dev/mcp"
+
+    def __init__(self, oc_key=""):
+        import requests as _req
+        self._req = _req
+        self.oc_key = oc_key
+        self.session_id = None
+        self._initialized = False
+
+    def _url(self):
+        url = self.MCP_URL
+        if self.oc_key:
+            url += f"?oc={self.oc_key}"
+        return url
+
+    def _post(self, payload):
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
+        resp = self._req.post(self._url(), json=payload, headers=headers, timeout=30)
+        if "mcp-session-id" in resp.headers:
+            self.session_id = resp.headers["mcp-session-id"]
+        elif "Mcp-Session-Id" in resp.headers:
+            self.session_id = resp.headers["Mcp-Session-Id"]
+        return resp
+
+    def _parse_response(self, resp):
+        """JSON-RPC 응답 또는 SSE 스트림에서 result 추출."""
+        ct = resp.headers.get("content-type", "")
+        if "text/event-stream" in ct:
+            # SSE 응답 파싱
+            result_data = None
+            for line in resp.text.split("\n"):
+                if line.startswith("data: "):
+                    try:
+                        data = json.loads(line[6:])
+                        if "result" in data:
+                            result_data = data["result"]
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+            return result_data
+        else:
+            # 일반 JSON 응답
+            try:
+                data = resp.json()
+                return data.get("result")
+            except Exception:
+                return None
+
+    def initialize(self):
+        if self._initialized:
+            return True
+        try:
+            payload = {
+                "jsonrpc": "2.0", "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "legal-ai-streamlit", "version": "2.2"}
+                }
+            }
+            resp = self._post(payload)
+            if resp.status_code not in (200, 201):
+                logger.warning(f"MCP init HTTP {resp.status_code}: {resp.text[:200]}")
+                return False
+            # initialized 알림
+            notif = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
+            self._post(notif)
+            self._initialized = True
+            logger.info("MCP 직접 연결 초기화 성공")
+            return True
+        except Exception as e:
+            logger.warning(f"MCP 직접 연결 초기화 실패: {e}")
+            return False
+
+    def call_tool(self, tool_name, arguments):
+        """MCP 도구 직접 호출. 반환: tool result의 text content 또는 None."""
+        if not self._initialized:
+            if not self.initialize():
+                return None
+        payload = {
+            "jsonrpc": "2.0", "id": 2,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments}
+        }
+        try:
+            resp = self._post(payload)
+            result = self._parse_response(resp)
+            if result and isinstance(result, dict):
+                # MCP tool result: {"content": [{"type": "text", "text": "..."}]}
+                contents = result.get("content", [])
+                texts = []
+                for c in contents:
+                    if isinstance(c, dict) and c.get("type") == "text":
+                        texts.append(c["text"])
+                return "\n".join(texts) if texts else str(result)
+            return str(result) if result else None
+        except Exception as e:
+            logger.warning(f"MCP 도구 호출 실패 ({tool_name}): {e}")
+            return None
+
+
+@st.cache_resource
+def _get_mcp_client():
+    """MCP 직접 클라이언트 싱글턴."""
+    oc = get_secret("LAW_OC") or ""
+    return MCPDirectClient(oc_key=oc)
+
+
+def call_mcp_law_direct(query):
+    """MCP 서버를 직접 호출하여 법령 조회 (Claude API 불필요).
+
+    1. MST 사전에서 즉시 조회 (search_law 생략 → 토큰/시간 절감)
+    2. 사전 미스 시 search_law 폴백
+    3. get_article_detail → get_law_text 순서로 조문 원문 조회
+
+    Returns: (success: bool, text: str)
+    """
+    import re as _re
+
+    # ━━━ MST 사전 (legalize-kr YAML frontmatter 기반, search_law 호출 제거) ━━━
+    _MST_DICT = {
+        # 정식명칭 → {mst, law_id}  (출처: github.com/legalize-kr/legalize-kr)
+        "표시·광고의 공정화에 관한 법률":     {"mst": "268659", "law_id": "002011"},
+        "식품 등의 표시·광고에 관한 법률":    {"mst": "269957", "law_id": "013094"},
+        "관세법":                             {"mst": "280363", "law_id": "001556"},
+        "상표법":                             {"mst": "279819", "law_id": "001870"},
+        "부정경쟁방지 및 영업비밀보호에 관한 법률": {"mst": "277201", "law_id": "000308"},
+        "형법":                               {"mst": "284025", "law_id": "001692"},
+        "소비자기본법":                       {"mst": "283837", "law_id": "001589"},
+        "정보통신망 이용촉진 및 정보보호 등에 관한 법률": {"mst": "285199", "law_id": "000030"},
+        "환경기술 및 환경산업 지원법":        {"mst": "276823", "law_id": "001774"},
+        "개인정보 보호법":                    {"mst": "283839", "law_id": "011357"},
+        "전자상거래 등에서의 소비자보호에 관한 법률": {"mst": "282793", "law_id": "009318"},
+        "자본시장과 금융투자업에 관한 법률":  {"mst": "285183", "law_id": "010513"},
+        "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법": {"mst": "282791", "law_id": "014820"},
+    }
+
+    # 약칭 → 정식명칭 매핑 (MST 사전 키로 변환)
+    _ALIAS_TO_FULL = {
+        "표시광고법": "표시·광고의 공정화에 관한 법률",
+        "표시·광고법": "표시·광고의 공정화에 관한 법률",
+        "식품표시광고법": "식품 등의 표시·광고에 관한 법률",
+        "정보통신망법": "정보통신망 이용촉진 및 정보보호 등에 관한 법률",
+        "부정경쟁방지법": "부정경쟁방지 및 영업비밀보호에 관한 법률",
+        "환경기술산업법": "환경기술 및 환경산업 지원법",
+        "자본시장법": "자본시장과 금융투자업에 관한 법률",
+        "전자상거래법": "전자상거래 등에서의 소비자보호에 관한 법률",
+        "개인정보보호법": "개인정보 보호법",
+        "AI기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+        "인공지능기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+    }
+
+    mcp = _get_mcp_client()
+    if not mcp.initialize():
+        return False, "MCP 서버 연결 실패"
+
+    # 법령명 추출 (영문 포함: AI기본법, AI 기본법 시행령 등)
+    law_match = _re.search(r"['\"]?([A-Za-z0-9가-힣ㆍ·\s]+(?:법률?|법|고시|시행령|가이드라인|지침|예규))['\"]?", query)
+    if not law_match:
+        law_match = _re.search(r"['\"]?([A-Za-z가-힣]{2,}[A-Za-z0-9가-힣ㆍ·\s]*)", query)
+    if not law_match:
+        return False, "법령명 추출 실패"
+    law_name = law_match.group(1).strip()
+
+    # 약칭 → 정식명칭 변환
+    _clean_name = law_name.replace(" ", "").replace("·", "")
+    for _alias, _full in _ALIAS_TO_FULL.items():
+        if _alias in _clean_name:
+            logger.info(f"법령 약칭 변환: {law_name} → {_full}")
+            law_name = _full
+            break
+
+    # 조문번호 추출
+    art_match = _re.search(r'(제\d+조(?:의\d+)?)', query)
+    art_str = art_match.group(1) if art_match else None
+
+    # ━━━ MST 사전 조회 (search_law 생략 — 토큰 0, 지연 0) ━━━
+    # 시행령/시행규칙은 본법과 별도 법령이므로 MST 사전 스킵 → search_law 폴백
+    mst = None
+    law_id = None
+    _dict_hit = False
+    _is_subordinate = any(kw in law_name for kw in ("시행령", "시행규칙"))
+
+    if not _is_subordinate and law_name in _MST_DICT:
+        mst = _MST_DICT[law_name]["mst"]
+        law_id = _MST_DICT[law_name]["law_id"]
+        _dict_hit = True
+        logger.info(f"MST 사전 히트: {law_name} → mst={mst}")
+
+    # ━━━ 사전 미스 시 search_law 폴백 ━━━
+    if not _dict_hit:
+        search_result = mcp.call_tool("search_law", {"query": law_name, "display": 5})
+        if not search_result:
+            return False, f"MCP search_law 실패: {law_name}"
+
+        logger.info(f"MCP search_law 폴백: {str(search_result)[:200]}")
+
+        # 시행령 검색 시: "시행령" 포함 블록의 MST 우선 선택
+        _is_sihaengryeong = "시행령" in law_name
+        if _is_sihaengryeong:
+            _blocks = _re.split(r'(?=법령명|lawNm)', search_result)
+            for _blk in _blocks:
+                if "시행령" in _blk:
+                    _sm = _re.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', _blk)
+                    if _sm:
+                        mst = _sm.group(1)
+                        logger.info(f"시행령 MST 매칭: {mst}")
+                        break
+                    _lid = _re.search(r'(?:lawId|법령ID)[:\s]*["\']?(\d{4,7})', _blk)
+                    if _lid:
+                        law_id = _lid.group(1)
+                        break
+
+        if not mst and not law_id:
+            mst_match = _re.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', search_result)
+            if mst_match:
+                mst = mst_match.group(1)
+            lawid_match = _re.search(r'(?:lawId|법령ID)[:\s]*["\']?(\d{4,7})', search_result)
+            if lawid_match:
+                law_id = lawid_match.group(1)
+
+        if not art_str:
+            return True, f"[MCP 직접] {law_name} 검색 결과:\n{search_result[:800]}"
+
+    if not art_str:
+        return True, f"[MST사전] {law_name} (mst={mst}) — 조문번호 미지정"
+
+    # ━━━ 조문 조회: get_article_detail → get_law_text ━━━
+    args = {"jo": art_str}
+    if mst:
+        args["mst"] = mst
+    if law_id:
+        args["lawId"] = law_id
+
+    _src = "MST사전" if _dict_hit else "MCP 직접"
+
+    detail_result = mcp.call_tool("get_article_detail", args)
+    if detail_result and len(detail_result) > 20:
+        logger.info(f"get_article_detail 성공 ({_src}): {law_name} {art_str} — {len(detail_result)}자")
+        return True, f"[{_src}] {law_name} {art_str}\n{detail_result}"
+
+    if mst:
+        text_result = mcp.call_tool("get_law_text", {"mst": mst, "jo": art_str})
+        if text_result and len(text_result) > 20:
+            logger.info(f"get_law_text 성공 ({_src}): {law_name} {art_str} — {len(text_result)}자")
+            return True, f"[{_src}] {law_name} {art_str}\n{text_result}"
+
+    return True, f"[{_src}] {law_name} mst={mst}, {art_str} 조문 조회 실패"
+
+
 def call_mcp_law(query, max_tokens=2048):
-    """korean-law-mcp를 통해 법령/판례 조회.
-    세션 404 시 재연결 + law.go.kr 직접 폴백.
+    """법령 조회 통합 함수.
+
+    우선순위:
+      1차: MCP 서버 직접 호출 (Claude API 불필요, 무료)
+      2차: Claude API 경유 MCP (기존 방식, Claude 토큰 소모)
+      3차: Supabase laws DB 캐시
     """
     import requests as _req
     import re as _re
-    
-    def _mcp_call(client, law_api_key):
-        """MCP 실제 호출"""
+
+    MCP_URL = "https://korean-law-mcp.fly.dev/mcp"
+
+    # ━━━ 1차: MCP 직접 호출 (Claude API 불필요) ━━━
+    try:
+        success, result = call_mcp_law_direct(query)
+        if success and result and len(result) > 30:
+            return True, result
+        logger.info(f"MCP 직접 호출 불충분: {result[:100] if result else 'None'}")
+    except Exception as e:
+        logger.warning(f"MCP 직접 호출 실패: {e}")
+
+    # ━━━ 2차: Claude API 경유 MCP (기존 방식) ━━━
+    try:
+        client = init_anthropic()
+        law_api_key = get_secret("LAW_OC") or ""
+
+        # Fly.io wake-up
+        try:
+            _req.get("https://korean-law-mcp.fly.dev/health", timeout=10)
+        except Exception:
+            time.sleep(2)
+
         response = client.beta.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=max_tokens,
-            system=f"법제처 API 키: {law_api_key}. 도구 호출 시 apiKey에 이 키를 사용하세요.",
+            system=f"법제처 API 키: {law_api_key}. 도구 호출 시 apiKey에 이 키를 사용하세요.\n"
+                   "⚠️ 약칭 주의: '표시광고법'은 '표시·광고의 공정화에 관한 법률'(공정거래법 계열)이다. "
+                   "'식품 등의 표시·광고에 관한 법률'과 혼동하지 말 것. 검색 결과의 법령명을 반드시 확인하라.",
             messages=[{"role": "user", "content": query}],
             mcp_servers=[{
                 "type": "url",
-                "url": "https://korean-law-mcp.fly.dev/mcp",
+                "url": MCP_URL,
                 "name": "korean-law"
             }],
             tools=[{
@@ -593,67 +896,89 @@ def call_mcp_law(query, max_tokens=2048):
         for block in response.content:
             if hasattr(block, 'text') and block.text:
                 text_parts.append(block.text)
-        return "\n".join(text_parts)
-    
-    # 1차: MCP 시도 (최대 2회 — 404 시 wake-up 후 재시도)
-    for attempt in range(2):
-        try:
-            client = init_anthropic()
-            law_api_key = get_secret("LAW_OC") or "ocwhip3122"
-            
-            # Fly.io wake-up
-            if attempt == 0:
-                try:
-                    hc = _req.get("https://korean-law-mcp.fly.dev/health", timeout=15)
-                    logger.info(f"MCP health: {hc.status_code}")
-                except Exception:
-                    logger.warning("MCP health check 실패 — 서버 sleep 상태일 수 있음")
-                    time.sleep(3)  # wake-up 대기
-            
-            result = _mcp_call(client, law_api_key)
-            
-            if result:
-                logger.info(f"MCP 조회 성공 (시도 {attempt+1}): {query[:30]}... → {len(result)}자")
-                return True, result
-            return False, "MCP 응답 비어있음"
-            
-        except Exception as e:
-            err_str = str(e)
-            logger.warning(f"MCP 시도 {attempt+1} 실패: {err_str[:200]}")
-            
-            # 404 Session not found → wake-up 후 재시도
-            if "404" in err_str or "Session not found" in err_str or "session" in err_str.lower():
-                logger.info("MCP 세션 만료 감지 — wake-up 후 재시도...")
-                try:
-                    _req.get("https://korean-law-mcp.fly.dev/health", timeout=20)
-                except Exception:
-                    pass
-                time.sleep(5)  # 서버 부팅 대기
-                continue
-            else:
-                break  # 404가 아닌 에러는 재시도 불필요
-    
-    # 2차: law.go.kr 직접 폴백
-    logger.info("MCP 실패 — law.go.kr 직접 폴백")
+        result = "\n".join(text_parts)
+        if result:
+            logger.info(f"Claude MCP 조회 성공: {query[:30]}... → {len(result)}자")
+            return True, result
+    except Exception as e:
+        logger.warning(f"Claude MCP 실패: {str(e)[:200]}")
+
+    # ━━━ 3차: Supabase laws DB 캐시 ━━━
+    logger.info("MCP 모두 실패 — Supabase DB 캐시 폴백")
     try:
-        law_match = _re.search(r"['\"]?([가-힣]+법[가-힣]*)['\"]?", query)
-        if not law_match:
-            return False, "법령명 추출 실패"
-        
-        law_name = law_match.group(1)
-        url = "https://www.law.go.kr/DRF/lawSearch.do"
-        params = {"OC": "ocwhip3122", "target": "law", "type": "XML", "query": law_name}
-        res = _req.get(url, params=params, timeout=15)
-        
-        if res.status_code == 200 and "totalCnt" in res.text:
-            root = ET.fromstring(res.text)
-            total = root.findtext('.//totalCnt') or "0"
-            if int(total) > 0:
-                return True, f"{law_name} 법령 존재 확인 (law.go.kr 폴백)"
-        return False, f"{law_name} 검색 결과 없음"
-    except Exception as e2:
-        logger.warning(f"law.go.kr 폴백도 실패: {e2}")
-        return False, str(e2)
+        art_match = _re.search(r'(제\d+조(?:의\d+)?)', query)
+        art_str = art_match.group(1) if art_match else None
+
+        # 쿼리에서 법령명 추출 (약칭 변환 후)
+        _q_law_match = _re.search(r"['\"]?([A-Za-z0-9가-힣ㆍ·\s]+(?:법률?|법|고시|시행령|가이드라인|지침|예규))['\"]?", query)
+        _q_law_name = _q_law_match.group(1).strip() if _q_law_match else ""
+        # 약칭 변환 적용
+        _DB_ALIAS = {
+            "표시광고법": "표시·광고의 공정화에 관한 법률",
+            "식품표시광고법": "식품 등의 표시·광고에 관한 법률",
+            "정보통신망법": "정보통신망 이용촉진 및 정보보호 등에 관한 법률",
+            "부정경쟁방지법": "부정경쟁방지 및 영업비밀보호에 관한 법률",
+            "환경기술산업법": "환경기술 및 환경산업 지원법",
+            "자본시장법": "자본시장과 금융투자업에 관한 법률",
+            "전자상거래법": "전자상거래 등에서의 소비자보호에 관한 법률",
+            "개인정보보호법": "개인정보 보호법",
+            "AI기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+            "인공지능기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+        }
+        _q_clean = _q_law_name.replace(" ", "").replace("·", "")
+        for _a, _f in _DB_ALIAS.items():
+            if _a in _q_clean:
+                _q_law_name = _f
+                break
+
+        if art_str:
+            laws_db = load_laws()
+            if laws_db:
+                # 일반 조사/접속사 제외 — 느슨 매칭 방지
+                _STOP_WORDS = {"및", "에", "관한", "등에", "대한", "위한", "따른", "의한", "등의", "등을", "에서"}
+                for law in laws_db:
+                    art_no = law.get("article_no", "")
+                    if art_str not in art_no and art_no not in art_str:
+                        continue
+                    law_name_db = law.get("law_name", "")
+                    law_short = law.get("law_short", "")
+                    query_clean = query.replace("'", "").replace('"', '')
+
+                    # 엄격 매칭: law_short 또는 law_name의 핵심 단어(3자 이상)가 쿼리에 포함
+                    _matched = False
+                    if law_short and len(law_short) >= 2 and law_short in query_clean:
+                        _matched = True
+                    elif law_name_db:
+                        # 핵심 단어만 추출 (3자 이상, 불용어 제외)
+                        _key_parts = [p for p in law_name_db.split() if len(p) >= 3 and p not in _STOP_WORDS]
+                        if _key_parts:
+                            # 핵심 단어 중 과반수가 쿼리에 포함되어야 매칭
+                            _match_count = sum(1 for p in _key_parts if p in query_clean)
+                            _matched = _match_count >= max(1, len(_key_parts) // 2)
+
+                    # 추가 검증: 쿼리의 법령명과 DB 법령명이 동일 법률인지 확인
+                    if _matched and _q_law_name:
+                        # 쿼리 법령명의 핵심 단어가 DB 법령명에도 있어야 함
+                        _q_key = [p for p in _q_law_name.split() if len(p) >= 3 and p not in _STOP_WORDS]
+                        if _q_key:
+                            _cross = sum(1 for p in _q_key if p in law_name_db)
+                            if _cross == 0:
+                                # 쿼리 법령과 DB 법령이 전혀 다른 법률 → 매칭 거부
+                                logger.info(f"DB 캐시 매칭 거부: 쿼리={_q_law_name} ≠ DB={law_name_db}")
+                                _matched = False
+
+                    if _matched:
+                        content = law.get("content", "")
+                        title = law.get("article_title", "")
+                        header = f"{law_short} {art_no}"
+                        if title:
+                            header += f"({title})"
+                        logger.info(f"Supabase DB 폴백 성공: {header} — {len(content)}자")
+                        return True, f"[DB 캐시] {header}\n{content}"
+    except Exception as db_err:
+        logger.warning(f"Supabase DB 폴백 실패: {db_err}")
+
+    return False, "MCP 직접·Claude MCP·DB 캐시 모두 실패"
 
 
 def verify_precedent_via_api(case_no, context_keywords=None):
@@ -719,7 +1044,7 @@ def verify_law_via_api(law_name, article):
         return False, ""
 
 
-def gatekeeper_process(gemini_raw_json, laws_db, docs=None):
+def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
     """Stage 2: Gatekeeper — Gemini의 Raw Data를 3중 검증 후 정제.
     1차: 사내 DB(124건+) 원문 대조
     2차: law.go.kr API 실시간 판례 검증 (할루시네이션 차단)
@@ -735,21 +1060,80 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None):
     verified_precedents = []
     dropped_precedents = []
     
-    # 1. 사규 분석 결과 → Gemini가 못 찾았으면 원문 직접 주입
+    # 1. 사규 분석 결과 → Gemini가 못 찾았으면 키워드 기반 원문 직접 주입
     saryu_findings = gemini_raw_json.get("saryu_findings", [])
     if saryu_findings:
         refined_parts.append("━━━ [사규 분석 결과 (Gemini 확인)] ━━━")
         for sf in saryu_findings:
             refined_parts.append(f"- [{sf.get('relevance','?')}] {sf.get('source','?')} {sf.get('clause','')}: {sf.get('content','')[:200]}")
-    elif docs:
-        # Gemini가 사규를 못 찾았으면 원문 핵심 부분 직접 주입
-        refined_parts.append("━━━ [사규 원문 — 시스템 강제 주입 (Gemini 누락)] ━━━")
-        for doc in docs:
-            if doc.get("cat") in ("saryu", "contract", "yakjeong"):
+
+    # Gemini가 못 찾았거나, 찾은 게 적으면 → 키워드 기반 원문 검색으로 보충
+    if docs and len(saryu_findings) < 2:
+        import re as _re
+        # 사용자 질문에서 핵심 키워드 추출
+        query_text = gemini_raw_json.get("query_summary", "")
+        if not query_text and user_query:
+            query_text = user_query
+        # 키워드: 질문의 명사/동사 핵심어
+        _keywords = set()
+        for kw in ["반품", "반출", "반입", "직매입", "특정매입", "위탁매입", "납품", "인도",
+                    "입점", "퇴점", "판촉", "감액", "수수료", "인테리어", "리뉴얼",
+                    "파견", "임대", "계약", "해지", "해제", "위약", "손해배상",
+                    "환불", "교환", "하자", "검수", "정산", "마진", "단가"]:
+            if kw in query_text:
+                _keywords.add(kw)
+        if not _keywords:
+            # 질문이 짧으면 단어 전부 키워드로
+            _keywords = set(query_text.replace(" ", ""))
+
+        if _keywords:
+            refined_parts.append("━━━ [사규/계약서 원문 — 키워드 기반 검색 결과] ━━━")
+            _found_any = False
+            for doc in docs:
+                if doc.get("cat") not in ("saryu", "contract", "yakjeong"):
+                    continue
+                full_text = doc.get("text", "")
                 label = doc.get("label", doc.get("name", ""))
-                text_preview = doc.get("text", "")[:500]
-                refined_parts.append(f"📄 [{label}]\n{text_preview}")
-        logger.info("Gatekeeper: Gemini 사규 누락 → 원문 강제 주입")
+                if not full_text:
+                    continue
+
+                # 키워드가 포함된 문단(paragraph) 추출
+                paragraphs = _re.split(r'\n\s*\n|\n(?=제\d+조|\d+\.)', full_text)
+                matched_paragraphs = []
+                for para in paragraphs:
+                    para_stripped = para.strip()
+                    if len(para_stripped) < 10:
+                        continue
+                    if any(kw in para_stripped for kw in _keywords):
+                        matched_paragraphs.append(para_stripped[:500])
+
+                if matched_paragraphs:
+                    _found_any = True
+                    refined_parts.append(f"📄 [{label}] — 키워드 매칭 {len(matched_paragraphs)}건")
+                    for mp in matched_paragraphs[:12]:  # 최대 12개 문단
+                        refined_parts.append(f"  → {mp}")
+                    logger.info(f"Gatekeeper 사규 키워드 검색: [{label}] {len(matched_paragraphs)}건 매칭 (키워드: {_keywords})")
+
+            if not _found_any:
+                # 키워드 매칭 실패 → 각 문서의 앞/중간/끝 구간을 균등 샘플링
+                refined_parts.append("━━━ [사규 원문 — 키워드 미매칭, 균등 샘플링 주입] ━━━")
+                for doc in docs:
+                    if doc.get("cat") in ("saryu", "contract", "yakjeong"):
+                        label = doc.get("label", doc.get("name", ""))
+                        full = doc.get("text", "")
+                        doc_len = len(full)
+                        if doc_len <= 5000:
+                            refined_parts.append(f"📄 [{label}] (전문)\n{full}")
+                        else:
+                            # 앞 2000자 + 중간 2000자 + 끝 1000자 = 5000자
+                            mid_start = doc_len // 2 - 1000
+                            sample = (
+                                full[:2000] + "\n...(중략)...\n" +
+                                full[mid_start:mid_start+2000] + "\n...(중략)...\n" +
+                                full[-1000:]
+                            )
+                            refined_parts.append(f"📄 [{label}] (샘플링 {doc_len}자 중 5000자)\n{sample}")
+                logger.info("Gatekeeper: 키워드 미매칭 → 균등 샘플링 주입")
     
     # 2. 법령 → 사내 DB 대조 + API 보조 검증
     law_findings = gemini_raw_json.get("law_findings", [])
@@ -959,6 +1343,24 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "DB 미등록 법령도 Placeholder를 사용하라. 예: {{관세법_제269조제2항_5년이하징역또는관세액10배이하벌금}}\n\n"
         "██ 규칙 5 — 용어 ██\n"
         "'~팀' 금지 → '~담당부서'. 새 법령 추가 인용 금지.\n\n"
+        "██ 규칙 5.5 — B2B/B2C 구분 (절대 규칙) ██\n"
+        "면세점의 거래는 대부분 B2B(사업자 간)이다. 다음 규칙을 준수하라:\n"
+        "① '직매입 반품', '납품 단가', '수수료', '입점/퇴점' 등은 B2B 거래 → 소비자기본법 적용 금지.\n"
+        "② 소비자기본법은 질문에 '소비자', '고객', '소비자 클레임', '소비자 피해' 등 B2C 맥락이 명확할 때만 적용.\n"
+        "③ B2B 반품 질문에 소비자기본법 쟁점을 생성하는 것은 할루시네이션이다. 절대 금지.\n\n"
+        "██ 규칙 5.6 — 사규 창작 금지 (절대 규칙) ██\n"
+        "applicable_rule, rule_analysis에 사규명을 기재할 때:\n"
+        "① 검증 데이터에 실제 존재하는 사규명만 인용 가능. 존재하지 않는 사규를 창작하는 것은 금지.\n"
+        "② 검증 데이터에 해당 사규가 없으면 '해당 없음'으로 기재.\n"
+        "③ '반품 절차 지침', '보세물품 관리지침' 등 존재하지 않는 가상의 사규명을 만들어내지 마라.\n\n"
+        "██ 규칙 6 — 문체 (절대 규칙) ██\n"
+        "summary, law_analysis, rule_analysis, recommendation, verdict_reason, action_plan 모든 필드에 적용:\n"
+        "① 개조식: 반드시 불릿('-')으로 3~4개 핵심 포인트 나열. 줄글(서술형 문단) 금지.\n"
+        "② 평어체(명사형 종결): 모든 문장을 '~임', '~필요', '~불가', '~존재', '~요망', '~대상', '~위반' 등 명사형으로 종결.\n"
+        "   금지: '~입니다', '~합니다', '~됩니다', '~있습니다' 등 서술형 종결 절대 사용 금지.\n"
+        "③ 두괄식: 결론(위반 여부/위험도)을 첫 불릿에 배치, 근거는 후속 불릿에 배치.\n"
+        "예시(summary): \"- 직매입 반품 시 대규모유통업법 제10조 위반 리스크 존재\\n- 보세물품 무단반출 시 특허취소 대상\\n- 반품 전 세관 승인 및 납품업자 서면 동의 확보 필요\"\n"
+        "예시(law_analysis): \"- 대규모유통업법 제10조 위반 — 정당한 사유 없는 반품 원칙적 불가\\n- 위반 시 시정명령 및 과징금 부과 대상\\n- 시즌상품의 경우 계약체결 시 구체적 반품조건 명시 서면 교부 필수\"\n\n"
         
         "████ 필수 쟁점 포함 규칙 (모조품/가품 관련) ████\n"
         "모조품 관련 질의 시 아래 7개를 각각 독립 쟁점으로 출력:\n"
@@ -985,17 +1387,17 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "모든 분석 내용은 JSON의 issues 안에 넣으세요.\n\n"
         "```json\n"
         "{\n"
-        '  "summary": "1줄 요약",\n'
+        '  "summary": "개조식 3~4줄 요약 (불릿 - 사용, 명사형 종결: ~불가/~필요/~존재/~대상)",\n'
         '  "verdict": "approved | conditional | rejected",\n'
         '  "verdict_reason": "종합 판단 근거 (전달된 데이터에 근거하여)",\n'
         '  "issues": [\n'
         '    {\n'
         '      "issue_no": 1, "title": "쟁점 제목", "risk_level": "high|medium|low",\n'
         '      "target_clause": "검토 대상 원문",\n'
-        '      "applicable_law": "법령/고시명 제X조",\n'
-        '      "law_analysis": "법령·행정규칙 관점 — 형량은 반드시 {{법령약칭_조문번호_형량}} Placeholder 사용",\n'
-        '      "applicable_rule": "사규 조항",\n'
-        '      "rule_analysis": "사규 관점",\n'
+        '      "applicable_law": "법령/고시명 제X조 (예: 상표법 제230조)",\n'
+        '      "law_analysis": "법령·행정규칙 관점 — 형량은 반드시 {{법령약칭_조문번호_형량}} Placeholder 사용 (예: {{상표법_제230조_형량}}에 처한다)",\n'
+        '      "applicable_rule": "「사규명」 (예: 「MD 협력회사 입점 및 퇴점 지침」 제5조) — 사규명은 반드시 꺾쇠「」로 감싸기",\n'
+        '      "rule_analysis": "사규 관점 — 사규명 인용 시 반드시 「」 사용 (예: 「직매입거래 기본계약서」 제22조에 따르면...)",\n'
         '      "recommendation": "종합 권고안"\n'
         '    }\n'
         '  ],\n'
@@ -1007,6 +1409,82 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "```\n"
         "⚠️ JSON 코드블록 뒤에 추가 마크다운 설명을 절대 작성하지 마세요. JSON만 출력하세요.\n"
         "후속 질문에는 JSON 없이 마크다운. 새 검토 요청 시만 JSON 출력.\n"
+    )
+
+
+def build_system_revision_compare(docs, laws_db):
+    """리비전 교차 비교 전용 시스템 프롬프트 — 계약서 독소조항 감별기(Redlining)"""
+    # 사규 텍스트 수집
+    saryu_texts = []
+    for d in docs:
+        if d.get("cat") in ("saryu", "contract", "yakjeong"):
+            saryu_texts.append(f"[{d.get('label', '')}]\n{d.get('text', '')[:3000]}")
+    saryu_block = "\n\n---\n\n".join(saryu_texts) if saryu_texts else "(사규 등록 없음)"
+
+    # 핵심 법령 DB 텍스트 수집 (보세판매장고시 + 대규모유통업법 중심)
+    key_laws = []
+    for d in laws_db:
+        ls = d.get("law_short", "")
+        if any(k in ls for k in ("보세판매장", "대규모유통업", "관세법", "상표법", "표시광고")):
+            key_laws.append(f"{ls} {d.get('article_no','')}({d.get('article_title','')}): {d.get('content','')[:200]}")
+    laws_block = "\n".join(key_laws[:40]) if key_laws else "(법령 DB 없음)"
+
+    return (
+        "당신은 면세점 전문 시니어 변호사 AI이며, 계약서 리비전 교차 비교(Redlining) 전문가입니다.\n"
+        "당사가 보낸 표준 초안(V1)과 협력사가 회신한 수정본(V2)을 조항별로 대조하여,\n"
+        "협력사가 변경·추가·삭제한 독소조항을 식별하고 위험도를 평가하는 것이 당신의 임무입니다.\n\n"
+
+        "████ 듀얼 코어 절대 기준 ████\n"
+        "아래 두 법령을 최우선 심사 기준으로 적용합니다:\n"
+        "1. 「보세판매장 특허 및 운영에 관한 고시」 — 보세물품 무단반출, 밀수, 특허취소 리스크\n"
+        "2. 「대규모유통업법」 — 부당반품, 부당 대금지연, 부당 수수료 전가 등 금지행위\n"
+        "협력사 수정안이 이 두 법령의 금지행위에 1%라도 저촉되면 🔴 최고 위험(high)으로 경고.\n\n"
+
+        "████ 오작동 방지 (할루시네이션 억제) ████\n"
+        "- 단순 오탈자 수정, 문구 다듬기, 고시/법률과 무관한 일반적 조건 변경은 위반으로 판단하지 마라.\n"
+        "- 실제 법령 위반 근거가 없으면 억지로 쟁점을 창작하여 끼워 넣지 마라.\n"
+        "- V1과 V2가 실질적으로 동일한 조항은 분석에서 생략하라.\n"
+        "- 변경사항이 없거나 위험 조항이 없으면 'approved'로 판단하라.\n\n"
+
+        "████ 분석 절차 ████\n"
+        "1. V1과 V2를 조항별로 대조하여 변경점을 식별\n"
+        "2. 각 변경점이 아래 기준 문서(사규)와 법령에 위반되는지 심사\n"
+        "3. 위반 시 구체적 법령 조항과 위반 사유를 명시\n"
+        "4. 변경이 당사에 불리한지 분석 (손해배상 한도 삭제, 일방 해지권 추가, IP 귀속 변경 등)\n\n"
+
+        "████ 사규 인용 시 꺾쇠「」 필수 ████\n"
+        "사규명은 반드시 「」로 감싸서 인용 (예: 「직매입거래 기본계약서」 제22조)\n\n"
+
+        "━━━ [기준 문서 — 사규] ━━━\n" + saryu_block + "\n\n"
+        "━━━ [참조 법령 DB] ━━━\n" + laws_block + "\n\n"
+
+        "━━━ [답변 형식] ━━━\n"
+        "반드시 아래 JSON 형식으로만 출력. JSON 외 마크다운 설명 금지.\n\n"
+        "```json\n"
+        "{\n"
+        '  "summary": "교차 비교 결과 1줄 요약 (변경 N건 중 독소조항 M건 발견)",\n'
+        '  "verdict": "approved | conditional | rejected",\n'
+        '  "verdict_reason": "종합 판단 근거",\n'
+        '  "issues": [\n'
+        '    {\n'
+        '      "issue_no": 1,\n'
+        '      "title": "변경 쟁점 제목 (예: 손해배상 한도 삭제)",\n'
+        '      "risk_level": "high | medium | low",\n'
+        '      "target_clause": "V1 원문: [당사 조항 내용] 👉 V2 수정문: [협력사 변경 내용]",\n'
+        '      "applicable_law": "법령명 제X조",\n'
+        '      "law_analysis": "법령 위반 여부 분석",\n'
+        '      "applicable_rule": "「사규명」 제X조 — 사규 위반 여부",\n'
+        '      "rule_analysis": "사규 관점 분석",\n'
+        '      "recommendation": "수용 / 거부 / 수정협상 + 구체적 대안"\n'
+        '    }\n'
+        '  ],\n'
+        '  "action_plan": "협상 전략 (즉시 거부할 조항 / 수정 협상할 조항 / 수용 가능 조항 분류)",\n'
+        '  "alternative_clause": "독소조항에 대한 당사 수정 대안 제시",\n'
+        '  "cited_laws": [{"law_name": "법령명", "article": "제X조"}],\n'
+        '  "cited_precedents": []\n'
+        "}\n"
+        "```\n"
+        "⚠️ JSON 코드블록 뒤에 추가 마크다운 설명을 절대 작성하지 마세요. JSON만 출력하세요.\n"
     )
 
 
@@ -1029,6 +1507,7 @@ def build_system_gemini(docs):
         "\n\n② 당사 표준 계약서:\n" + contract_text +
         "\n\n③ 당사 표준 약정서:\n" + yakjeong_text +
         "\n\n답변 시 위험은 🔴, 적법은 🔵 이모지를 사용하세요. Streamlit 색상 단축코드(:red[], :blue[], :blue_circle: 등)는 절대 사용하지 마세요."
+        "\n\n출력 형식 제약: 모든 출력은 순수 Markdown 형식으로만 작성하세요. HTML, CSS, XML 태그를 절대 생성하지 마세요."
     )
 
 # ── AI 호출 및 에러 핸들링 함수 ────────────────────────────────
@@ -1105,8 +1584,8 @@ def call_claude(system_prompt, messages):
                     return response.content[0].text
                 except Exception as retry_e:
                     err_type, err_msg = classify_api_error(retry_e)
-                    if err_type not in ("overloaded", "server"):
-                        break  # 다른 종류 에러면 재시도 중단
+                    if err_type not in ("overloaded", "server", "rate_limit"):
+                        break  # 재시도 가능한 에러가 아니면 중단
         
         logger.error(f"Claude API 최종 실패: {err_type} — {str(e)[:200]}")
         label_map = {
@@ -1122,17 +1601,37 @@ def call_claude(system_prompt, messages):
         return f"⚠️ [{label_map.get(err_type, '오류')}] Claude: {err_msg} {debug_info}"
 
 def sanitize_html(text):
-    """LLM 응답에서 HTML/CSS 태그를 제거하고 순수 마크다운만 남김."""
+    """LLM 응답에서 HTML/CSS/XML 태그를 제거하고 순수 마크다운만 남김.
+    v2.2: 태그 목록 확장 + <!DOCTYPE>, XML 선언, class/id 속성 제거 추가.
+    """
     import re as _re
+    # <!DOCTYPE ...> 및 <?xml ...?> 선언 제거
+    text = _re.sub(r'<!DOCTYPE[^>]*>', '', text, flags=_re.IGNORECASE)
+    text = _re.sub(r'<\?xml[^?]*\?>', '', text, flags=_re.IGNORECASE)
     # <style>...</style> 블록 전체 제거
     text = _re.sub(r'<style[^>]*>.*?</style>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
     # <script>...</script> 블록 전체 제거
     text = _re.sub(r'<script[^>]*>.*?</script>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
-    # HTML 태그 제거 (마크다운은 유지)
-    text = _re.sub(r'</?(?:div|span|table|tr|td|th|thead|tbody|p|br|hr|h[1-6]|ul|ol|li|a|img|section|article|header|footer|nav|main|aside|figure|figcaption)[^>]*>', '', text, flags=_re.IGNORECASE)
+    # <svg>...</svg> 블록 전체 제거
+    text = _re.sub(r'<svg[^>]*>.*?</svg>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
+    # HTML 태그 제거 (마크다운은 유지) — 확장된 태그 목록
+    text = _re.sub(
+        r'</?(?:html|head|body|div|span|table|tr|td|th|thead|tbody|tfoot|caption|colgroup|col'
+        r'|p|br|hr|h[1-6]|ul|ol|li|dl|dt|dd|a|img|video|audio|source|canvas|iframe'
+        r'|section|article|header|footer|nav|main|aside|figure|figcaption'
+        r'|form|input|button|select|option|textarea|label|fieldset|legend'
+        r'|details|summary|dialog|template|slot|meta|link|base|title'
+        r'|strong|em|b|i|u|s|small|mark|sub|sup|abbr|cite|code|pre|blockquote'
+        r'|ruby|rt|rp|bdi|bdo|wbr|data|time|progress|meter|output'
+        r')[^>]*>',
+        '', text, flags=_re.IGNORECASE
+    )
     # CSS 인라인 스타일 잔여물 제거
     text = _re.sub(r'style="[^"]*"', '', text, flags=_re.IGNORECASE)
     text = _re.sub(r"style='[^']*'", '', text, flags=_re.IGNORECASE)
+    # class, id 속성 잔여물 제거
+    text = _re.sub(r'class="[^"]*"', '', text, flags=_re.IGNORECASE)
+    text = _re.sub(r'id="[^"]*"', '', text, flags=_re.IGNORECASE)
     # 빈 줄 정리
     text = _re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
@@ -1517,10 +2016,29 @@ def postprocess_reply(reply, laws_db):
 
 
 def dispatch_with_fallback(model_choice, messages, docs, laws_db):
+    user_query = messages[-1]["content"] if messages else ""
+
+    # ━━━ 리비전 교차 비교 전용 Bypass ━━━
+    if "[REVISION_COMPARE]" in user_query:
+        st.caption("🔄 리비전 교차 비교 모드 (전용 파이프라인)")
+        # 플래그 제거 후 순수 비교 텍스트만 추출
+        clean_query = user_query.replace("[REVISION_COMPARE]\n", "").replace("[REVISION_COMPARE]", "")
+        system_prompt = build_system_revision_compare(docs, laws_db)
+        # Claude 단독 직행 — Gemini 검색, Gatekeeper, enforce_mandatory_issues 전면 생략
+        reply = call_claude(system_prompt, [{"role": "user", "content": clean_query}])
+        if reply.startswith("⚠️"):
+            # Claude 실패 시 Gemini 폴백
+            st.warning("Claude API 한도 → Gemini 폴백")
+            reply = call_gemini(system_prompt, [{"role": "user", "content": clean_query}], is_fallback=True)
+            reply = sanitize_html(reply)
+            if reply and not reply.startswith("⚠️"):
+                return reply, "Gemini (Revision Compare)"
+            return reply, "Failed"
+        return reply, f"Claude ({CLAUDE_MODEL}, Revision Compare)"
+
     if model_choice == "claude":
         # ━━━ 블록 삽입 파이프라인 체크 ━━━
         # 모조품 관련 질의면 block_assembler로 분기 (형량 100% 보장)
-        user_query = messages[-1]["content"] if messages else ""
         
         try:
             from block_assembler import classify_issues, load_legal_blocks, run_pipeline
@@ -1616,8 +2134,9 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
         # Stage 1: Gemini Researcher — 사규 분석 + 법령/판례 수집
         gemini_system = build_system_gemini_stage1(docs, laws_db)
         st.caption("🔍 Stage 1: 사규 분석 + 법령·판례 수집 중 (Gemini + Google Search)...")
-        gemini_reply = call_gemini(gemini_system, messages)
-        
+        gemini_reply = call_gemini(gemini_system, messages, is_fallback=True)
+        gemini_reply = sanitize_html(gemini_reply)  # HTML 방어 (Claude 실패 시 직접 표시될 수 있음)
+
         if gemini_reply.startswith("⚠️"):
             st.warning(f"Stage 1 실패: {gemini_reply}")
             return gemini_reply, "Gemini (Failed)"
@@ -1638,7 +2157,10 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
         
         # Stage 2: Gatekeeper — DB 원문 대조 + API 실시간 검증
         st.caption("🛡️ Stage 2: DB 원문 대조 + law.go.kr API 팩트체크 중...")
-        gatekeeper_meta, gatekeeper_text = gatekeeper_process(gemini_json, laws_db, docs)
+        # 사용자 질문 추출 (키워드 기반 사규 검색용)
+        _user_msgs = [m for m in messages if m.get("role") == "user"]
+        _uq = _user_msgs[-1]["content"][:500] if _user_msgs else ""
+        gatekeeper_meta, gatekeeper_text = gatekeeper_process(gemini_json, laws_db, docs, user_query=_uq)
         
         # Gatekeeper 결과 요약 표시
         if gatekeeper_meta and not gatekeeper_meta.get("error"):
@@ -1720,14 +2242,46 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
             def clean_json_value(obj):
                 """JSON 객체를 재귀 순회하며 {{...}} placeholder 치환"""
                 if isinstance(obj, str):
-                    # 1차: DB 매칭
+                    # 0차: 공백 변형 정규화 — {{ 상표법_제230조_형량 }} → {{상표법_제230조_형량}}
+                    obj = _re.sub(r'\{\{\s*', '{{', obj)
+                    obj = _re.sub(r'\s*\}\}', '}}', obj)
+                    # 1차: placeholder_db 정확 매칭
                     for key, val in placeholder_db.items():
                         obj = obj.replace("{{" + key + "}}", val)
-                    # 2차: 남은 {{...}} — 중괄호 제거 + 띄어쓰기 정리
+                    # 2차: 남은 {{...}} — placeholder_db 부분 매칭 후 DB 조회
                     def _fallback(m):
-                        inner = m.group(1)
+                        inner = m.group(1).strip()
+                        # 2-1: placeholder_db에서 키 부분 매칭 (약칭 변형 대응)
+                        inner_norm = inner.replace(" ", "")
+                        for key, val in placeholder_db.items():
+                            if key.replace(" ", "") == inner_norm:
+                                return val
+                            # "상표법_제230조_형량" ⊂ "상표법_제230조_7년이하..." 매칭
+                            if inner_norm.endswith("_형량"):
+                                prefix = inner_norm.replace("_형량", "")
+                                if key.startswith(prefix.replace(" ", "")):
+                                    return val
+                        # 2-2: laws_db에서 직접 조회
                         parts = inner.split("_")
-                        # 마지막 파트가 형량이면 그것만, 아니면 전체
+                        if len(parts) >= 2:
+                            law_short = parts[0]
+                            article_guess = ""
+                            for p in parts[1:]:
+                                if _re.search(r'\d+조', p):
+                                    article_guess = p if p.startswith("제") else f"제{p}"
+                                    break
+                            if article_guess:
+                                for db_law in laws_db:
+                                    ds = db_law.get("law_short", "")
+                                    da = db_law.get("article_no", "")
+                                    if da == article_guess and (ds == law_short or law_short in ds or ds in law_short):
+                                        content = db_law.get("content", "")
+                                        pen = _re.search(r'(\d+년\s*이하의?\s*징역\s*(?:또는|이나)\s*[^.]{5,80}벌금)', content)
+                                        if not pen:
+                                            pen = _re.search(r'(\d+년\s*이하의?\s*징역[^.]{0,80})', content)
+                                        if pen:
+                                            return pen.group(1).strip()
+                        # 2-3: 최종 — 마지막 파트에서 형량 텍스트 복원
                         last = parts[-1] if parts else inner
                         last = last.replace("이하", " 이하의 ").replace("또는", " 또는 ")
                         last = last.replace("징역", "징역 ").replace("벌금", "벌금")
@@ -1762,12 +2316,13 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
     else:
         # 일반 Q&A는 Gemini 단독
         system = build_system_gemini(docs)
-        reply = call_gemini(system, messages)
+        reply = call_gemini(system, messages, is_fallback=True)
         if reply.startswith("⚠️"):
             fallback_reply = call_claude(build_system_claude(docs, laws_db), [messages[-1]] if messages else [])
             if not fallback_reply.startswith("⚠️"):
                 return fallback_reply, f"Claude ({CLAUDE_MODEL}, Fallback)"
             return reply, "Gemini (Failed)"
+        reply = sanitize_html(reply)
         return reply, "Gemini"
 
 # ── JSON 파싱 및 UI 렌더링 ────────────────────────────────────
@@ -1818,94 +2373,303 @@ def parse_review_response(response_text):
     return json_data, detail_text
 
 
-def enforce_mandatory_issues(json_data, laws_db):
-    """██ 필수 쟁점 강제 삽입 — AI가 빠뜨려도 코드가 100% 보장 ██"""
+def enforce_mandatory_issues(json_data, laws_db, user_query=""):
+    """██ 필수 쟁점 보충 삽입 — 질문과 관련 있는 법령만, DB 형량으로 ██"""
     if not json_data or "issues" not in json_data:
         return json_data
-    
+
     issues = json_data.get("issues", [])
     all_text = " ".join(iss.get("title", "") + " " + iss.get("applicable_law", "") for iss in issues)
     next_no = max((iss.get("issue_no", 0) for iss in issues), default=0) + 1
-    
-    # 1. 보세판매장고시 — 없으면 강제 삽입
-    if "보세판매장" not in all_text:
-        bc = []
+
+    # 사용자 질문 텍스트만으로 관련성 판단 (AI 응답 제외 — AI가 쓴 키워드에 오발동 방지)
+    query_context = user_query
+
+    # ── 관련성 키워드 매핑 ──
+    # B2B/B2C 혼동 방지: "반품", "교환", "하자" 등 양쪽에서 쓰이는 단어는 소비자법 트리거에서 제외
+    relevance_map = {
+        "보세판매장": ["보세", "세관", "통관", "반출", "반입", "특허취소", "밀수"],
+        "소비자": ["소비자", "고객", "클레임", "안전", "소비자보호", "소비자피해", "소비자분쟁"],
+        "부정경쟁": ["모조품", "가품", "위조", "짝퉁", "모방", "혼동", "부정경쟁", "카피"],
+    }
+
+    # AI가 이미 생성한 쟁점의 법령 목록 (중복 삽입 방지용)
+    existing_laws = set()
+    for iss in issues:
+        _al = iss.get("applicable_law", "")
+        if "보세판매장" in _al: existing_laws.add("보세판매장")
+        if "관세법" in _al: existing_laws.add("관세법")
+        if "소비자" in _al: existing_laws.add("소비자")
+        if "부정경쟁" in _al: existing_laws.add("부정경쟁")
+
+    def _is_relevant(category_key):
+        keywords = relevance_map.get(category_key, [])
+        return any(kw in query_context for kw in keywords)
+
+    def _get_db_analysis(law_short, articles):
+        """DB에서 실제 조문·형량 조회"""
+        parts = []
         for d in laws_db:
-            if d.get("law_short") == "보세판매장고시" and d.get("article_no") in ("제18조", "제28조"):
-                bc.append(f"{d['article_no']}({d.get('article_title','')}): {d['content'][:150]}")
+            if d.get("law_short") == law_short and d.get("article_no") in articles:
+                parts.append(f"{d['article_no']}({d.get('article_title','')}): {d['content'][:200]}")
+        return "  ".join(parts[:3]) if parts else ""
+
+    # 1. 보세판매장고시 — 관련 있고, AI가 빠뜨렸고, 관세법/보세 중복 아닌 경우만
+    if "보세판매장" not in all_text and "보세판매장" not in existing_laws and _is_relevant("보세판매장"):
+        db_text = _get_db_analysis("보세판매장고시", ("제18조", "제28조", "제21조"))
+        analysis = f"운영인의 법령 위반 시 6개월 범위 내 물품반입 정지 또는 특허취소 (관세법 제178조 연계)."
+        if db_text:
+            analysis += f" {db_text}"
         issues.append({
-            "issue_no": next_no, "title": "보세판매장고시 위반 — 행정처분 리스크 [시스템 강제 삽입]",
+            "issue_no": next_no, "title": "보세판매장고시 위반 — 행정처분 리스크",
             "risk_level": "high", "target_clause": "보세판매장 운영 규정 위반",
             "applicable_law": "보세판매장 특허 및 운영에 관한 고시",
-            "law_analysis": f"운영인의 법령 위반 시 6개월 범위 내 물품반입 정지 또는 특허취소 (관세법 제178조 연계). {'  '.join(bc[:2]) if bc else '보세판매장고시 원문 참조'} (DB 검증 완료)",
+            "law_analysis": analysis,
             "applicable_rule": "해당 없음", "rule_analysis": "해당 없음",
             "recommendation": "세관 신고 및 보세판매장 특허 보호를 위한 즉시 시정 조치. 자진 신고 검토."
         })
-        logger.warning("enforce: 보세판매장고시 강제 삽입!")
+        logger.info("enforce: 보세판매장고시 보충 삽입 (관련 키워드 감지)")
         next_no += 1
-    
-    # 2. 소비자기본법 — 없으면 강제 삽입
-    if "소비자" not in all_text:
+
+    # 2. 소비자기본법 — 명확한 B2C 키워드가 있고, AI가 빠뜨렸고, 중복 아닌 경우만
+    if "소비자" not in all_text and "소비자" not in existing_laws and _is_relevant("소비자"):
+        db_text = _get_db_analysis("소비자기본법", ("제4조", "제19조", "제20조"))
+        analysis = "소비자 안전권·알 권리 침해. 소비자분쟁해결기준에 따른 피해구제 및 손해배상 가능."
+        if db_text:
+            analysis += f" {db_text}"
         issues.append({
-            "issue_no": next_no, "title": "소비자기본법 위반 — 소비자 피해 [시스템 강제 삽입]",
-            "risk_level": "medium", "target_clause": "모조품 판매로 인한 소비자 권리 침해",
+            "issue_no": next_no, "title": "소비자기본법 위반 — 소비자 피해",
+            "risk_level": "medium", "target_clause": "소비자 권리 침해",
             "applicable_law": "소비자기본법 제4조, 제19조, 제20조",
-            "law_analysis": "소비자 안전권·알 권리 침해. 소비자분쟁해결기준에 따른 피해구제 및 손해배상 가능 (형량 — 원문 확인 필요)",
+            "law_analysis": analysis,
             "applicable_rule": "해당 없음", "rule_analysis": "해당 없음",
             "recommendation": "피해 소비자 파악 및 환불/교환. 집단분쟁 가능성 대비."
         })
-        logger.warning("enforce: 소비자기본법 강제 삽입!")
+        logger.info("enforce: 소비자기본법 보충 삽입 (관련 키워드 감지)")
         next_no += 1
-    
-    # 3. 부정경쟁방지법 — 없으면 강제 삽입
-    if "부정경쟁" not in all_text:
+
+    # 3. 부정경쟁방지법 — 관련 있고, AI가 빠뜨렸고, 중복 아닌 경우만
+    if "부정경쟁" not in all_text and "부정경쟁" not in existing_laws and _is_relevant("부정경쟁"):
+        db_text = _get_db_analysis("부정경쟁방지법", ("제2조", "제18조"))
+        analysis = "타인의 상품표지와 혼동을 일으키는 행위는 부정경쟁행위로 처벌. 부정경쟁방지법 제18조 제3항 제1호에 따라 3년 이하의 징역 또는 3천만원 이하의 벌금. 상표법과 별개 적용."
+        if db_text:
+            analysis += f" {db_text}"
         issues.append({
-            "issue_no": next_no, "title": "부정경쟁방지법 위반 — 상품형태 모방 [시스템 강제 삽입]",
-            "risk_level": "medium", "target_clause": "타인 상품 형태 모방 모조품 유통",
+            "issue_no": next_no, "title": "부정경쟁방지법 위반 — 상품 출처 혼동행위",
+            "risk_level": "medium", "target_clause": "타인 상품 형태 모방·혼동 유발",
             "applicable_law": "부정경쟁방지법 제2조, 제18조",
-            "law_analysis": "상품 혼동 야기 부정경쟁행위. 상표법과 별개 적용. 미등록 브랜드 디자인 도용 포함 (형량 — 원문 확인 필요)",
+            "law_analysis": analysis,
             "applicable_rule": "해당 없음", "rule_analysis": "해당 없음",
             "recommendation": "브랜드 권리자 민사 손해배상 대비. 법무 담당부서 검토."
         })
-        logger.warning("enforce: 부정경쟁방지법 강제 삽입!")
-    
+        logger.info("enforce: 부정경쟁방지법 보충 삽입 (관련 키워드 감지)")
+
     json_data["issues"] = issues
-    
-    # cited_laws에도 강제 삽입된 법령 추가 (verify_citations에서 DB 검증 통과하도록)
+
+    # cited_laws에도 실제 삽입된 법령만 추가
     cited = json_data.get("cited_laws", [])
     cited_text = " ".join(str(c) for c in cited)
+    inserted_laws = {iss.get("applicable_law", "") for iss in issues[max(0, len(issues)-3):]}
     forced_citations = [
         {"law_name": "보세판매장 특허 및 운영에 관한 고시", "article": "제18조, 제28조"},
         {"law_name": "소비자기본법", "article": "제4조, 제19조"},
         {"law_name": "부정경쟁방지 및 영업비밀보호에 관한 법률", "article": "제2조, 제18조"},
     ]
     for fc in forced_citations:
-        if fc["law_name"] not in cited_text:
+        if fc["law_name"] not in cited_text and any(fc["law_name"][:4] in il for il in inserted_laws):
             cited.append(fc)
     json_data["cited_laws"] = cited
-    
+
     return json_data
 
 
-def render_verdict_badge(verdict):
+# ══════════════════════════════════════════════════════════════
+# ██ 후처리 필터: AI 할루시네이션 강제 차단 ██
+# ══════════════════════════════════════════════════════════════
+
+# 실제 존재하는 사규 목록 (이 목록에 없는 사규명은 할루시네이션)
+KNOWN_SARYU_NAMES = [
+    "MD 협력회사 입점 및 퇴점 지침",
+    "직매입거래 기본계약서",
+    "특정매입거래 기본계약서",
+    "임대차계약서",
+    "사내규정집",
+]
+
+
+def _filter_b2b_consumer_issues(json_data, user_query=""):
+    """B2B 맥락 질문에서 AI가 생성한 소비자기본법 쟁점을 강제 제거"""
+    if not json_data or "issues" not in json_data:
+        return json_data
+
+    # B2B 키워드가 있고 B2C 키워드가 없으면 → B2B 맥락
+    b2b_keywords = ["직매입", "납품", "수수료", "입점", "퇴점", "특정매입", "위탁매입", "반품"]
+    b2c_keywords = ["소비자", "고객", "클레임", "소비자보호", "소비자피해", "소비자분쟁"]
+
+    has_b2b = any(kw in user_query for kw in b2b_keywords)
+    has_b2c = any(kw in user_query for kw in b2c_keywords)
+
+    if not has_b2b or has_b2c:
+        return json_data  # B2B 아니거나 B2C 명시 → 필터 안 함
+
+    # B2B 맥락 확정 → 소비자기본법 쟁점 제거
+    original_count = len(json_data["issues"])
+    json_data["issues"] = [
+        iss for iss in json_data["issues"]
+        if "소비자기본법" not in iss.get("applicable_law", "")
+        and "소비자기본법" not in iss.get("title", "")
+    ]
+    removed = original_count - len(json_data["issues"])
+    if removed > 0:
+        logger.info(f"B2B 필터: 소비자기본법 쟁점 {removed}건 제거 (B2B 맥락)")
+        # issue_no 재정렬
+        for i, iss in enumerate(json_data["issues"], 1):
+            iss["issue_no"] = i
+        # cited_laws에서도 제거
+        if "cited_laws" in json_data:
+            json_data["cited_laws"] = [
+                c for c in json_data["cited_laws"]
+                if "소비자기본법" not in str(c.get("law_name", ""))
+            ]
+    return json_data
+
+
+def _validate_saryu_names(json_data):
+    """AI가 창작한 허구 사규명을 '해당 없음'으로 교체"""
+    if not json_data or "issues" not in json_data:
+        return json_data
+
+    for iss in json_data["issues"]:
+        rule_text = iss.get("applicable_rule", "")
+        if not rule_text or rule_text in ("해당 없음", "없음", "해당 규정 없음"):
+            continue
+
+        # 꺾쇠「」안의 사규명 추출
+        import re as _re
+        found_names = _re.findall(r"「([^」]+)」", rule_text)
+        if not found_names:
+            # 꺾쇠 없이 사규명처럼 보이는 텍스트 체크
+            # "~지침", "~규정", "~계약서" 패턴이 있지만 알려진 목록에 없으면 할루시네이션
+            suspicious_patterns = _re.findall(r"([\w\s]+(?:지침|규정|계약서|내규|규정집|매뉴얼))", rule_text)
+            found_names = [p.strip() for p in suspicious_patterns]
+
+        if not found_names:
+            continue
+
+        # 알려진 사규 목록과 대조
+        is_valid = False
+        for name in found_names:
+            for known in KNOWN_SARYU_NAMES:
+                if known in name or name in known:
+                    is_valid = True
+                    break
+            if is_valid:
+                break
+
+        if not is_valid:
+            hallucinated = ", ".join(found_names)
+            logger.warning(f"사규 검증 실패 — 허구 사규 감지: {hallucinated}")
+            iss["applicable_rule"] = "해당 없음"
+            iss["rule_analysis"] = "검증 데이터에 해당 사규 존재하지 않음"
+
+    return json_data
+
+
+def _wrap_saryu_brackets(text):
+    """사규명에 꺾쇠「」가 없으면 자동 보정"""
+    if not text or text in ("해당 없음", "없음", "사규 분석 대기중"):
+        return text
+    import re as _re
+    # 이미 「」로 감싸져 있으면 그대로
+    if "「" in text:
+        return text
+    # 알려진 사규명 패턴에 「」 추가
+    saryu_names = [
+        "MD 협력회사 입점 및 퇴점 지침",
+        "직매입거래 기본계약서",
+        "특정매입거래 기본계약서",
+        "임대차계약서",
+        "사내규정집",
+    ]
+    for name in saryu_names:
+        if name in text:
+            text = text.replace(name, f"「{name}」")
+    return text
+
+
+def render_verdict_badge(verdict, summary=""):
+    """결론 배지 + 요약을 시각적 위계가 명확한 HTML 블록으로 렌더링"""
     badges = {
-        "approved":    ("🟢 위험 요소 미발견 (사내변호사 확인 권장)", "success"),
-        "conditional": ("🟡 수정 필요 사항 발견", "warning"),
-        "rejected":    ("🔴 중대 위험 발견 (진행 보류 권고)", "error"),
+        "approved":    ("🟢 위험 요소 미발견", "(사내변호사 확인 권장)", "#E8F5E9", "#2E7D32"),
+        "conditional": ("🟡 수정 필요 사항 발견", "", "#FFF8E1", "#F57F17"),
+        "rejected":    ("🔴 중대 위험 발견", "(진행 보류 권고)", "#FCE4EC", "#C62828"),
     }
-    label, msg_type = badges.get(verdict, ("⚪ 판단 보류", "info"))
-    getattr(st, msg_type)(label)
+    label, sub, bg_color, text_color = badges.get(verdict, ("⚪ 판단 보류", "", "#F5F5F5", "#616161"))
+
+    # summary에서 마크다운 ** 제거 (raw text로 사용)
+    clean_summary = summary.replace("**", "").strip() if summary else ""
+
+    # 요약 텍스트를 줄 단위로 분리하여 리스트 형태로
+    summary_html = ""
+    if clean_summary:
+        lines = [l.strip() for l in clean_summary.split("\n") if l.strip()]
+        if len(lines) == 1:
+            summary_html = f'<div style="font-size:15px;line-height:1.6;margin-top:10px;color:#333;">{lines[0]}</div>'
+        else:
+            items = "".join(f"<li>{l.lstrip('- •')}</li>" for l in lines)
+            summary_html = f'<ul style="font-size:14px;line-height:1.8;margin-top:10px;color:#333;padding-left:20px;">{items}</ul>'
+
+    html = f"""
+    <div style="background:{bg_color};border-left:4px solid {text_color};border-radius:4px;padding:16px 20px;margin-bottom:12px;">
+        <div style="font-size:20px;font-weight:700;color:{text_color};">{label} <span style="font-size:13px;font-weight:400;color:#888;">{sub}</span></div>
+        {summary_html}
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _section_header(icon, title):
+    """통일된 섹션 헤더 (h3보다 작고 정돈된 스타일)"""
+    st.markdown(
+        f'<div style="font-size:15px;font-weight:600;color:#333;padding:8px 0 4px 0;'
+        f'border-bottom:2px solid #E8E8E8;margin:16px 0 8px 0;">'
+        f'{icon} {title}</div>',
+        unsafe_allow_html=True
+    )
+
+def _detect_doc_type_label(rule_text):
+    """applicable_rule 텍스트에서 문서 종류를 판별하여 라벨 반환"""
+    if not rule_text or rule_text in ("해당 없음", "없음", "해당 규정 없음"):
+        return "🏛️ 적용 사규", "사규"
+    _t = rule_text
+    # 계약서 판별
+    if any(kw in _t for kw in ["계약서", "기본계약", "거래계약"]):
+        return "📄 적용 계약서", "계약서"
+    # 약정서 판별
+    if any(kw in _t for kw in ["약정서", "약정"]):
+        return "📝 적용 약정서", "약정서"
+    # 기본: 사규
+    return "🏛️ 적용 사규", "사규"
+
 
 def render_issues_table(issues, citation_results):
     if not issues: return
     risk_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+    risk_labels = {"high": "고위험", "medium": "주의", "low": "양호"}
     for issue in issues:
         risk = issue.get("risk_level", "medium")
         icon = risk_icons.get(risk, "⚪")
-        with st.expander(f"{icon} 쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '제목 없음')}", expanded=(risk == "high")):
-            if issue.get("target_clause"):
-                st.markdown(f"**📌 검토 대상 원문:**")
-                st.code(issue["target_clause"], language="text")
+        rlabel = risk_labels.get(risk, "")
+        with st.expander(f"{icon} **[{rlabel}]** 쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '제목 없음')}", expanded=(risk == "high")):
+            _tc = issue.get("target_clause", "")
+            _user_msgs = [m for m in st.session_state.get("messages", []) if m.get("role") == "user"]
+            _last_q = _user_msgs[-1]["content"][:200] if _user_msgs else ""
+            _tc_skip = len(_tc) <= 30 or _tc.strip() == _last_q.strip()
+            if _tc and not _tc_skip:
+                st.caption("📌 검토 대상 원문")
+                st.code(_tc, language="text")
+
+            # ── 법령 / 사규 2컬럼 ──
             col1, col2 = st.columns(2)
             with col1:
                 law_ref = issue.get("applicable_law", "")
@@ -1917,21 +2681,24 @@ def render_issues_table(issues, citation_results):
                             break
                     st.markdown(f"**⚖️ 적용 법령:** {law_ref} {verified}")
                 if issue.get("law_analysis"):
-                    st.markdown(f"**🔍 법령·행정규칙·판례 관점:** {issue['law_analysis']}")
+                    st.caption(issue["law_analysis"])
             with col2:
-                if issue.get("applicable_rule"):
-                    st.markdown(f"**🏛️ 적용 사규:** {issue['applicable_rule']}")
+                rule = issue.get("applicable_rule", "")
+                if rule:
+                    _doc_label, _doc_type = _detect_doc_type_label(rule)
+                    st.markdown(f"**{_doc_label}:** {_wrap_saryu_brackets(rule)}")
                 if issue.get("rule_analysis"):
-                    st.markdown(f"**🔍 사규 관점:** {issue['rule_analysis']}")
+                    st.caption(_wrap_saryu_brackets(issue["rule_analysis"]))
+
+            # ── 종합 실무 권고 (강조) ──
             if issue.get("recommendation"):
-                st.info(f"💡 **종합 실무 권고:** {issue['recommendation']}")
+                st.success(f"💡 **종합 실무 권고:** {issue['recommendation']}")
 
 def render_alternative_clause(clause):
     if clause and clause != "null":
-        st.markdown("---")
-        st.markdown("### 📝 수정 대안 조항 (초안)")
-        st.caption("아래 조항을 복사하여 협상 메일이나 수정 계약서에 활용하세요.")
-        st.code(clause, language="text")
+        _section_header("📝", "수정 대안 제안")
+        st.caption("아래 내용을 참고하여 수정 방향을 검토하세요. (AI 초안이므로 반드시 법무 담당자 확인 필요)")
+        st.info(clause)
 
 def _apply_shading(paragraph, hex_color):
     """단락에 배경 음영(shading) 적용 — Word '음영' 스타일과 동일 효과"""
@@ -2062,12 +2829,29 @@ def generate_review_docx(json_data, detail_text, query_text):
         if json_data.get("verdict_reason"):
             doc.add_paragraph(json_data["verdict_reason"])
 
+        # ── 2. MD Action Plan ──
+        if json_data.get("action_plan"):
+            _add_shaded_heading(doc, "📌 MD Action Plan", level=2, shade_color=SHADE_H2)
+            p_ap = doc.add_paragraph(json_data["action_plan"])
+            _apply_shading(p_ap, "E2EFDA")  # 연한 초록 강조
+
+        # ── 3. 수정 대안 제안 ──
+        alt = json_data.get("alternative_clause")
+        if alt and alt != "null":
+            _add_shaded_heading(doc, "📝 수정 대안 제안", level=2, shade_color=SHADE_H2)
+            p_alt_desc = doc.add_paragraph("아래 내용을 참고하여 수정 방향을 검토하세요. (AI 초안이므로 반드시 법무 담당자 확인 필요)")
+            p_alt_desc.runs[0].font.size = Pt(8)
+            p_alt_desc.runs[0].font.color.rgb = RGBColor(128, 128, 128)
+            p_alt = doc.add_paragraph(alt)
+            p_alt.paragraph_format.left_indent = Cm(0.5)
+            _apply_shading(p_alt, SHADE_ALT)
+
         doc.add_paragraph("")
 
-        # ── 쟁점별 분석 (화면의 expander 구조와 동일) ──
+        # ── 4~5. 쟁점별 분석 ──
         issues = json_data.get("issues", [])
         if issues:
-            _add_shaded_heading(doc, "쟁점별 교차 분석", level=2, shade_color=SHADE_H2)
+            _add_shaded_heading(doc, "⚖️ 쟁점별 교차 분석", level=2, shade_color=SHADE_H2)
             risk_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
             risk_labels = {"high": "[위험]", "medium": "[주의]", "low": "[양호]"}
             risk_shades = {"high": "FCE4EC", "medium": "FFF8E1", "low": "E8F5E9"}
@@ -2081,10 +2865,13 @@ def generate_review_docx(json_data, detail_text, query_text):
                 h = doc.add_heading(f"{icon} 쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '제목 없음')} {label}", level=3)
                 _apply_shading(h, risk_shades.get(risk, SHADE_H3))
 
-                # 📌 검토 대상 원문 (회색 음영 박스)
-                if issue.get("target_clause"):
+                # 📌 검토 대상 원문 (짧거나 질문 동일 시 생략)
+                _dtc = issue.get("target_clause", "")
+                _du_msgs = [m for m in st.session_state.get("messages", []) if m.get("role") == "user"]
+                _dlast = _du_msgs[-1]["content"][:200] if _du_msgs else ""
+                if _dtc and len(_dtc) > 30 and _dtc.strip() != _dlast.strip():
                     doc.add_paragraph("📌 검토 대상 원문:").runs[0].bold = True
-                    p_clause = doc.add_paragraph(issue["target_clause"])
+                    p_clause = doc.add_paragraph(_dtc)
                     p_clause.paragraph_format.left_indent = Cm(0.5)
                     _apply_shading(p_clause, SHADE_QUOTE)
                     for run in p_clause.runs:
@@ -2103,17 +2890,18 @@ def generate_review_docx(json_data, detail_text, query_text):
                     run_label.bold = True
                     p.add_run(issue["law_analysis"])
 
-                # 🏛️ 적용 사규 + 사규 관점
+                # 적용 사규/계약서/약정서 + 관점
+                _dlabel, _dtype = _detect_doc_type_label(issue.get("applicable_rule", ""))
                 if issue.get("applicable_rule"):
                     p = doc.add_paragraph()
-                    run_label = p.add_run("🏛️ 적용 사규: ")
+                    run_label = p.add_run(f"{_dlabel}: ")
                     run_label.bold = True
-                    p.add_run(issue["applicable_rule"])
+                    p.add_run(_wrap_saryu_brackets(issue["applicable_rule"]))
                 if issue.get("rule_analysis"):
                     p = doc.add_paragraph()
-                    run_label = p.add_run("🔍 사규 관점: ")
+                    run_label = p.add_run(f"🔍 {_dtype} 관점: ")
                     run_label.bold = True
-                    p.add_run(issue["rule_analysis"])
+                    p.add_run(_wrap_saryu_brackets(issue["rule_analysis"]))
 
                 # 💡 종합 실무 권고 (시안 음영 박스 — 화면의 st.info와 동일)
                 if issue.get("recommendation"):
@@ -2125,23 +2913,7 @@ def generate_review_docx(json_data, detail_text, query_text):
 
                 doc.add_paragraph("")  # 쟁점 간 간격
 
-        # ── MD Action Plan ──
-        if json_data.get("action_plan"):
-            _add_shaded_heading(doc, "MD Action Plan", level=2, shade_color=SHADE_H2)
-            doc.add_paragraph(json_data["action_plan"])
-
-        # ── 수정 대안 조항 (보라 음영 박스) ──
-        alt = json_data.get("alternative_clause")
-        if alt and alt != "null":
-            _add_shaded_heading(doc, "📝 수정 대안 조항 (초안)", level=2, shade_color=SHADE_H2)
-            p_alt_desc = doc.add_paragraph("아래 조항을 복사하여 협상 메일이나 수정 계약서에 활용하세요.")
-            p_alt_desc.runs[0].font.size = Pt(8)
-            p_alt_desc.runs[0].font.color.rgb = RGBColor(128, 128, 128)
-            p_alt = doc.add_paragraph(alt)
-            p_alt.paragraph_format.left_indent = Cm(0.5)
-            _apply_shading(p_alt, SHADE_ALT)
-
-        # 상세 전문 제거 — 본문과 형량 불일치 문제의 근본 원인이므로 삭제
+        # (수정 대안 제안은 위쪽에서 이미 출력됨)
 
     else:
         # JSON 파싱 실패 시 원문 그대로
@@ -2245,6 +3017,21 @@ def main():
         color: #FFFFFF !important;
     }
 
+    /* 6-a. 검토 결과 Alert 블록 (success/info 등) — 본문과 동일 크기 */
+    [data-testid="stAlert"] {
+        font-size: 14px !important;
+        line-height: 1.7 !important;
+    }
+    [data-testid="stAlert"] p {
+        font-size: 14px !important;
+    }
+
+    /* 6-b. Expander 제목 — 정돈된 크기 */
+    [data-testid="stExpander"] summary span {
+        font-size: 14px !important;
+        font-weight: 500 !important;
+    }
+
     /* 6. 사이드바 */
     [data-testid="stSidebar"] { 
         background-color: #FAFAFA !important;
@@ -2330,15 +3117,23 @@ def main():
     with st.sidebar:
         st.markdown("## 🤝 공정거래 실무 어시스턴트 v2.1")
         st.caption("면세점 MD 바이어 전용")
-        
-        # 1. 자동 보안 마스킹 안내 (DLP) - 최상단 배치
-        st.markdown("### 🛡️ 정보보안 (DLP) 가동 중")
-        st.success(
-            "⚠️ **정보 유출 방지 시스템 작동 안내**\n\n"
-            "외부 클라우드 AI 서버로 당사의 핵심 기밀 및 협력사 정보가 유출되는 것을 원천 차단하기 위해, **문서 내 민감 정보는 모두 AI 전송 전에 자동 블라인드(마스킹) 처리됩니다.**"
-        )
-        st.caption("• **자동 차단:** 주민/외국인번호, 휴대전화, 이메일, 사업자/법인번호, 계좌번호, 당사 명칭", unsafe_allow_html=True)
-        st.caption("• **수동 차단:** 하단 텍스트 입력창에 기재한 '협력사명'", unsafe_allow_html=True)
+
+        # 1. DLP 보안 마스킹 — 전역 설정 (대화 시작 전 세팅)
+        with st.expander("🛡️ 정보보안 (DLP) 설정", expanded=False):
+            st.caption("주민번호·전화번호·이메일·사업자번호·당사 명칭은 **자동 마스킹**됩니다.")
+            if "dlp_partner" not in st.session_state:
+                st.session_state.dlp_partner = ""
+            st.session_state.dlp_partner = st.text_input(
+                "🏢 검토 대상 협력사명 (보안 마스킹)",
+                value=st.session_state.dlp_partner,
+                placeholder="예: 에르메스, 샤넬",
+                key="sidebar_dlp_partner",
+                help="입력된 협력사명은 AI 전송 시 █협력사█로 자동 치환됩니다."
+            )
+            if st.session_state.dlp_partner:
+                st.success(f"🔒 마스킹 대상: **{st.session_state.dlp_partner}**")
+            else:
+                st.caption("⚠️ 미입력 시 자동 마스킹만 적용됩니다.")
 
         # 법령 DB 업데이트 이력 (일반 사용자 대상)
         law_count = len(st.session_state.laws_db)
@@ -2440,8 +3235,28 @@ def main():
 
         st.divider()
 
-        # 5. 관리자용 DB 관리는 가장 아래 숨김 (Expander)
-        with st.expander("⚙️ 기준 문서 DB 관리 (관리자 전용)", expanded=False):
+        # 5. 관리자 패널 — 비밀번호 인증 게이트
+        if "admin_unlocked" not in st.session_state:
+            st.session_state.admin_unlocked = False
+
+        _admin_label = "🔓 관리자 도구 (인증됨)" if st.session_state.admin_unlocked else "🔐 관리자 모드"
+        with st.expander(_admin_label, expanded=False):
+            if not st.session_state.admin_unlocked:
+                admin_pw = st.text_input("관리자 비밀번호", type="password", key="admin_pw_input")
+                if st.button("인증", key="admin_auth_btn", use_container_width=True):
+                    _app_pw = os.environ.get("APP_PASSWORD", "")
+                    if admin_pw and admin_pw == _app_pw:
+                        st.session_state.admin_unlocked = True
+                        st.rerun()
+                    else:
+                        st.error("비밀번호가 올바르지 않습니다.")
+            else:
+                if st.button("🔒 관리자 모드 잠금", key="admin_lock", use_container_width=True):
+                    st.session_state.admin_unlocked = False
+                    st.rerun()
+
+        if st.session_state.admin_unlocked:
+         with st.expander("⚙️ 기준 문서 DB 관리", expanded=False):
             law_count = len(st.session_state.laws_db)
             if law_count > 0:
                 # 최신 업데이트 일시 추출
@@ -2510,9 +3325,9 @@ def main():
                         try:
                             import anthropic as _anth
                             import requests as _req
-                            
+
                             st.caption(f"anthropic SDK: {_anth.__version__}")
-                            
+
                             # Step 1: MCP 서버 health check
                             st.caption("Step 1: MCP 서버 health check...")
                             try:
@@ -2520,7 +3335,24 @@ def main():
                                 st.caption(f"  Health: HTTP {hc.status_code} — {hc.text[:100]}")
                             except Exception as hc_err:
                                 st.warning(f"  Health check 실패: {hc_err}")
-                            
+
+                            # Step 1.5: MCP 직접 연결 테스트 (Claude API 불필요)
+                            st.caption("Step 1.5: MCP 직접 호출 테스트 (Claude API 불필요)...")
+                            try:
+                                mcp_client = _get_mcp_client()
+                                if mcp_client.initialize():
+                                    st.caption("  ✅ MCP 직접 연결 초기화 성공")
+                                    test_result = mcp_client.call_tool("search_law", {"query": "관세법", "display": 2})
+                                    if test_result:
+                                        st.success(f"  ✅ MCP 직접 search_law 성공!")
+                                        st.caption(f"  결과: {str(test_result)[:300]}")
+                                    else:
+                                        st.warning("  ⚠️ MCP 직접 search_law 응답 없음")
+                                else:
+                                    st.warning("  ⚠️ MCP 직접 연결 초기화 실패")
+                            except Exception as direct_err:
+                                st.warning(f"  ⚠️ MCP 직접 연결 실패: {str(direct_err)[:200]}")
+
                             # Step 2: MCP 엔드포인트 직접 접근
                             st.caption("Step 2: MCP 엔드포인트 확인...")
                             try:
@@ -2528,7 +3360,7 @@ def main():
                                 st.caption(f"  /mcp: HTTP {ep.status_code} — {ep.text[:200]}")
                             except Exception as ep_err:
                                 st.caption(f"  /mcp 접근: {ep_err}")
-                            
+
                             # Step 3: Anthropic API + MCP
                             st.caption("Step 3: Anthropic API + MCP connector...")
                             _client = init_anthropic()
@@ -2588,6 +3420,77 @@ def main():
                         except Exception as upd_err:
                             st.error(f"❌ 업데이트 오류: {upd_err}")
                             logger.error(f"법령 DB 업데이트 실패: {upd_err}")
+
+            st.markdown("---")
+
+            # API 헬스체크 (test_api.py 통합)
+            st.markdown("**🔑 API 키 헬스체크**")
+            if st.button("🔑 전체 API 상태 점검", use_container_width=True, key="api_health"):
+                with st.spinner("API 키 상태 점검 중..."):
+                    health_results = {"pass": 0, "warn": 0, "fail": 0}
+
+                    # Supabase
+                    try:
+                        sb = init_supabase()
+                        if sb:
+                            res = sb.table("docs").select("id").limit(1).execute()
+                            st.success("✅ Supabase 연결 정상")
+                            health_results["pass"] += 1
+                        else:
+                            st.error("❌ Supabase 클라이언트 없음")
+                            health_results["fail"] += 1
+                    except Exception as e:
+                        st.error(f"❌ Supabase: {str(e)[:100]}")
+                        health_results["fail"] += 1
+
+                    # Gemini
+                    try:
+                        from google import genai
+                        from google.genai import types
+                        gclient = genai.Client(api_key=get_secret("GEMINI_API_KEY"))
+                        resp = gclient.models.generate_content(
+                            model=GEMINI_MODELS[0],
+                            contents=[types.Content(role="user", parts=[types.Part(text="테스트. '정상'이라고만 답해.")])],
+                            config=types.GenerateContentConfig(system_instruction="'정상'이라고만 답하세요."),
+                        )
+                        st.success(f"✅ Gemini ({GEMINI_MODELS[0]}) 정상 — {(resp.text or '').strip()[:20]}")
+                        health_results["pass"] += 1
+                    except Exception as e:
+                        err = str(e).lower()
+                        if "quota" in err or "429" in err:
+                            st.warning(f"⚠️ Gemini 쿼터 초과 (키는 유효)")
+                            health_results["warn"] += 1
+                        else:
+                            st.error(f"❌ Gemini: {str(e)[:100]}")
+                            health_results["fail"] += 1
+
+                    # Claude
+                    try:
+                        aclient = init_anthropic()
+                        resp = aclient.messages.create(
+                            model=CLAUDE_MODEL, max_tokens=50,
+                            system="'정상'이라고만 답하세요.",
+                            messages=[{"role": "user", "content": "테스트. '정상'이라고만 답해."}],
+                        )
+                        st.success(f"✅ Claude ({CLAUDE_MODEL}) 정상 — {resp.content[0].text.strip()[:20]}")
+                        st.caption(f"  토큰: 입력 {resp.usage.input_tokens} / 출력 {resp.usage.output_tokens}")
+                        health_results["pass"] += 1
+                    except Exception as e:
+                        err = str(e).lower()
+                        if "rate" in err or "429" in err:
+                            st.warning(f"⚠️ Claude Rate Limit (키는 유효)")
+                            health_results["warn"] += 1
+                        else:
+                            st.error(f"❌ Claude: {str(e)[:100]}")
+                            health_results["fail"] += 1
+
+                    # 결과 요약
+                    if health_results["fail"] == 0 and health_results["warn"] == 0:
+                        st.success(f"🎉 전체 통과 (PASS {health_results['pass']})")
+                    elif health_results["fail"] == 0:
+                        st.warning(f"⚠️ PASS {health_results['pass']} / WARN {health_results['warn']}")
+                    else:
+                        st.error(f"⛔ PASS {health_results['pass']} / WARN {health_results['warn']} / FAIL {health_results['fail']}")
 
             st.markdown("---")
 
@@ -2756,22 +3659,360 @@ def main():
                         with st.spinner("MCP로 조문 조회 + Claude로 블록 초안 생성 중..."):
                             try:
                                 # MCP로 조문 원문 가져오기
+                                import re as _re_block
                                 law_texts = []
+                                prev_law_name = ""  # 이전 줄의 법령명 컨텍스트 유지
+
+                                # ── 법령 약칭 → 정식명칭 매핑 (동명이법 혼동 방지) ──
+                                _LAW_ALIAS = {
+                                    "표시광고법": "표시·광고의 공정화에 관한 법률",
+                                    "표시·광고법": "표시·광고의 공정화에 관한 법률",
+                                    "표시광고의공정화에관한법률": "표시·광고의 공정화에 관한 법률",
+                                    "식품표시광고법": "식품 등의 표시·광고에 관한 법률",
+                                    "정보통신망법": "정보통신망 이용촉진 및 정보보호 등에 관한 법률",
+                                    "개인정보보호법": "개인정보 보호법",
+                                    "부정경쟁방지법": "부정경쟁방지 및 영업비밀보호에 관한 법률",
+                                    "환경기술산업법": "환경기술 및 환경산업 지원법",
+                                    "자본시장법": "자본시장과 금융투자업에 관한 법률",
+                                    "전자상거래법": "전자상거래 등에서의 소비자보호에 관한 법률",
+                                    "소비자기본법": "소비자기본법",
+                                    "AI기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+                                    "AI 기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+                                    "인공지능기본법": "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+                                }
+
+                                def _resolve_law_name(name):
+                                    """약칭을 정식명칭으로 변환. 괄호 안 설명 제거 후 매칭."""
+                                    clean = _re_block.sub(r'\s*\(.*?\)\s*', '', name).strip()
+                                    # 약칭 매핑에서 찾기
+                                    for alias, full in _LAW_ALIAS.items():
+                                        if alias in clean.replace(" ", "").replace("·", ""):
+                                            return full
+                                    return name  # 매핑 없으면 원본 유지
+
+                                # 입력 전처리: 슬래시 구분 조문 분리, 컨텍스트 계승
+                                parsed_queries = []
                                 for law_line in topic_laws.strip().split("\n"):
                                     law_line = law_line.strip()
-                                    if law_line:
-                                        success, raw = call_mcp_law(f"'{law_line}' 조문 전문 알려줘")
-                                        if success:
-                                            law_texts.append(f"[{law_line}]\n{raw[:500]}")
+                                    if not law_line:
+                                        continue
+
+                                    # 괄호 안 설명 분리 보존 (예: "환경기술산업법 제16조의10 (환경성 표시·광고)")
+                                    paren_note = ""
+                                    paren_match = _re_block.search(r'\(([^)]+)\)\s*$', law_line)
+                                    if paren_match:
+                                        paren_note = paren_match.group(1)
+                                        law_line = law_line[:paren_match.start()].strip()
+
+                                    # 슬래시 구분 조문 분리 (예: "표시광고법 제3조/제7조/제17조")
+                                    slash_match = _re_block.search(r'(.+?)\s*(제\d+조(?:의\d+)?(?:\s*/\s*제\d+조(?:의\d+)?)+)', law_line)
+                                    if slash_match:
+                                        base_name = _resolve_law_name(slash_match.group(1).strip())
+                                        articles = _re_block.findall(r'제\d+조(?:의\d+)?', slash_match.group(2))
+                                        for art in articles:
+                                            parsed_queries.append(f"{base_name} {art}")
+                                        prev_law_name = base_name
+                                        continue
+
+                                    # 법령명 추출 시도
+                                    name_match = _re_block.search(
+                                        r'([A-Za-z0-9가-힣ㆍ·\s]+(?:법률?|법|고시|시행령|가이드라인|지침|예규))', law_line)
+                                    art_match = _re_block.search(r'(제\d+조(?:의\d+)?)', law_line)
+
+                                    if name_match:
+                                        cur_law = _resolve_law_name(name_match.group(1).strip())
+                                        # "시행령 제22조" → "AI 기본법 시행령 제22조" (이전 법령 컨텍스트 활용)
+                                        if cur_law in ("시행령",) and prev_law_name:
+                                            parent = _re_block.sub(r'\s*시행령$', '', prev_law_name).strip()
+                                            if parent:
+                                                cur_law = f"{parent} 시행령"
+                                        prev_law_name = cur_law
+                                        if art_match:
+                                            parsed_queries.append(f"{cur_law} {art_match.group(1)}")
                                         else:
-                                            law_texts.append(f"[{law_line}] (조회 실패)")
+                                            parsed_queries.append(cur_law)
+                                    elif art_match and prev_law_name:
+                                        # 조문번호만 있으면 이전 법령명 계승
+                                        parsed_queries.append(f"{prev_law_name} {art_match.group(1)}")
+                                    else:
+                                        # 가이드라인 등 비정형 참조 (괄호 설명 복원)
+                                        full_ref = law_line
+                                        if paren_note:
+                                            full_ref += f" ({paren_note})"
+                                        parsed_queries.append(full_ref)
+
+                                # ── 제재 관련 조문 자동 보강 ──
+                                _penalty_keywords = {"과태료", "과징금", "시정조치", "벌칙", "제재", "형사", "처벌", "벌금"}
+                                _has_penalty_kw = bool(_penalty_keywords & set(topic_keywords.replace(",", " ").split()))
+                                _extra_articles = []
+
+                                # 핵심 법령의 알려진 제재 조항 맵 (search_ai_law 미스 방지)
+                                _KNOWN_PENALTY_ARTICLES = {
+                                    "표시·광고의 공정화에 관한 법률": ["제7조", "제9조", "제17조"],
+                                    "환경기술 및 환경산업 지원법": ["제16조의11", "제16조의12", "제16조의13", "제16조의14"],
+                                    "부정경쟁방지 및 영업비밀보호에 관한 법률": ["제4조", "제18조"],
+                                    "전자상거래 등에서의 소비자보호에 관한 법률": ["제32조", "제34조", "제45조"],
+                                    "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법": ["제43조"],
+                                    "개인정보 보호법": ["제64조", "제71조", "제75조"],
+                                }
+                                if _has_penalty_kw:
+                                    # 방법 0: 알려진 제재 조항 직접 추가 (가장 확실)
+                                    _seen_law_names = set()
+                                    for pq in parsed_queries:
+                                        _lm = _re_block.search(r'(.+?)\s+제\d+조', pq)
+                                        if _lm:
+                                            _seen_law_names.add(_lm.group(1).strip())
+                                    for _sln in _seen_law_names:
+                                        if _sln in _KNOWN_PENALTY_ARTICLES:
+                                            for _kpa in _KNOWN_PENALTY_ARTICLES[_sln]:
+                                                _full_kpa = f"{_sln} {_kpa}"
+                                                if _full_kpa not in parsed_queries and _full_kpa not in _extra_articles:
+                                                    _extra_articles.append(_full_kpa)
+
+                                if _has_penalty_kw:
+                                    # 방법 1: 제X조의N → 인접 의N+1~N+4 자동 추가
+                                    for pq in list(parsed_queries):
+                                        art_m = _re_block.search(r'(.+?)\s+제(\d+)조의(\d+)$', pq)
+                                        if art_m:
+                                            base, art_num, sub_num = art_m.group(1), int(art_m.group(2)), int(art_m.group(3))
+                                            for delta in range(1, 5):
+                                                neighbor = f"{base} 제{art_num}조의{sub_num + delta}"
+                                                if neighbor not in parsed_queries and neighbor not in _extra_articles:
+                                                    _extra_articles.append(neighbor)
+
+                                    # 방법 2: search_ai_law로 법령별 제재 조항 탐색
+                                    # 법령별 기존 조문번호 범위 수집 (범위 밖 조문 필터링용)
+                                    _seen_laws = {}  # {법령명: [조문번호int, ...]}
+                                    for pq in parsed_queries:
+                                        _lm = _re_block.search(r'(.+?)\s+제(\d+)조', pq)
+                                        if _lm:
+                                            _lname = _lm.group(1).strip()
+                                            _anum = int(_lm.group(2))
+                                            _seen_laws.setdefault(_lname, []).append(_anum)
+                                    try:
+                                        mcp = _get_mcp_client()
+                                        if mcp.initialize():
+                                            for _sl, _existing_arts in _seen_laws.items():
+                                                _sl_short = _sl.split()[-1] if len(_sl) > 10 else _sl  # 약칭 추출 (마지막 단어)
+                                                for _pkw in ["과징금", "시정조치", "벌칙"]:
+                                                    _ai_r = mcp.call_tool("search_ai_law", {
+                                                        "query": f"{_sl} {_pkw}",
+                                                        "search": "0", "display": 3, "page": 1
+                                                    })
+                                                    if not _ai_r:
+                                                        continue
+                                                    # 결과를 줄 단위로 파싱 — 해당 법령명이 포함된 줄에서만 조문번호 추출
+                                                    for _line in _ai_r.split("\n"):
+                                                        # 해당 법령명(정식 또는 약칭)이 같은 줄에 있어야 함
+                                                        if _sl not in _line and _sl_short not in _line:
+                                                            continue
+                                                        _found_arts = _re_block.findall(r'제(\d+)조(?:의(\d+))?', _line)
+                                                        for _fa in _found_arts:
+                                                            _art_num = int(_fa[0])
+                                                            _art_str = f"제{_fa[0]}조" + (f"의{_fa[1]}" if _fa[1] else "")
+                                                            _full_q = f"{_sl} {_art_str}"
+                                                            if _full_q in parsed_queries or _full_q in _extra_articles:
+                                                                continue
+                                                            _extra_articles.append(_full_q)
+                                    except Exception as _pen_err:
+                                        logger.warning(f"제재 조항 AI 탐색 실패: {_pen_err}")
+
+                                if _extra_articles:
+                                    # 중복 제거 + 최대 10건 제한
+                                    _extra_articles = list(dict.fromkeys(_extra_articles))[:10]
+                                    # 존재 검증: 자동추가 조문이 실제 존재하는지 MCP로 확인
+                                    _verified_extras = []
+                                    try:
+                                        mcp = _get_mcp_client()
+                                        if mcp.initialize():
+                                            for _eq in _extra_articles:
+                                                _vr = mcp.call_tool("search_ai_law", {
+                                                    "query": _eq, "search": "0", "display": 1, "page": 1
+                                                })
+                                                if _vr and len(_vr) > 30:
+                                                    # "찾을 수 없" 또는 "해당 조문" 에러 체크
+                                                    if "찾을 수 없" not in _vr and "존재하지 않" not in _vr:
+                                                        _verified_extras.append(_eq)
+                                                    else:
+                                                        logger.info(f"자동추가 조문 미존재 확인: {_eq}")
+                                                else:
+                                                    logger.info(f"자동추가 조문 검증 실패: {_eq}")
+                                    except Exception:
+                                        _verified_extras = _extra_articles  # 검증 실패 시 전체 유지
+                                    _extra_articles = _verified_extras
+                                    parsed_queries.extend(_extra_articles)
+
+                                st.caption(f"📋 파싱된 조회 목록: {len(parsed_queries)}건")
+                                for pq in parsed_queries:
+                                    is_extra = pq in _extra_articles if _extra_articles else False
+                                    st.caption(f"  → {pq}" + (" ⚡자동추가(제재조항)" if is_extra else ""))
+
+                                # ── 배치 조회 시도 (get_batch_articles) ──
+                                # 법령별로 그룹핑: {법령명: [조문번호, ...]}
+                                _law_groups = {}
+                                _non_article_queries = []  # 조문번호 없는 항목 (가이드라인 등)
+                                for pq in parsed_queries:
+                                    _am = _re_block.search(r'(.+?)\s+(제\d+조(?:의\d+)?)\s*$', pq)
+                                    if _am:
+                                        _lname, _art = _am.group(1).strip(), _am.group(2)
+                                        _law_groups.setdefault(_lname, []).append(_art)
+                                    else:
+                                        _non_article_queries.append(pq)
+
+                                _batch_done = False
+                                if _law_groups:
+                                    try:
+                                        mcp = _get_mcp_client()
+                                        if mcp.initialize():
+                                            # Step 1: MST 사전 → search_law 폴백
+                                            _MST_DICT_REF = {
+                                                "표시·광고의 공정화에 관한 법률": "268659",
+                                                "식품 등의 표시·광고에 관한 법률": "269957",
+                                                "관세법": "280363", "상표법": "279819",
+                                                "부정경쟁방지 및 영업비밀보호에 관한 법률": "277201",
+                                                "형법": "284025", "소비자기본법": "283837",
+                                                "정보통신망 이용촉진 및 정보보호 등에 관한 법률": "285199",
+                                                "환경기술 및 환경산업 지원법": "276823",
+                                                "개인정보 보호법": "283839",
+                                                "전자상거래 등에서의 소비자보호에 관한 법률": "282793",
+                                                "자본시장과 금융투자업에 관한 법률": "285183",
+                                                "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법": "282791",
+                                            }
+                                            _mst_map = {}  # {법령명: mst}
+                                            for lname in _law_groups:
+                                                # 1차: MST 사전 (API 0회)
+                                                if lname in _MST_DICT_REF:
+                                                    _mst_map[lname] = _MST_DICT_REF[lname]
+                                                    logger.info(f"배치 MST 사전히트: {lname} → {_MST_DICT_REF[lname]}")
+                                                else:
+                                                    # 2차: search_law 폴백 (API 1회)
+                                                    sr = mcp.call_tool("search_law", {"query": lname, "display": 3})
+                                                    if sr:
+                                                        _mm = _re_block.search(r'(?:mst|법령일련번호)[:\s]*["\']?(\d{5,7})', sr)
+                                                        if _mm:
+                                                            _mst_map[lname] = _mm.group(1)
+                                                            logger.info(f"배치 MST 폴백: {lname} → {_mm.group(1)}")
+
+                                            # Step 2: get_batch_articles 일괄 호출
+                                            if _mst_map:
+                                                _laws_param = []
+                                                for lname, arts in _law_groups.items():
+                                                    if lname in _mst_map:
+                                                        _laws_param.append({"mst": _mst_map[lname], "articles": arts})
+
+                                                if _laws_param:
+                                                    batch_result = mcp.call_tool("get_batch_articles", {"laws": _laws_param})
+                                                    if batch_result and len(batch_result) > 50:
+                                                        # 배치 결과를 법령+조문별로 분리
+                                                        _batch_done = True
+                                                        # 배치 결과에서 각 조문 텍스트 추출
+                                                        for lname, arts in _law_groups.items():
+                                                            for art in arts:
+                                                                # 배치 결과에서 해당 조문 찾기
+                                                                _art_num = _re_block.sub(r'[^0-9]', '', art.split("조의")[0])
+                                                                _pattern = _re_block.compile(
+                                                                    rf'(?:제{_art_num}조|{art}).*?(?=제\d+조[의\s]|$)',
+                                                                    _re_block.DOTALL
+                                                                )
+                                                                _found = _pattern.search(batch_result)
+                                                                if _found:
+                                                                    law_texts.append(f"[{lname} {art}]\n{_found.group()[:3000]}")
+                                                                else:
+                                                                    # 배치 결과에 포함되어 있지만 패턴 매칭 실패 시
+                                                                    if art in batch_result or _art_num in batch_result:
+                                                                        law_texts.append(f"[{lname} {art}]\n{batch_result[:3000]}")
+                                                                    else:
+                                                                        law_texts.append(f"[{lname} {art}] (배치 조회에서 미발견)")
+                                                        logger.info(f"get_batch_articles 성공: {len(_laws_param)}개 법령, {sum(len(a) for a in _law_groups.values())}건 조문")
+
+                                            # MST 못 찾은 법령은 개별 조회로 폴백
+                                            for lname, arts in _law_groups.items():
+                                                if lname not in _mst_map:
+                                                    for art in arts:
+                                                        q = f"{lname} {art}"
+                                                        success, raw = call_mcp_law(f"'{q}' 조문 전문 알려줘")
+                                                        if success:
+                                                            law_texts.append(f"[{q}]\n{raw[:3000]}")
+                                                        else:
+                                                            law_texts.append(f"[{q}] (조회 실패)")
+                                    except Exception as batch_err:
+                                        logger.warning(f"배치 조회 실패, 개별 폴백: {batch_err}")
+
+                                # 배치 실패 시 기존 개별 호출 폴백
+                                if not _batch_done:
+                                    for pq in parsed_queries:
+                                        # 이미 law_texts에 추가된 항목은 스킵
+                                        if any(pq in lt for lt in law_texts):
+                                            continue
+                                        success, raw = call_mcp_law(f"'{pq}' 조문 전문 알려줘")
+                                        if success:
+                                            law_texts.append(f"[{pq}]\n{raw[:3000]}")
+                                        else:
+                                            law_texts.append(f"[{pq}] (조회 실패)")
+
+                                # 비조문 항목 (가이드라인, 예규, 심사지침 등) — 3단계 폴백
+                                for naq in _non_article_queries:
+                                    if any(naq in lt for lt in law_texts):
+                                        continue
+                                    _found_naq = False
+
+                                    # 1차: call_mcp_law (search_law → get_article_detail)
+                                    success, raw = call_mcp_law(f"'{naq}' 조문 전문 알려줘")
+                                    if success and raw and len(raw) > 30:
+                                        law_texts.append(f"[{naq}]\n{raw[:3000]}")
+                                        _found_naq = True
+
+                                    # 2차: search_ai_law (자연어 의미검색 — 행정규칙 대상)
+                                    if not _found_naq:
+                                        try:
+                                            mcp = _get_mcp_client()
+                                            # search=2: 행정규칙 조문 검색
+                                            ai_result = mcp.call_tool("search_ai_law", {
+                                                "query": naq, "search": "2", "display": 5, "page": 1
+                                            })
+                                            if ai_result and len(ai_result) > 30:
+                                                law_texts.append(f"[{naq}] (AI검색·행정규칙)\n{ai_result[:3000]}")
+                                                _found_naq = True
+                                        except Exception:
+                                            pass
+
+                                    # 3차: chain_full_research (AI검색→법령→판례→유권해석 일괄)
+                                    if not _found_naq:
+                                        try:
+                                            mcp = _get_mcp_client()
+                                            chain_result = mcp.call_tool("chain_full_research", {
+                                                "query": naq
+                                            })
+                                            if chain_result and len(chain_result) > 50:
+                                                law_texts.append(f"[{naq}] (종합검색)\n{chain_result[:3000]}")
+                                                _found_naq = True
+                                        except Exception:
+                                            pass
+
+                                    if not _found_naq:
+                                        law_texts.append(f"[{naq}] (조회 실패)")
                                 
+                                # 조회 실패 건수 확인
+                                fail_count = sum(1 for t in law_texts if "(조회 실패)" in t)
+                                if fail_count > 0:
+                                    st.warning(f"⚠️ {fail_count}건 조문 조회 실패 — 해당 조문은 AI가 추정할 수 있으므로 반드시 검증하세요.")
+
                                 # Claude로 블록 초안 생성 (실패 시 Gemini 폴백)
                                 block_prompt = f"""legal_blocks.json 형식에 맞는 법률 분석 블록 초안을 생성하세요.
 
 토픽: {topic_name}
+키워드: {topic_keywords}
 관련 법령 조문 원문:
 {chr(10).join(law_texts)}
+
+██ 핵심 규칙 ██
+1. "(조회 실패)"로 표시된 조문은 원문을 확보하지 못한 것이다. 해당 조문의 내용을 추측하지 말고, applicable_laws에는 포함하되 legal_analysis에서는 "원문 미확보 — 전문가 확인 필요"로 표기하라.
+2. 조문 원문이 확보된 조항만 법리 분석에 인용하라. 형량·과태료 금액·조문번호를 절대 변형하지 말 것.
+3. 토픽 및 키워드와 관련된 쟁점만 분석하라. 토픽과 직접 관련 없는 조항(국제협력, 일반원칙 등)은 applicable_laws와 legal_analysis에서 제외하라.
+4. 원문이 확보된 조문 중 토픽과 관련된 모든 조문을 applicable_laws와 legal_analysis에 빠짐없이 포함하라. 특히 사전검토·실증의무 등 예방적 조항과 시정조치·과징금·벌칙 등 제재 조항은 반드시 기술하라.
+5. 제재 수단(시정조치, 과징금, 과태료, 벌칙 등)이 조회된 조문에 포함되어 있으면 반드시 legal_analysis에 기술하라.
+6. 제재 조항이 확보되지 않았지만 해당 법률에 존재할 것으로 추정되는 경우, legal_analysis 말미에 "⚠️ 추가 확인 필요: [법령명] 제재 조항(시정조치/과징금 등) 원문 미확보"로 표기하라.
+7. 법령 약칭 주의: "표시광고법"은 "표시·광고의 공정화에 관한 법률"이며, "식품 등의 표시·광고에 관한 법률"과 다른 법률이다. 검색 결과의 법령 정식명칭을 반드시 확인하라.
 
 아래 JSON 형식으로만 출력 (마크다운 설명 없이):
 ```json
@@ -2781,29 +4022,60 @@ def main():
   "risk_level": "🔴 또는 🟡",
   "risk_label": "위험 또는 주의",
   "applicable_laws": "법령명 제X조",
-  "legal_analysis": "법리 분석 (조문 원문의 형량을 정확히 인용. 숫자를 변형하지 말 것.)"
+  "legal_analysis": "법리 분석 (조문 원문의 형량을 정확히 인용. 숫자를 변형하지 말 것. 제재 수단 반드시 포함.)"
 }}
 ```
 """
-                                # Claude 우선, 실패 시 Gemini 폴백
+                                # Gemini 우선 호출 (Claude API 한도 초과 빈번 → 대기시간 제거)
                                 reply = None
                                 try:
-                                    reply = call_claude(block_prompt, [{"role": "user", "content": block_prompt}])
-                                    if reply.startswith("⚠️"):
-                                        raise Exception(reply)
-                                    gen_model = "Claude"
-                                except Exception as claude_err:
-                                    st.warning(f"Claude API 실패 ({str(claude_err)[:100]}), Gemini로 폴백...")
-                                    try:
-                                        reply = call_gemini(block_prompt, [{"role": "user", "content": block_prompt}])
+                                    reply = call_gemini(
+                                        block_prompt + "\n\nSystem Constraint: 절대 HTML, CSS, XML 태그를 생성하지 마십시오. 오직 순수 JSON만 출력하세요.",
+                                        [{"role": "user", "content": block_prompt}],
+                                        is_fallback=True,
+                                    )
+                                    if reply:
+                                        reply = sanitize_html(reply)
+                                    if reply and not reply.startswith("⚠️"):
                                         gen_model = "Gemini"
-                                    except Exception as gemini_err:
-                                        st.error(f"❌ Claude·Gemini 모두 실패\nClaude: {str(claude_err)[:200]}\nGemini: {str(gemini_err)[:200]}")
+                                    else:
+                                        raise Exception(reply or "Gemini 응답 없음")
+                                except Exception as gemini_err:
+                                    st.warning(f"Gemini 실패 ({str(gemini_err)[:100]}), Claude 시도...")
+                                    try:
+                                        reply = call_claude(block_prompt, [{"role": "user", "content": block_prompt}])
+                                        if reply.startswith("⚠️"):
+                                            raise Exception(reply)
+                                        gen_model = "Claude"
+                                    except Exception as claude_err:
+                                        st.error(f"❌ Gemini·Claude 모두 실패\nGemini: {str(gemini_err)[:200]}\nClaude: {str(claude_err)[:200]}")
                                 
                                 if reply and not reply.startswith("⚠️"):
+                                    # Gemini 폴백 시 HTML 잔여물 제거
+                                    reply = sanitize_html(reply)
+                                    # 코드펜스(```json ... ```) 제거 — st.code()가 자체 래핑
+                                    import re as _re
+                                    _stripped = _re.sub(r'```(?:json)?\s*', '', reply).strip().rstrip('`').strip()
+                                    if _stripped:
+                                        reply = _stripped
                                     st.subheader(f"📝 AI 생성 초안 ({gen_model}, 검증 필요)")
-                                    st.code(reply, language="json")
-                                    
+
+                                    # JSON 파싱 → 보기 좋게 렌더링
+                                    try:
+                                        import json as _json
+                                        _block = _json.loads(reply)
+                                        _risk_icon = _block.get("risk_level", "")
+                                        _risk_lbl = _block.get("risk_label", "")
+                                        st.markdown(f"### {_risk_icon} {_block.get('title', '')}")
+                                        st.markdown(f"**위험도:** {_risk_icon} {_risk_lbl}")
+                                        st.markdown(f"**적용 법령:** {_block.get('applicable_laws', '')}")
+                                        st.markdown("**법리 분석:**")
+                                        st.markdown(_block.get("legal_analysis", ""))
+                                        with st.expander("원본 JSON (검증용)", expanded=False):
+                                            st.code(reply, language="json")
+                                    except Exception:
+                                        st.code(reply, language="json")
+
                                     # JSON 추가 버튼
                                     st.warning("⚠️ 아래 버튼을 누르기 전에 형량·조문번호를 반드시 검증하세요!")
                                     
@@ -2920,7 +4192,47 @@ def main():
     st.title("🤝 공정거래 실무 어시스턴트 v2.1")
     st.caption("MD·협력사 실무 Q&A & 계약·법령 Self-Check AI")
 
-    if not st.session_state.messages and st.session_state.docs:
+    # DLP 마스킹 대상 (사이드바에서 설정)
+    target_partner = st.session_state.get("dlp_partner", "")
+
+    # ── 탭 분리: 일반 자문 vs 계약서 교차 비교 ──
+    tab_chat, tab_revision = st.tabs(["💬 AI 법무 자문", "🔄 계약서 교차 비교"])
+
+    # ═══ TAB 2: 계약서 교차 비교 (리비전 비교) ═══
+    with tab_revision:
+        st.markdown("### 🔄 V1 vs V2 계약서 교차 비교")
+        st.info("당사 초안(V1)과 협력사 수정본(V2)을 업로드하면, AI가 변경된 독소조항을 찾아 비교 분석합니다.")
+        col_v1, col_v2 = st.columns(2)
+        with col_v1:
+            v1_file = st.file_uploader("📄 V1 (당사 표준 초안)", type=["docx"], key="v1_upload")
+        with col_v2:
+            v2_file = st.file_uploader("📝 V2 (협력사 수정본)", type=["docx"], key="v2_upload")
+        if v1_file and v2_file:
+            if st.button("⚖️ 교차 비교 분석 실행", type="primary", use_container_width=True, key="revision_run"):
+                v1_file.seek(0)
+                v2_file.seek(0)
+                v1_text = extract_text(v1_file.read())
+                v2_text = extract_text(v2_file.read())
+                if v1_text.startswith("(") and v1_text.endswith(")"):
+                    st.error(f"V1 파일 읽기 실패: {v1_text}")
+                elif v2_text.startswith("(") and v2_text.endswith(")"):
+                    st.error(f"V2 파일 읽기 실패: {v2_text}")
+                else:
+                    prompt = (
+                        f"[REVISION_COMPARE]\n"
+                        f"당사가 보낸 초안(V1)과 협력사가 회신한 수정본(V2)을 교차 비교해주세요.\n\n"
+                        f"[V1 당사 초안 내용]\n{v1_text}\n\n"
+                        f"[V2 협력사 수정본 내용]\n{v2_text}"
+                    )
+                    st.session_state["pending_input"] = apply_auto_masking(prompt, target_partner)
+                    st.rerun()
+        elif v1_file or v2_file:
+            st.warning("V1과 V2 파일을 모두 업로드해 주세요.")
+
+    # ═══ TAB 1: AI 법무 자문 (채팅) ═══
+    with tab_chat:
+
+      if not st.session_state.messages and st.session_state.docs:
         st.markdown("### 💡 AI 법무 자문 100% 활용 가이드")
         st.info(
             "본 시스템은 질문의 목적에 따라 **두 가지 수준의 맞춤형 자문**을 제공합니다.\n\n"
@@ -2940,30 +4252,44 @@ def main():
                     st.session_state["pending_input"] = q
                     st.rerun()
 
-    # 대화 히스토리 렌더링
-    for msg in st.session_state.messages:
+      # 대화 히스토리 렌더링
+      for msg in st.session_state.messages:
         with st.chat_message(msg["role"], avatar="🤝" if msg["role"] == "assistant" else "👤"):
             if msg["role"] == "assistant" and msg.get("json_data"):
                 jd = msg["json_data"]
-                render_verdict_badge(jd.get("verdict", ""))
-                st.markdown(f"**📋 {jd.get('summary', '')}**")
-                # 4번: 인용 검증 실패 경고
-                cit_results = msg.get("citation_results", [])
-                if cit_results and not all(cr["verified"] for cr in cit_results):
-                    unverified = [cr["citation"] for cr in cit_results if not cr["verified"]]
-                    unverified_links = []
-                    for uv in unverified:
-                        search_term = re.sub(r'\s*제\d+조.*', '', uv).strip()
-                        link = f"https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={search_term}"
-                        unverified_links.append(f"[{uv}]({link})")
-                    st.warning("⚠️ 다음 법령 인용의 DB 검증이 완료되지 않았습니다.\n\n사내변호사에게 해당 조문의 현행 유효 여부를 반드시 확인받으세요.")
-                    st.markdown("🔗 " + " | ".join(unverified_links))
-                render_issues_table(jd.get("issues", []), msg.get("citation_results", []))
+                # ── 1. 결론 ──
+                render_verdict_badge(jd.get("verdict", ""), summary=jd.get("summary", ""))
+                # ── 2. MD Action Plan ──
+                if jd.get("action_plan"):
+                    _section_header("📌", "MD Action Plan")
+                    st.success(jd["action_plan"])
+                # ── 3. 수정 대안 제안 ──
                 if jd.get("alternative_clause"):
                     render_alternative_clause(jd["alternative_clause"])
-                
+                # ── 4. 법령 인용 검증 ──
+                cit_results = msg.get("citation_results", [])
+                if cit_results:
+                    _verified = [cr for cr in cit_results if cr["verified"]]
+                    _unverified = [cr for cr in cit_results if not cr["verified"]]
+                    with st.expander(f"📚 법령 인용 검증 ({len(_verified)}건 확인 / {len(_unverified)}건 미확인)", expanded=False):
+                        if _verified:
+                            for cr in _verified:
+                                _di = f" (DB: {cr['last_updated'][:10]})" if cr.get("last_updated") else ""
+                                st.caption(f"✅ {cr['citation']}{_di}")
+                        if _unverified:
+                            st.warning(f"⚠️ DB 미등록 {len(_unverified)}건 — 현행 여부 확인 필요")
+                            _links = []
+                            for cr in _unverified:
+                                _st = re.sub(r'\s*제\d+조.*', '', cr["citation"]).strip()
+                                _links.append(f"[{cr['citation']}](https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={_st})")
+                            st.markdown("🔗 " + " | ".join(_links))
+                # ── 5. 쟁점별 교차 분석 ──
+                _section_header("⚖️", "쟁점별 교차 분석")
+                render_issues_table(jd.get("issues", []), msg.get("citation_results", []))
+                # ── 6. 다운로드 ──
                 if jd.get("verdict"):
                     docx_bytes = generate_review_docx(jd, msg.get("detail_text", ""), "")
+                    st.divider()
                     st.caption("⚠️ 본 문서를 사내변호사 확인 없이 외부에 발송하지 마세요.")
                     st.download_button("📥 검토의견서 다운로드 (.docx)", data=docx_bytes, file_name=f"검토의견서_{datetime.now().strftime('%Y%m%d_%H%M')}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"dl_{msg.get('msg_id', datetime.now().timestamp())}")
             else:
@@ -2973,45 +4299,10 @@ def main():
                 model_label = msg.get("model", "")
                 st.caption(f"⏱️ {msg['time']:.1f}초 · {model_label}")
 
-    # ── 입력 처리 ────────────────────────────────────────────
+    # ── 입력 처리 (깔끔한 하단) ──────────────────────────────
     if st.session_state.docs:
-        
-        st.markdown("---")
-        st.markdown("### 💬 신규 검토 요청")
-        
-        st.info("🔒 **기밀 유출 방지 시스템:** 당사의 기밀이나 특정 브랜드명, 상호명이 외부 AI로 전송되어 학습에 오남용되는 것을 막기 위해 아래 칸에 **검토 대상 협력사명**을 기재해 주세요. 해당 단어는 문서와 채팅에서 모두 가려집니다.")
-        target_partner = st.text_input("🏢 검토 대상 협력사명 입력 (보안 마스킹용)", placeholder="예: 에르메스, 샤넬 (입력 시 █협력사█로 자동 치환)", key="target_partner")
 
-        with st.expander("🔄 리비전 교차 비교 (당사 초안 vs 협력사 수정본)", expanded=False):
-            st.info("당사 초안(기준)과 협력사가 수정한 문서를 나란히 업로드하면, AI변호사가 변경된 독소조항을 찾아 비교 분석합니다.")
-            col1, col2 = st.columns(2)
-            with col1: v1_file = st.file_uploader("📄 V1 (당사 표준 초안)", type=["docx"], key="v1_upload")
-            with col2: v2_file = st.file_uploader("📝 V2 (협력사 수정본)", type=["docx"], key="v2_upload")
-            if v1_file and v2_file:
-                if st.button("교차 비교 분석 실행", type="primary", use_container_width=True):
-                    v1_file.seek(0)
-                    v2_file.seek(0)
-                    v1_bytes, v2_bytes = v1_file.read(), v2_file.read()
-                    v1_text = extract_text(v1_bytes)
-                    v2_text = extract_text(v2_bytes)
-                    
-                    # 추출 실패 체크
-                    if v1_text.startswith("(") and v1_text.endswith(")"):
-                        st.error(f"V1 파일 읽기 실패: {v1_text}")
-                    elif v2_text.startswith("(") and v2_text.endswith(")"):
-                        st.error(f"V2 파일 읽기 실패: {v2_text}")
-                    else:
-                        prompt = (
-                            f"당사가 보낸 초안(V1)과 협력사가 회신한 수정본(V2)을 교차 비교해주세요.\n\n"
-                            f"1. 협력사가 어느 조항을 어떻게 변경/추가/삭제했는지 핵심만 대조해주세요.\n"
-                            f"2. 수정본(V2)의 내용이 DB의 [기준 문서]와 [법령]을 위반하는지 엄격히 심사해주세요.\n\n"
-                            f"[V1 당사 초안 내용]\n{v1_text}\n\n"
-                            f"[V2 협력사 수정본 내용]\n{v2_text}"
-                        )
-                        st.session_state["pending_input"] = apply_auto_masking(prompt, target_partner)
-                        st.rerun()
-
-        chat_files = st.file_uploader("📎 검토할 파일 첨부 (협력사 회신본 등)", type=["docx"], accept_multiple_files=True, key="chat_uploader")
+        chat_files = st.file_uploader("📎 검토할 파일 첨부", type=["docx"], accept_multiple_files=True, key="chat_uploader")
         user_input = st.chat_input("검토할 텍스트를 입력하거나 파일을 첨부하세요...")
         query = user_input or st.session_state.pop("pending_input", None)
 
@@ -3046,7 +4337,10 @@ def main():
             model_choice = route_query(safe_query, has_attachment)
 
             with st.chat_message("assistant", avatar="🤝"):
-                if model_choice == "claude":
+                is_revision = "[REVISION_COMPARE]" in safe_query
+                if is_revision:
+                    spinner_msg = "🔄 리비전 교차 비교 분석 중 (V1 vs V2 독소조항 감별)..."
+                elif model_choice == "claude":
                     spinner_msg = "⚖ 3단계 하이브리드 검토 중 (Gemini→DB검증→Claude)..."
                 else:
                     spinner_msg = "💬 당사 사내 기준을 검색 및 분석 중..."
@@ -3061,9 +4355,14 @@ def main():
                 if "Failed" not in actual_model and ("Claude" in actual_model or (model_choice == "claude" and "Gemini" in actual_model)):
                     json_data, detail_text = parse_review_response(reply)
                     if json_data:
-                        # ██ 필수 쟁점 강제 삽입 — AI가 빠뜨려도 100% 보장 ██
-                        json_data = enforce_mandatory_issues(json_data, st.session_state.laws_db)
-                        
+                        # ██ 필수 쟁점 보충 삽입 — 리비전 비교 모드에서는 건너뜀 ██
+                        if "Revision Compare" not in actual_model:
+                            json_data = enforce_mandatory_issues(json_data, st.session_state.laws_db, user_query=safe_query)
+
+                        # ██ 후처리 필터: AI 할루시네이션 강제 차단 ██
+                        json_data = _filter_b2b_consumer_issues(json_data, user_query=safe_query)
+                        json_data = _validate_saryu_names(json_data)
+
                         citation_results = verify_citations(json_data.get("cited_laws", []), st.session_state.laws_db)
                         precedent_results = verify_precedents(json_data.get("cited_precedents", []))
                         msg_data["json_data"] = json_data
@@ -3071,63 +4370,62 @@ def main():
                         msg_data["citation_results"] = citation_results
                         msg_data["precedent_results"] = precedent_results
 
-                        render_verdict_badge(json_data.get("verdict", ""))
-                        st.markdown(f"**📋 {json_data.get('summary', '')}**")
-                        
-                        # 법령 인용 검증 결과
+                        # ── 1. 결론 ──
+                        render_verdict_badge(json_data.get("verdict", ""), summary=json_data.get("summary", ""))
+
+                        # ── 2. MD Action Plan ──
+                        if json_data.get("action_plan"):
+                            _section_header("📌", "MD Action Plan")
+                            st.success(json_data["action_plan"])
+
+                        # ── 3. 수정 대안 제안 ──
+                        if json_data.get("alternative_clause"):
+                            render_alternative_clause(json_data["alternative_clause"])
+
+                        # ── 4. 법령 인용 검증 + 판례 검증 ──
                         db_verified = [cr for cr in citation_results if cr["verified"]]
                         db_unverified = [cr for cr in citation_results if not cr["verified"]]
-                        
-                        if db_verified:
-                            verified_items = []
-                            for cr in db_verified:
-                                date_info = ""
-                                if cr.get("last_updated"):
-                                    try:
-                                        date_info = f" (DB: {cr['last_updated'][:10]})"
-                                    except Exception:
-                                        pass
-                                verified_items.append(f"✅ {cr['citation']}{date_info}")
-                            with st.expander(f"📚 DB 검증 완료 법령 ({len(db_verified)}건)", expanded=False):
-                                st.markdown("\n".join(verified_items))
-                        
-                        if db_unverified:
-                            unverified_links = []
-                            for cr in db_unverified:
-                                search_term = re.sub(r'\s*제\d+조.*', '', cr["citation"]).strip()
-                                link = f"https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={search_term}"
-                                unverified_links.append(f"[{cr['citation']}]({link})")
-                            st.warning(f"⚠️ DB 미등록 법령 {len(db_unverified)}건 — 국가법령정보센터에서 현행 여부를 확인하세요.")
-                            st.markdown("🔗 " + " | ".join(unverified_links))
-                        
-                        # 판례 검증 결과 + 할루시네이션 차단 표시
+                        if citation_results:
+                            with st.expander(f"📚 법령 인용 검증 ({len(db_verified)}건 확인 / {len(db_unverified)}건 미확인)", expanded=False):
+                                if db_verified:
+                                    for cr in db_verified:
+                                        _di = f" (DB: {cr['last_updated'][:10]})" if cr.get("last_updated") else ""
+                                        st.caption(f"✅ {cr['citation']}{_di}")
+                                if db_unverified:
+                                    st.warning(f"⚠️ DB 미등록 {len(db_unverified)}건 — 현행 여부 확인 필요")
+                                    _links = []
+                                    for cr in db_unverified:
+                                        _st = re.sub(r'\s*제\d+조.*', '', cr["citation"]).strip()
+                                        _links.append(f"[{cr['citation']}](https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={_st})")
+                                    st.markdown("🔗 " + " | ".join(_links))
+
+                        # 판례 검증 결과
                         gk_meta = st.session_state.get("_gatekeeper_meta", {})
                         if gk_meta:
                             dropped = gk_meta.get("dropped_precedents", [])
                             v_prec = gk_meta.get("verified_precedents", [])
                             if dropped:
-                                with st.expander(f"🚨 AI 할루시네이션 {len(dropped)}건 감지 — 시스템이 자동 차단", expanded=True):
+                                with st.expander(f"🚨 AI 할루시네이션 {len(dropped)}건 감지 — 자동 차단됨", expanded=False):
                                     for dp in dropped:
-                                        reason = dp.get('reason', '국가법령정보센터 미존재')
-                                        st.markdown(f"~~{dp['case_no']}~~ → **차단 사유:** {reason}")
-                                    st.caption("위 판례는 AI가 생성한 허위 정보로, 검토의견서에서 자동 제거되었습니다.")
+                                        st.caption(f"~~{dp['case_no']}~~ — {dp.get('reason', '미존재')}")
                             if v_prec:
-                                with st.expander(f"✅ API 검증 완료 판례 ({len(v_prec)}건)", expanded=False):
+                                with st.expander(f"✅ 판례 검증 완료 ({len(v_prec)}건)", expanded=False):
                                     for vp in v_prec:
-                                        title = vp.get('title', '')
-                                        title_str = f" ({title})" if title else ""
-                                        st.markdown(f"- ✅ {vp['case_no']}{title_str}: {vp.get('summary', '')[:100]}")
+                                        st.caption(f"✅ {vp['case_no']}: {vp.get('summary', '')[:80]}")
                         elif precedent_results:
                             unverified_prec = [p for p in precedent_results if not p["verified"]]
                             if unverified_prec:
-                                st.warning(f"⚠️ 미확인 판례 {len(unverified_prec)}건 — 대법원 판례검색에서 실재 여부를 확인하세요.")
-                                prec_links = [f"[{p['case_no']}](https://glaw.scourt.go.kr/wsjo/panre/sjo100.do)" for p in unverified_prec]
-                                st.markdown("🔗 " + " | ".join(prec_links))
-                        
-                        render_issues_table(json_data.get("issues", []), citation_results)
-                        if json_data.get("alternative_clause"): render_alternative_clause(json_data["alternative_clause"])
+                                with st.expander(f"⚠️ 미확인 판례 {len(unverified_prec)}건", expanded=False):
+                                    for p in unverified_prec:
+                                        st.caption(f"⚠️ {p['case_no']}")
 
+                        # ── 5. 쟁점별 교차 분석 ──
+                        _section_header("⚖️", "쟁점별 교차 분석")
+                        render_issues_table(json_data.get("issues", []), citation_results)
+
+                        # ── 6. 다운로드 ──
                         docx_bytes = generate_review_docx(json_data, detail_text, display_query)
+                        st.divider()
                         st.caption("⚠️ 본 문서를 사내변호사 확인 없이 외부에 발송하지 마세요.")
                         st.download_button("📥 검토의견서 다운로드 (.docx)", data=docx_bytes, file_name=f"검토의견서_{datetime.now().strftime('%Y%m%d_%H%M')}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
@@ -3192,7 +4490,7 @@ def main():
                 st.warning("미등록")
         
         st.markdown("---")
-        st.info("👈 사이드바 하단 **'⚙️ 기준 문서 DB 관리'**를 열고, 문서 유형을 선택한 뒤 Word 파일을 업로드하세요.\n\n최소 **사규 1개 + 계약서 1개**가 등록되면 AI 검토를 시작할 수 있습니다.")
+        st.info("👈 사이드바 하단 **🔐 관리자 모드** 인증 후 **'⚙️ 기준 문서 DB 관리'**에서 문서를 업로드하세요.\n\n최소 **사규 1개 + 계약서 1개**가 등록되면 AI 검토를 시작할 수 있습니다.")
 
 if __name__ == "__main__":
     main()
