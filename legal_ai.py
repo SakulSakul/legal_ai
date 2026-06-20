@@ -742,6 +742,33 @@ def _get_mcp_client():
     return MCPDirectClient(oc_key=oc)
 
 
+class KPublicDataClient(MCPDirectClient):
+    """K Public Data MCP — key-free. korean-law와 동일 Streamable HTTP 전송을
+    미러링하되 엔드포인트만 교체하고 oc 키를 쓰지 않는다(별도 시크릿 불필요).
+    Freshness sweep의 법령·조문·행정규칙 시행일 조회용."""
+    MCP_URL = "https://public-data.up.railway.app/mcp"
+
+    def __init__(self):
+        super().__init__(oc_key="")
+
+    def _url(self):
+        return self.MCP_URL  # key-free: oc 파라미터 없음
+
+
+@st.cache_resource
+def _get_kpd_client():
+    """K Public Data MCP 클라이언트 싱글턴 (key-free)."""
+    return KPublicDataClient()
+
+
+def call_kpd_legal_research(action, **params):
+    """K Public Data의 legal_research 도구 호출 → raw text 반환(없으면 None).
+    action: search_laws | get_law_article_sub | search_admin_rules."""
+    args = {"action": action}
+    args.update(params)
+    return _get_kpd_client().call_tool("legal_research", args)
+
+
 def call_mcp_law_direct(query):
     """MCP 서버를 직접 호출하여 법령 조회 (Claude API 불필요).
 
@@ -3373,6 +3400,28 @@ def main():
                     st.rerun()
 
         if st.session_state.admin_unlocked:
+         with st.expander("🌐 K Public Data MCP 연결 점검", expanded=False):
+            st.caption("Freshness sweep용 K Public Data MCP(key-free)의 도달성·시행일 파싱을 라이브로 점검 — 응답이 오면 Stage 1 진입 가능.")
+            if st.button("🛰️ 관세법 제178조 현행 시행일 조회", use_container_width=True, key="kpd_smoke_btn"):
+                try:
+                    from kpd_mcp import resolve_law_effective_date
+                    with st.spinner("public-data.up.railway.app/mcp 호출 중..."):
+                        _kpd_raw = call_kpd_legal_research("search_laws", query="관세법", search_type="law_name")
+                        _kpd_res = resolve_law_effective_date(
+                            lambda action, **p: call_kpd_legal_research(action, **p),
+                            "관세법", "제178조", law_type="법률",
+                        )
+                    if _kpd_res["ok"] and _kpd_res["effective_date"]:
+                        st.success(f"✅ 라이브 도달 성공 — 관세법 제178조 시행일: {_kpd_res['effective_date']} (law_id={_kpd_res.get('law_id')})")
+                    elif _kpd_raw:
+                        st.warning(f"🟡 도달은 됐으나 시행일 파싱 불확실: {_kpd_res['reason']} — 아래 raw 응답 형식으로 파서 조정 필요(§8 리스크).")
+                    else:
+                        st.error("🔴 응답 없음 — Streamlit(미국 IP)에서 railway.app 도달 실패 가능. §1 fallback(korean-law 재사용) 검토.")
+                    st.caption("search_laws raw 응답(형식 확인용):")
+                    st.code((_kpd_raw or "(빈 응답/도달 실패)")[:1500], language="json")
+                except Exception as _kpd_err:
+                    st.error(f"K Public Data MCP 호출 실패: {_kpd_err}")
+                    st.caption("도달 불가 시 §1 fallback(korean-law 재사용) 검토.")
          with st.expander("🔍 법령 최신성 점검", expanded=False):
             st.caption("DB 블록의 구조화 형량(penalty)을 korean-law-mcp 경유 현재 법령과 대조 — 감지 전용(블록 자동 수정 안 함).")
             if st.button("🔎 전체 블록 staleness 점검", use_container_width=True, key="staleness_check_btn"):
