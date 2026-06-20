@@ -23,7 +23,10 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 # Step 4: MD triage 출력 보강 로직 (streamlit 비의존, 테스트 가능)
-from triage_util import enrich_triage_fields, evidence_grade_for, EVIDENCE_BADGES
+from triage_util import (
+    enrich_triage_fields, evidence_grade_for, EVIDENCE_BADGES,
+    FRESHNESS_BADGES, FRESHNESS_COPY, freshness_badge_for,
+)
 
 # ── 로깅 설정 ────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -462,7 +465,9 @@ def build_system_claude(docs, laws_db, gemini_analysis=""):
         "\n\n━━━ [적용 법령·행정규칙 DB 목록] ━━━\n" + laws_text +
         "\n\n━━━ [답변 형식] ━━━\n"
         "모든 법적 리스크를 빠짐없이. high/medium 상세, low 1~2문장. 해당없으면 생략.\n"
-        "문체 규칙: 모든 필드에 개조식(불릿 - ) + 평어체(명사형 종결: ~불가/~필요/~존재/~대상). 서술형(~입니다/~합니다) 절대 금지.\n\n"
+        "문체 규칙: 모든 필드에 개조식(불릿 - ) + 평어체(명사형 종결: ~불가/~필요/~존재/~대상). 서술형(~입니다/~합니다) 절대 금지.\n"
+        "톤 규칙: 단정·공포 표현('위험합니다'/'절대 하지 마세요'/'하면 안 됩니다') 금지. '주의 필요'·'확인 권장'·'검토 추천' 방향으로. 권고는 행동 가능한 단계로.\n"
+        "리스크 등급(🔴🟡🟢)·신선도 상태·신뢰 배지 텍스트는 시스템이 판정모듈에서 주입하므로 생성하지 마세요(verdict 값만 판단).\n\n"
         "```json\n"
         "{\n"
         '  "summary": "개조식 3~4줄 요약 (불릿 - 사용, 명사형 종결: ~불가/~필요/~존재/~대상)",\n'
@@ -604,8 +609,8 @@ def build_system_gemini_stage1(docs, laws_db):
         "     - ⚠️ 제269조는 반드시 '제2항'을 명시. 제3항(2년)과 혼동 금지\n"
         "     - 제235조 제1항 제1호: 상표권 침해물품 수출입 자체 원천 금지 (밀수입 여부 무관)\n"
         "     - 특가법 제6조: 물품원가 2억 이상 3년 이상 징역, 5억 이상 무기/5년 이상\n"
-        "  ④ 부정경쟁방지법 제2조 + 제18조 제3항 제1호 (3년/3천만원)\n"
-        "     - ⚠️ 형량은 반드시 '제18조 제3항 제1호: 3년 이하 징역 또는 3천만원 이하 벌금' 기재. '원문 참조' 금지.\n"
+        "  ④ 부정경쟁방지법 제2조 + 제18조 제4항 제1호 (3년/3천만원)\n"
+        "     - ⚠️ 형량은 반드시 '제18조 제4항 제1호: 3년 이하 징역 또는 3천만원 이하 벌금' 기재. '원문 참조' 금지.\n"
         "     - 징벌적 손해배상: 2024년 개정으로 손해액의 5배로 강화. 상표법과 별개 적용.\n"
         "  ⑤ 보세판매장고시 (관세청고시 제2023-9호, 2023.1.31. 일부개정)\n"
         "     - 행정제재: 영업정지 6개월, 특허취소, 과징금까지 구체적 서술 필수\n"
@@ -2521,7 +2526,7 @@ def enforce_mandatory_issues(json_data, laws_db, user_query=""):
     # 3. 부정경쟁방지법 — 관련 있고, AI가 빠뜨렸고, 중복 아닌 경우만
     if "부정경쟁" not in all_text and "부정경쟁" not in existing_laws and _is_relevant("부정경쟁"):
         db_text = _get_db_analysis("부정경쟁방지법", ("제2조", "제18조"))
-        analysis = "타인의 상품표지와 혼동을 일으키는 행위는 부정경쟁행위로 처벌. 부정경쟁방지법 제18조 제3항 제1호에 따라 3년 이하의 징역 또는 3천만원 이하의 벌금. 상표법과 별개 적용."
+        analysis = "타인의 상품표지와 혼동을 일으키는 행위는 부정경쟁행위로 처벌. 부정경쟁방지법 제18조 제4항 제1호에 따라 3년 이하의 징역 또는 3천만원 이하의 벌금. 상표법과 별개 적용."
         if db_text:
             analysis += f" {db_text}"
         issues.append({
@@ -2734,9 +2739,10 @@ def render_verdict_hero(jd):
       심각도(평이한 3단계) + 신뢰 경계 배지 + 핵심 이유 한 줄 + 에스컬레이션.
     주니어도 즉시 "걱정할 일인가 + 다음에 누구에게"를 읽게 한다.
     """
-    enrich_triage_fields(jd)  # 멱등 — severity/evidence_grade/escalation 보장
+    enrich_triage_fields(jd)  # 멱등 — severity/evidence_grade/escalation/freshness 보장
     sev = jd.get("severity") or {"icon": "⚪", "label": "판단 보류", "color": "#616161", "bg": "#F5F5F5"}
     eg = EVIDENCE_BADGES.get(jd.get("evidence_grade", "llm_draft"), EVIDENCE_BADGES["llm_draft"])
+    fr = freshness_badge_for(jd.get("freshness", "UNCOVERED"))  # 신선도(리스크와 직교 축)
 
     # 핵심 이유 한 줄 (법조문 인용 없이 평이하게) — verdict_reason/summary 첫 줄
     reason = (jd.get("verdict_reason") or jd.get("summary") or "").replace("**", "").strip()
@@ -2745,6 +2751,7 @@ def render_verdict_hero(jd):
         reason_line = reason_line[:180].rstrip() + "…"
 
     escalation = jd.get("escalation", "")
+    fresh_copy = FRESHNESS_COPY.get(jd.get("freshness", "UNCOVERED"), "")
 
     reason_html = (
         f'<div style="font-size:15px;line-height:1.55;color:#333;margin-top:12px;">{reason_line}</div>'
@@ -2754,14 +2761,22 @@ def render_verdict_hero(jd):
         f'<div style="font-size:14px;font-weight:700;color:{sev["color"]};margin-top:12px;">{escalation}</div>'
         if escalation else ""
     )
+    # §4 신선도 안내 배너 (FRESH는 비어있음 → 미표시). 겁주지 않고 '추가 확인' 방향.
+    fresh_copy_html = (
+        f'<div style="font-size:13px;line-height:1.5;color:{fr["color"]};background:{fr["bg"]};'
+        f'border-radius:4px;padding:8px 12px;margin-top:12px;">{fr["icon"]} {fresh_copy}</div>'
+        if fresh_copy else ""
+    )
     html = f"""
     <div style="background:{sev['bg']};border-left:6px solid {sev['color']};border-radius:6px;padding:18px 22px;margin-bottom:10px;">
-        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span style="font-size:26px;font-weight:800;color:{sev['color']};line-height:1.1;">{sev['icon']} {sev['label']}</span>
             <span style="font-size:12px;font-weight:700;color:{eg['color']};background:{eg['bg']};padding:4px 11px;border-radius:12px;">{eg['text']}</span>
+            <span style="font-size:12px;font-weight:700;color:{fr['color']};background:{fr['bg']};padding:4px 11px;border-radius:12px;">{fr['icon']} {fr['text']}</span>
         </div>
         {reason_html}
         {escalation_html}
+        {fresh_copy_html}
     </div>
     """
     st.markdown(html, unsafe_allow_html=True)
