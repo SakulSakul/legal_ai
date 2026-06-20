@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "generated_at": "2026-06-20T16:47:42Z",
+    "generated_at": "2026-06-20T18:32:32Z",
     "note": "블록 무결성 골든 해시. 블록을 의도적으로 바꾸면 이 스크립트를 재실행해 갱신·커밋.",
     "source": "legal_blocks.json",
     "total_blocks": 8
@@ -13,6 +13,6 @@
     "모조품::customs_269": "cc12735898007b66f79c124beb92f9d79182899a08178f0597577268a56f5b3f",
     "모조품::duty_free_special": "0affb45175e1d492eee3a50c55bdecd7d1c8a22efb60b45ee30acc161595a22c",
     "모조품::trademark_230": "c9a581eb641926e76cfdb63342eaa825610dc69367e962a3d500de3a1b926e7c",
-    "모조품::unfair_competition_18": "438ed57c24c1187c8e75b525016ce1e10d3a91823349b8ba875eae02012fba0c"
+    "모조품::unfair_competition_18": "63960595c0ffc18994eb215ed31eac611bd5427bbec05d2f3f19fc3f2f4c4f4b"
   }
 }
