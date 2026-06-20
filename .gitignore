@@ -17,3 +17,7 @@ Thumbs.db
 
 # 백업
 *_backup.py
+
+# eval 하네스 — 타임스탬프 결과/캐시는 추적 제외 (baseline_locked.json은 추적)
+eval/results_*.json
+eval/.emb_cache/

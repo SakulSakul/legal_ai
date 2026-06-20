@@ -1,0 +1,246 @@
+{
+  "timestamp": "20260620_192017",
+  "model": "FIXED (baseline control)",
+  "overall": {
+    "n": 14,
+    "cls_acc": 0.5,
+    "surfaced_recall": 0.7142857142857143,
+    "recall@5": 0.4762142857142857,
+    "mrr": 0.6795
+  },
+  "by_level": {
+    "direct": {
+      "n": 4,
+      "cls_acc": 1.0,
+      "surfaced_recall": 0.75,
+      "recall@5": 0.41675,
+      "mrr": 0.567
+    },
+    "synonym": {
+      "n": 5,
+      "cls_acc": 0.0,
+      "surfaced_recall": 0.6,
+      "recall@5": 0.4,
+      "mrr": 0.6355999999999999
+    },
+    "oblique": {
+      "n": 2,
+      "cls_acc": 0.0,
+      "surfaced_recall": 1.0,
+      "recall@5": 0.75,
+      "mrr": 1.0
+    },
+    "negative": {
+      "n": 3,
+      "cls_acc": 1.0,
+      "surfaced_recall": 0.6666666666666666,
+      "recall@5": 0.5,
+      "mrr": 0.6890000000000001
+    }
+  },
+  "rows": [
+    {
+      "id": "Q01",
+      "level": "direct",
+      "query": "면세점에서 모조품 판매 행위에 대해 법률 검토해줘",
+      "expected_topic": "모조품",
+      "predicted_topic": [
+        "모조품"
+      ],
+      "cls_ok": true,
+      "surfaced_recall": 1.0,
+      "recall@3": 0.667,
+      "recall@5": 0.667,
+      "mrr": 1.0,
+      "missed_articles": []
+    },
+    {
+      "id": "Q02",
+      "level": "direct",
+      "query": "공급업체가 위조상품을 납품했는데 우리 책임은 어디까지인가요",
+      "expected_topic": "모조품",
+      "predicted_topic": [
+        "모조품"
+      ],
+      "cls_ok": true,
+      "surfaced_recall": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0,
+      "mrr": 1.0,
+      "missed_articles": []
+    },
+    {
+      "id": "Q03",
+      "level": "direct",
+      "query": "가품 판매가 적발되면 면세점 특허가 취소되나요",
+      "expected_topic": "모조품",
+      "predicted_topic": [
+        "모조품"
+      ],
+      "cls_ok": true,
+      "surfaced_recall": 0.5,
+      "recall@3": 0.0,
+      "recall@5": 0.0,
+      "mrr": 0.125,
+      "missed_articles": [
+        "입점·퇴점 운영지침|제12조"
+      ]
+    },
+    {
+      "id": "Q04",
+      "level": "direct",
+      "query": "짝퉁 시계를 진품처럼 팔면 어떤 처벌을 받나요",
+      "expected_topic": "모조품",
+      "predicted_topic": [
+        "모조품"
+      ],
+      "cls_ok": true,
+      "surfaced_recall": 0.5,
+      "recall@3": 0.0,
+      "recall@5": 0.0,
+      "mrr": 0.143,
+      "missed_articles": [
+        "상품관리 표준지침|제20조"
+      ]
+    },
+    {
+      "id": "Q05",
+      "level": "synonym",
+      "query": "가짜 명품 가방을 정품인 것처럼 판매했어요",
+      "expected_topic": "모조품",
+      "predicted_topic": [],
+      "cls_ok": false,
+      "surfaced_recall": 0.5,
+      "recall@3": 0.0,
+      "recall@5": 0.0,
+      "mrr": 0.111,
+      "missed_articles": [
+        "직매입거래 기본계약서|제11조"
+      ]
+    },
+    {
+      "id": "Q06",
+      "level": "synonym",
+      "query": "이미테이션 제품을 매장에서 취급하면 리스크가 뭔가요",
+      "expected_topic": "모조품",
+      "predicted_topic": [],
+      "cls_ok": false,
+      "surfaced_recall": 0.0,
+      "recall@3": 0.0,
+      "recall@5": 0.0,
+      "mrr": 0.067,
+      "missed_articles": [
+        "특약매입거래 계약서|제9조",
+        "특약매입거래 계약서|제19조"
+      ]
+    },
+    {
+      "id": "Q07",
+      "level": "synonym",
+      "query": "정품이 아닌 상품을 판매하면 계약 해지 사유가 되나요",
+      "expected_topic": "모조품",
+      "predicted_topic": [],
+      "cls_ok": false,
+      "surfaced_recall": 0.5,
+      "recall@3": 0.5,
+      "recall@5": 0.5,
+      "mrr": 1.0,
+      "missed_articles": [
+        "입점·퇴점 운영지침|제12조"
+      ]
+    },
+    {
+      "id": "Q08",
+      "level": "synonym",
+      "query": "브랜드 카피 제품 입점 문의가 들어왔는데 받아도 되나요",
+      "expected_topic": "모조품",
+      "predicted_topic": [],
+      "cls_ok": false,
+      "surfaced_recall": 1.0,
+      "recall@3": 0.5,
+      "recall@5": 0.5,
+      "mrr": 1.0,
+      "missed_articles": []
+    },
+    {
+      "id": "Q09",
+      "level": "synonym",
+      "query": "레플리카 상품 판매가 법적으로 가능한지",
+      "expected_topic": "모조품",
+      "predicted_topic": [],
+      "cls_ok": false,
+      "surfaced_recall": 1.0,
+      "recall@3": 0.5,
+      "recall@5": 1.0,
+      "mrr": 1.0,
+      "missed_articles": []
+    },
+    {
+      "id": "Q10",
+      "level": "oblique",
+      "query": "공급사가 진품이라고 보증했는데 알고 보니 아니었습니다. 우리가 책임져야 하나요",
+      "expected_topic": "모조품",
+      "predicted_topic": [],
+      "cls_ok": false,
+      "surfaced_recall": 1.0,
+      "recall@3": 0.5,
+      "recall@5": 0.5,
+      "mrr": 1.0,
+      "missed_articles": []
+    },
+    {
+      "id": "Q11",
+      "level": "oblique",
+      "query": "세관에서 우리 매장 명품백이 정품 인증이 안 된다고 통보가 왔어요",
+      "expected_topic": "모조품",
+      "predicted_topic": [],
+      "cls_ok": false,
+      "surfaced_recall": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0,
+      "mrr": 1.0,
+      "missed_articles": []
+    },
+    {
+      "id": "Q12",
+      "level": "negative",
+      "query": "협력사 납품단가를 부당하게 인하하면 대규모유통업법 위반인가요",
+      "expected_topic": null,
+      "predicted_topic": [],
+      "cls_ok": true,
+      "surfaced_recall": 0.0,
+      "recall@3": 0.0,
+      "recall@5": 0.0,
+      "mrr": 0.067,
+      "missed_articles": [
+        "직매입거래 기본계약서|제3조"
+      ]
+    },
+    {
+      "id": "Q13",
+      "level": "negative",
+      "query": "판촉행사 비용을 협력사에 전가하면 문제가 되나요",
+      "expected_topic": null,
+      "predicted_topic": [],
+      "cls_ok": true,
+      "surfaced_recall": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0,
+      "mrr": 1.0,
+      "missed_articles": []
+    },
+    {
+      "id": "Q14",
+      "level": "negative",
+      "query": "친환경이라고 광고했는데 실증 근거가 없으면 그린워싱인가요",
+      "expected_topic": null,
+      "predicted_topic": [],
+      "cls_ok": true,
+      "surfaced_recall": 1.0,
+      "recall@3": 0.5,
+      "recall@5": 0.5,
+      "mrr": 1.0,
+      "missed_articles": []
+    }
+  ]
+}

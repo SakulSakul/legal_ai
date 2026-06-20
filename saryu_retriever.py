@@ -8,7 +8,12 @@ saryu_retriever.py — 지능형 사규 리트리버 (WP1)
 """
 
 import re
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
+
+try:
+    import embedding_util
+except Exception:  # 임베딩 모듈 부재 시에도 키워드 경로는 동작
+    embedding_util = None
 
 
 def chunk_by_article(text: str, label: str = "") -> List[Dict[str, str]]:
@@ -121,22 +126,143 @@ def score_chunk(chunk: Dict[str, str], keywords: List[str]) -> float:
     return score
 
 
+# ============================================================
+# 하이브리드 랭킹 (키워드 + 임베딩 RRF 융합)
+# ============================================================
+
+SARYU_CATS = ("saryu", "contract", "yakjeong")
+_RRF_K = 60  # Reciprocal Rank Fusion 상수 (표준 60)
+
+
+def _chunk_embed_text(chunk: Dict[str, str]) -> str:
+    """임베딩용 청크 표현 — 조문번호+제목+본문."""
+    return f"{chunk['article']} {chunk['title']} {chunk['text']}".strip()
+
+
+def _rrf_fuse(*rankings: List[int]) -> Dict[int, float]:
+    """
+    여러 랭킹(인덱스 리스트, 점수 높은 순)을 RRF로 융합.
+    반환: {chunk_index: rrf_score} (높을수록 관련).
+    """
+    fused: Dict[int, float] = {}
+    for ranking in rankings:
+        for rank, idx in enumerate(ranking):
+            fused[idx] = fused.get(idx, 0.0) + 1.0 / (_RRF_K + rank + 1)
+    return fused
+
+
+def _collect_article_chunks(docs: List[Dict]) -> List[Dict[str, str]]:
+    chunks = []
+    for doc in docs:
+        if doc.get("cat") in SARYU_CATS:
+            for ch in chunk_by_article(doc.get("text", ""), doc.get("label", "")):
+                if ch["article"]:  # 조문 단위만 (랭킹 대상)
+                    chunks.append(ch)
+    return chunks
+
+
+def _hybrid_order(query: str, docs: List[Dict]):
+    """
+    키워드 랭킹 + 임베딩 코사인 랭킹을 RRF로 융합한 (chunks, 순서) 반환.
+    임베딩 미가용(키없음/실패) 시 None → 호출부가 키워드 폴백.
+    """
+    if embedding_util is None:
+        return None
+    chunks = _collect_article_chunks(docs)
+    if not chunks:
+        return None
+    # 임베딩: 청크(캐시) + 질의(1회). 미가용 시 None → 폴백.
+    chunk_vecs = embedding_util.embed([_chunk_embed_text(c) for c in chunks])
+    if chunk_vecs is None:
+        return None
+    q_vec = embedding_util.embed_one(query)
+    if q_vec is None:
+        return None
+    keywords = extract_keywords(query)
+    kw_scored = sorted(
+        range(len(chunks)),
+        key=lambda i: score_chunk(chunks[i], keywords),
+        reverse=True,
+    )
+    emb_scored = sorted(
+        range(len(chunks)),
+        key=lambda i: embedding_util.cosine(q_vec, chunk_vecs[i]),
+        reverse=True,
+    )
+    fused = _rrf_fuse(kw_scored, emb_scored)
+    order = sorted(fused.keys(), key=lambda i: fused[i], reverse=True)
+    return chunks, order
+
+
+def rank_chunk_ids(query: str, docs: List[Dict]) -> List[str]:
+    """
+    하이브리드 융합 순서의 chunk id('label|article') 리스트 (eval Recall@K용).
+    임베딩 미가용 시 키워드 점수 순서로 폴백 (baseline rank_chunks와 동일 척도).
+    """
+    try:
+        r = _hybrid_order(query, docs)
+        if r is not None:
+            chunks, order = r
+            return [f"{chunks[i]['label']}|{chunks[i]['article']}" for i in order]
+    except Exception:
+        pass
+    kws = extract_keywords(query)
+    chunks = _collect_article_chunks(docs)
+    scored = sorted(chunks, key=lambda c: score_chunk(c, kws), reverse=True)
+    return [f"{c['label']}|{c['article']}" for c in scored]
+
+
+def _hybrid_retrieve(query: str, docs: List[Dict], max_chars: int) -> Optional[str]:
+    """
+    키워드+임베딩 RRF 융합 순서로 상위 조항을 max_chars 예산까지 조립.
+    임베딩 미가용 시 None → 호출부가 기존 키워드 전용 경로로 graceful fallback.
+    """
+    r = _hybrid_order(query, docs)
+    if r is None:
+        return None
+    chunks, order = r
+
+    # max_chars 예산까지 조립 (출력 포맷 불변 — eval 파서 호환)
+    result_parts = []
+    total = 0
+    for i in order:
+        c = chunks[i]
+        entry = f"[{c['label']}] {c['article']} ({c['title']})\n{c['text']}"
+        if total + len(entry) > max_chars:
+            break
+        result_parts.append(entry)
+        total += len(entry)
+
+    if not result_parts:
+        return None
+    return "\n\n---\n\n".join(result_parts)
+
+
 def retrieve_relevant_saryu(
-    query: str, 
-    docs: List[Dict], 
+    query: str,
+    docs: List[Dict],
     max_chars: int = 5000
 ) -> str:
     """
     질문과 관련된 사규 조항만 추출하여 압축된 텍스트 반환.
-    
+
     Args:
         query: 사용자 질문
         docs: 앱의 문서 목록 [{"cat": "saryu", "label": "...", "text": "..."}]
         max_chars: 최대 출력 문자 수
-    
+
     Returns:
         압축된 사규 텍스트 (~5,000자)
     """
+    # 0. 하이브리드(키워드+임베딩) 우선 시도. 임베딩 미가용 시 None → 키워드 폴백.
+    try:
+        hybrid = _hybrid_retrieve(query, docs, max_chars)
+        if hybrid is not None:
+            return hybrid
+    except Exception:
+        pass  # 어떤 실패든 기존 키워드 경로로 안전하게 폴백
+
+    # ── 기존 키워드 전용 경로 (graceful fallback, baseline 동작) ──
     # 1. 키워드 추출
     keywords = extract_keywords(query)
     

@@ -1,0 +1,67 @@
+name: eval
+
+# 하이브리드 검색 회귀 차단 (legal_ai Step3)
+#  - 결정론 회귀 테스트: 항상 실행 (분류/시그니처/모델불변/블록무결성)
+#  - 임베딩 게이트: GEMINI_API_KEY secret 존재 시에만 실행
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "saryu_retriever.py"
+      - "block_assembler.py"
+      - "embedding_util.py"
+      - "legal_blocks.json"
+      - "eval/**"
+      - ".github/workflows/eval.yml"
+  pull_request:
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  regression:
+    name: 결정론 회귀 테스트 (always)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps (lightweight)
+        run: python -m pip install --upgrade pip pytest google-genai
+      - name: Deterministic regression tests
+        run: python -m pytest eval/ -v -m "not embedding"
+
+  full-eval:
+    name: 임베딩 게이트 (GEMINI_API_KEY 있을 때만)
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: python -m pip install --upgrade pip pytest google-genai
+      - name: Skip if no API key
+        id: keycheck
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GEMINI_API_KEY secret 미설정 — 임베딩 게이트 skip"
+          else
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Compare gate (delta + PASS/FAIL)
+        if: steps.keycheck.outputs.has_key == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python eval/run_compare.py
+      - name: Full pytest incl. embedding gates
+        if: steps.keycheck.outputs.has_key == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python -m pytest eval/ -v
