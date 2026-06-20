@@ -24,7 +24,7 @@ EVIDENCE_BADGES = {
     "llm_draft":     {"text": "⚠️ AI 초안 · 반드시 법무 검증 필요", "color": "#9C6500", "bg": "#FFF8E1"},
 }
 
-ESCALATION_TEXT = "→ 진행 전 [법무팀/팀 선임]에 확인 필수"
+ESCALATION_TEXT = "→ 진행 전 [사내 변호사/팀 선임]에 확인 필수"
 
 
 def evidence_grade_for(matched_topics) -> str:
