@@ -331,11 +331,66 @@ MD·협력사 실무 Q&A & 계약·법령 Self-Check AI
 # 7. 무결성 검증 (Stage 3 보조)
 # ============================================================
 
+def get_penalty(issue: dict):
+    """issue의 구조화 형량 메타데이터(penalty)를 반환(읽기 전용). 없으면 None.
+
+    Step 5 schema-first 토대. 출력 텍스트는 일절 바꾸지 않으며, 기계가
+    형량을 읽을 수 있도록 prose와 병렬로 단 메타데이터를 노출만 한다.
+    """
+    return issue.get("penalty")
+
+
+def _krw_korean_forms(n: int) -> list[str]:
+    """KRW 정수 → prose에 등장할 만한 표기 후보(한국어 단위 + 콤마)."""
+    forms = []
+    ko = ""
+    eok = n // 10**8
+    if eok:
+        ko += f"{eok}억"
+    man = (n % 10**8) // 10**4
+    if man:
+        if man % 1000 == 0:
+            ko += f"{man // 1000}천만"
+        elif man % 100 == 0:
+            ko += f"{man // 100}백만"
+        else:
+            ko += f"{man}만"
+    if ko:
+        forms.append(ko + "원")
+    forms.append(f"{n:,}")
+    forms.append(f"{n:,}원")
+    return forms
+
+
+def _penalty_prose_errors(issue: dict) -> list[str]:
+    """penalty 구조화 숫자가 해당 issue prose(legal_analysis)에 실제로
+    등장하는지 대조 (key-free 정합성 검증 — 향후 live 법령 대조의 씨앗)."""
+    penalty = issue.get("penalty")
+    if not penalty:
+        return []
+    prose = issue.get("legal_analysis", "")
+    title = issue.get("title", issue.get("id", "?"))
+    errors = []
+
+    yrs = penalty.get("imprisonment_max_years")
+    if yrs is not None and f"{yrs}년" not in prose:
+        errors.append(f"[정합성 오류] {title}: 징역 {yrs}년이 prose에 없음")
+
+    for key, label in (("fine_max_krw", "벌금"), ("corporate_fine_max_krw", "양벌규정 벌금")):
+        amt = penalty.get(key)
+        if amt is not None and not any(f in prose for f in _krw_korean_forms(amt)):
+            errors.append(f"[정합성 오류] {title}: {label} {amt:,}원이 prose에 없음")
+
+    return errors
+
+
 def verify_block_integrity(final_text: str, blocks: dict) -> list[str]:
     """
     최종 문서에 DB 블록의 법률 분석이 변형 없이 포함되었는지 검증한다.
 
     이 검증은 LLM이 아니라 Python 문자열 대조로 수행하므로 100% 정확하다.
+    Step 5: 추가로 각 issue의 구조화 penalty 숫자가 prose에 등장하는지 대조한다
+    (구조화↔prose 정합성 — 불일치 시 integrity_error).
     """
     errors = []
     for issue in blocks["issues"]:
@@ -345,6 +400,8 @@ def verify_block_integrity(final_text: str, blocks: dict) -> list[str]:
                 f"[무결성 오류] {issue['title']}의 법률 분석 블록이 "
                 f"최종 문서에서 변형되었거나 누락되었습니다."
             )
+        # Step 5: 구조화 penalty ↔ prose 정합성
+        errors.extend(_penalty_prose_errors(issue))
     return errors
 
 
