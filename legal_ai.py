@@ -754,6 +754,16 @@ class KPublicDataClient(MCPDirectClient):
     def _url(self):
         return self.MCP_URL  # key-free: oc 파라미터 없음
 
+    def _post(self, payload):
+        # K Public Data는 Content-Type에 charset을 주지 않아 requests가 Latin-1로
+        # 폴백 → 한글 mojibake. UTF-8 강제(이 경로 한정 — korean-law 무영향).
+        resp = super()._post(payload)
+        try:
+            resp.encoding = "utf-8"
+        except Exception:
+            pass
+        return resp
+
 
 @st.cache_resource
 def _get_kpd_client():
