@@ -136,15 +136,28 @@ def test_freshness_db_guaranteed_keeps_injected_valid():
 
 
 def test_freshness_badges_distinct_from_severity_yellow():
-    """신선도 배지 아이콘이 리스크 🟡과 겹치지 않아야(§1)."""
+    """신선도 배지는 신호등(🟢🟡🔴🟠)이 아닌 중립 아이콘 + slate 단색이어야(§B 3축 분리)."""
     icons = {b["icon"] for b in T.FRESHNESS_BADGES.values()}
-    assert icons == {"🟢", "🔵", "🟠", "⚪"}
-    assert "🟡" not in icons, "리스크 🟡과 충돌"
+    assert icons == {"✓", "?", "⟳", "—"}
+    assert not (icons & {"🟢", "🟡", "🔴", "🟠", "🔵", "⚪"}), "신선도가 신호등으로 읽힘"
+    # 칩은 slate 단색(녹/황/적 채움 금지)
+    assert {b["color"] for b in T.FRESHNESS_BADGES.values()} == {"#475569"}
     assert set(T.FRESHNESS_BADGES) == {"FRESH", "NEEDS_REVIEW", "STALE", "UNCOVERED"}
 
 
+def test_three_axes_visually_distinct():
+    """리스크·근거·신선도 3축이 서로 다른 시각 언어(색/아이콘)인지(§B 1순위 불변식)."""
+    sev_colors = {v["color"] for v in T.SEVERITY_MAP.values()}
+    fr_colors = {v["color"] for v in T.FRESHNESS_BADGES.values()}
+    ev_colors = {v["color"] for v in T.EVIDENCE_BADGES.values()}
+    # 신선도(slate)는 리스크/근거와 색 계열이 겹치지 않음
+    assert not (fr_colors & sev_colors) and not (fr_colors & ev_colors)
+    # 근거 db_guaranteed는 브랜드 액센트(신호등 아님)
+    assert T.EVIDENCE_BADGES["db_guaranteed"]["color"] == "#9A0C24"
+
+
 def test_freshness_badge_for_fallback():
-    assert T.freshness_badge_for("STALE")["icon"] == "🟠"
+    assert T.freshness_badge_for("STALE")["icon"] == "⟳"
     assert T.freshness_badge_for("nonsense") == T.FRESHNESS_BADGES["UNCOVERED"]
 
 
