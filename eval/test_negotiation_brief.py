@@ -1,0 +1,140 @@
+"""
+test_negotiation_brief.py — MD 협상 브리프 재설계 결정론 검증 (streamlit 불필요).
+
+두 층위:
+  1) negotiation_util(순수) 단위 — provenance(P2)·예외(P3) 정규화 가드.
+  2) 소스 레벨 가드 — gatekeeper 관련성 게이트(작업1)·프롬프트 협상 브리프 규칙(작업2)·
+     provenance 버킷 태깅(작업4)·렌더 배선(작업3)이 회귀로 사라지지 않게 잠금.
+     (라이브 LLM 출력은 CI에서 못 돌리므로, 예외-우선 '지시'와 '검출 헬퍼'를 잠근다.)
+"""
+import os
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
+import negotiation_util as N  # noqa: E402
+
+
+def _src():
+    return open(os.path.join(ROOT, "legal_ai.py"), encoding="utf-8").read()
+
+
+# ── P2: provenance — 출처는 버킷에서만, 창작은 강등 ────────────
+def test_valid_source_maps_to_role():
+    for src, role in (("법령", "shield"), ("계약", "table"), ("사규", "internal")):
+        m = N.source_meta(src)
+        assert m["role"] == role
+
+
+def test_unknown_source_downgraded():
+    """LLM이 날조한 출처는 '근거 출처 불명'으로 강등 — 가짜 출처 배지 금지."""
+    lv = N.sanitize_leverage({"source": "날조법전", "point": "가짜 근거"})
+    assert lv["provenance_ok"] is False
+    assert lv["source"] is None
+    assert lv["source_label"] == "근거 출처 불명"
+
+
+def test_allowed_sources_cross_check():
+    """작업4 교차검증: 실제 retrieval 버킷에 없는 출처면 enum이 맞아도 강등."""
+    lv = N.sanitize_leverage({"source": "계약", "point": "p"}, allowed_sources={"법령", "사규"})
+    assert lv["provenance_ok"] is False
+
+
+# ── P3: 예외 — 자격요건·서류 세트, '없음 vs 못찾음' ───────────
+def test_exception_carries_conditions_and_documents():
+    lv = N.sanitize_leverage({
+        "source": "법령", "point": "50% 상한", "binding": "conditional",
+        "exception": "자발+차별화 시 가능",
+        "conditions": ["자발 요청 공문", ""], "documents": ["행사 기획안"],
+    })
+    assert lv["has_exception"] is True
+    assert lv["conditions"] == ["자발 요청 공문"]   # 빈 항목 제거
+    assert lv["documents"] == ["행사 기획안"]
+    assert lv["binding_label"] == "조건부"
+
+
+def test_nullish_exception_not_treated_as_exception():
+    for bad in (None, "", "null", "없음", "N/A"):
+        lv = N.sanitize_leverage({"source": "법령", "point": "p", "exception": bad})
+        assert lv["has_exception"] is False
+        assert lv["conditions"] == [] and lv["documents"] == []
+
+
+def test_no_room_vs_exception_uncertain_distinct():
+    """'예외 없음(확인)'과 '예외 못 찾음(미확인)'은 서로 다른 칸이어야(과보수/과허용 방지)."""
+    b = N.sanitize_brief({
+        "bottom_line": "결론",
+        "no_room": ["법정 50% 상한"],
+        "exception_uncertain": ["고시 추가 예외 가능성"],
+    })
+    assert b["no_room"] == ["법정 50% 상한"]
+    assert b["exception_uncertain"] == ["고시 추가 예외 가능성"]
+    assert b["no_room"] != b["exception_uncertain"]
+
+
+# ── 예외-누락 = FAIL (골든 가드) ───────────────────────────────
+def test_exception_exposed_when_present():
+    """금지+예외 쌍: 예외 경로가 노출되면 통과."""
+    brief = {"bottom_line": "조건부 가능", "leverage": [
+        {"source": "법령", "point": "50% 상한", "exception": "자발+차별화 시 가능",
+         "conditions": ["공문"], "documents": ["기획안"]},
+    ]}
+    assert N.has_exception_exposed(brief) is True
+
+
+def test_exception_silence_is_detected_as_fail():
+    """과보수: 금지만 나열하고 예외/없음확인/미확인 어디에도 언급 없으면 FAIL로 검출."""
+    brief = {"bottom_line": "원칙 불가", "leverage": [
+        {"source": "법령", "point": "50% 상한", "exception": None},
+    ]}
+    assert N.has_exception_exposed(brief) is False  # 예외 침묵 → 골든 FAIL 신호
+
+
+def test_no_room_counts_as_exception_exposed():
+    """예외가 진짜 없으면 no_room 명시로 '침묵 아님' 처리."""
+    brief = {"leverage": [{"source": "법령", "point": "p", "exception": None}],
+             "no_room": ["예외 없음 확인된 절대 상한"]}
+    assert N.has_exception_exposed(brief) is True
+
+
+def test_empty_brief_helpers():
+    assert N.is_empty_brief(None) is True
+    assert N.is_empty_brief({}) is True
+    assert N.is_empty_brief({"bottom_line": "x"}) is False
+
+
+# ── 소스 레벨 가드 (회귀 잠금) ─────────────────────────────────
+def test_gatekeeper_relevance_gate_present():
+    """작업1: 무조건 강제주입이 관련성 게이트(강등, 드롭 아님)로 바뀌었는지."""
+    src = _src()
+    assert "관련성 게이트" in src
+    assert "demoted_laws" in src and "기타 참고 법령" in src
+    # 옛 무조건 주입 문구는 사라져야
+    assert "무조건 강제 주입" not in src
+
+
+def test_provenance_buckets_tagged():
+    """작업4: gatekeeper_text가 [출처:사규]/[출처:계약]/[출처:법령] 버킷을 기계 태깅하는지."""
+    src = _src()
+    for tag in ("[출처:사규]", "[출처:법령]"):
+        assert tag in src, f"{tag} 버킷 태그 누락"
+    assert "출처:{_src}" in src or "[출처:계약]" in src  # 계약은 cat→동적 태깅
+
+
+def test_prompt_has_negotiation_brief_and_exception_rules():
+    """작업2: 합성 프롬프트에 negotiation_brief 스키마 + P3 예외-우선 규칙이 있는지(잠금)."""
+    src = _src()
+    assert '"negotiation_brief"' in src
+    assert "no_room" in src and "exception_uncertain" in src
+    # P3 — 예외를 자격요건·서류와 세트로, '못 찾음 ≠ 없음'
+    assert "예외 우선 노출" in src or "예외(단서" in src
+    assert "출처를\n" in src or "추정·창작" in src  # P2 — 출처 창작 금지
+    # 규칙0 완화 — 무조건 무효 문구 제거, 관련성 게이트 적용
+    assert "빠뜨리면 출력물 전체가 무효" not in src
+
+
+def test_render_negotiation_brief_wired():
+    """작업3: hero 직후 render_negotiation_brief 호출 배선 + 강등 expander 유지."""
+    src = _src()
+    assert src.count("render_negotiation_brief(") >= 3  # 정의 + 2개 렌더 사이트
+    assert "상세 근거" in src  # 상세 법령 근거는 강등 섹션으로 유지
