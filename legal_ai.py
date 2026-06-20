@@ -22,6 +22,9 @@ import os, io, json, re, time, logging, uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
+# Step 4: MD triage 출력 보강 로직 (streamlit 비의존, 테스트 가능)
+from triage_util import enrich_triage_fields, evidence_grade_for, EVIDENCE_BADGES
+
 # ── 로깅 설정 ────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -2117,6 +2120,8 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
                     "alternative_clause": None,
                     "cited_laws": [],
                     "cited_precedents": [],
+                    # Step 4: 블록삽입 경로 = 형량 DB 보장 → 검증된 근거 등급
+                    "evidence_grade": evidence_grade_for(matched_topics),
                 }
                 
                 # issues 변환
@@ -2686,6 +2691,45 @@ def render_verdict_badge(verdict, summary=""):
     st.markdown(html, unsafe_allow_html=True)
 
 
+def render_verdict_hero(jd):
+    """
+    MD triage 영웅 카드 — 상세 분석보다 '먼저', 가장 크게.
+      심각도(평이한 3단계) + 신뢰 경계 배지 + 핵심 이유 한 줄 + 에스컬레이션.
+    주니어도 즉시 "걱정할 일인가 + 다음에 누구에게"를 읽게 한다.
+    """
+    enrich_triage_fields(jd)  # 멱등 — severity/evidence_grade/escalation 보장
+    sev = jd.get("severity") or {"icon": "⚪", "label": "판단 보류", "color": "#616161", "bg": "#F5F5F5"}
+    eg = EVIDENCE_BADGES.get(jd.get("evidence_grade", "llm_draft"), EVIDENCE_BADGES["llm_draft"])
+
+    # 핵심 이유 한 줄 (법조문 인용 없이 평이하게) — verdict_reason/summary 첫 줄
+    reason = (jd.get("verdict_reason") or jd.get("summary") or "").replace("**", "").strip()
+    reason_line = next((l.strip().lstrip("-• ") for l in reason.split("\n") if l.strip()), "")
+    if len(reason_line) > 180:
+        reason_line = reason_line[:180].rstrip() + "…"
+
+    escalation = jd.get("escalation", "")
+
+    reason_html = (
+        f'<div style="font-size:15px;line-height:1.55;color:#333;margin-top:12px;">{reason_line}</div>'
+        if reason_line else ""
+    )
+    escalation_html = (
+        f'<div style="font-size:14px;font-weight:700;color:{sev["color"]};margin-top:12px;">{escalation}</div>'
+        if escalation else ""
+    )
+    html = f"""
+    <div style="background:{sev['bg']};border-left:6px solid {sev['color']};border-radius:6px;padding:18px 22px;margin-bottom:10px;">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <span style="font-size:26px;font-weight:800;color:{sev['color']};line-height:1.1;">{sev['icon']} {sev['label']}</span>
+            <span style="font-size:12px;font-weight:700;color:{eg['color']};background:{eg['bg']};padding:4px 11px;border-radius:12px;">{eg['text']}</span>
+        </div>
+        {reason_html}
+        {escalation_html}
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def _section_header(icon, title):
     """통일된 섹션 헤더 (h3보다 작고 정돈된 스타일)"""
     st.markdown(
@@ -2718,7 +2762,7 @@ def render_issues_table(issues, citation_results):
         risk = issue.get("risk_level", "medium")
         icon = risk_icons.get(risk, "⚪")
         rlabel = risk_labels.get(risk, "")
-        with st.expander(f"{icon} **[{rlabel}]** 쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '제목 없음')}", expanded=(risk == "high")):
+        with st.expander(f"{icon} **[{rlabel}]** 쟁점 {issue.get('issue_no', '?')}: {issue.get('title', '제목 없음')}", expanded=False):
             _tc = issue.get("target_clause", "")
             _user_msgs = [m for m in st.session_state.get("messages", []) if m.get("role") == "user"]
             _last_q = _user_msgs[-1]["content"][:200] if _user_msgs else ""
@@ -2822,7 +2866,7 @@ def generate_review_docx(json_data, detail_text, query_text):
     p_title = doc.add_paragraph()
     p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _apply_shading(p_title, SHADE_H1)
-    run_title = p_title.add_run("🤝 공정거래 실무 어시스턴트 v2.1 — 검토 의견서")
+    run_title = p_title.add_run("🤝 공정거래 실무 어시스턴트 — 사전 점검 결과 (리스크 체크)")
     run_title.font.size = Pt(18)
     run_title.bold = True
     run_title.font.color.rgb = RGBColor(255, 255, 255)
@@ -2852,13 +2896,9 @@ def generate_review_docx(json_data, detail_text, query_text):
     doc.add_paragraph("")
 
     if json_data:
+        enrich_triage_fields(json_data)  # Step 4: severity/evidence_grade/escalation 보장
         # ── 검토 결론 배지 (화면의 verdict badge와 동일) ──
         verdict = json_data.get("verdict", "")
-        verdict_map = {
-            "approved":    "🟢 위험 요소 미발견 (사내변호사 확인 권장)",
-            "conditional": "🟡 수정 필요 사항 발견",
-            "rejected":    "🔴 중대 위험 발견 (진행 보류 권고)",
-        }
         verdict_colors = {
             "approved":    RGBColor(0, 128, 0),
             "conditional": RGBColor(200, 150, 0),
@@ -2871,10 +2911,29 @@ def generate_review_docx(json_data, detail_text, query_text):
         }
         p_verdict = doc.add_paragraph()
         _apply_shading(p_verdict, verdict_shades.get(verdict, "F2F2F2"))
-        run_v = p_verdict.add_run(verdict_map.get(verdict, "⚪ 판단 보류"))
+        # Step 4: 화면 hero와 동일한 평이 심각도 라벨(진행 금지/법무 확인 후 진행/진행 가능)
+        _sev = json_data.get("severity") or {}
+        run_v = p_verdict.add_run(f"{_sev.get('icon', '⚪')} {_sev.get('label', '판단 보류')}")
         run_v.font.size = Pt(14)
         run_v.bold = True
         run_v.font.color.rgb = verdict_colors.get(verdict, RGBColor(128, 128, 128))
+
+        # ── Step 4: 신뢰 경계 배지 (DB 근거 vs AI 초안) ──
+        _eb = EVIDENCE_BADGES.get(json_data.get("evidence_grade", "llm_draft"), EVIDENCE_BADGES["llm_draft"])
+        p_eg = doc.add_paragraph()
+        run_eg = p_eg.add_run(_eb["text"])
+        run_eg.font.size = Pt(9)
+        run_eg.bold = True
+        run_eg.font.color.rgb = RGBColor.from_string(_eb["color"].lstrip("#"))
+
+        # ── Step 4: 에스컬레이션 가이드 (🔴/🟡) ──
+        _escal = json_data.get("escalation", "")
+        if _escal:
+            p_es = doc.add_paragraph()
+            run_es = p_es.add_run(_escal)
+            run_es.font.size = Pt(10)
+            run_es.bold = True
+            run_es.font.color.rgb = verdict_colors.get(verdict, RGBColor(128, 128, 128))
 
         # 요약 (화면의 📋 summary와 동일)
         summary = json_data.get("summary", query_text[:200])
@@ -2983,7 +3042,7 @@ def generate_review_docx(json_data, detail_text, query_text):
     p_footer = doc.add_paragraph()
     p_footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _apply_shading(p_footer, SHADE_QUOTE)
-    run_f = p_footer.add_run("본 검토의견서는 AI가 생성한 초안이며, 법적 효력이 없습니다.\n반드시 사내변호사의 최종 검토를 거치기 바랍니다.")
+    run_f = p_footer.add_run("본 사전 점검 결과는 AI가 생성한 초안이며, 법적 효력이 없습니다.\n반드시 사내변호사의 최종 검토를 거치기 바랍니다.")
     run_f.font.size = Pt(8)
     run_f.font.color.rgb = RGBColor(128, 128, 128)
 
@@ -4314,16 +4373,19 @@ def main():
         with st.chat_message(msg["role"], avatar="🤝" if msg["role"] == "assistant" else "👤"):
             if msg["role"] == "assistant" and msg.get("json_data"):
                 jd = msg["json_data"]
-                # ── 1. 결론 ──
-                render_verdict_badge(jd.get("verdict", ""), summary=jd.get("summary", ""))
-                # ── 2. MD Action Plan ──
+                enrich_triage_fields(jd)
+                # ── 1. verdict-as-hero (심각도+신뢰배지+이유+에스컬레이션) ──
+                render_verdict_hero(jd)
+                # ── 2. 다음 액션 ──
                 if jd.get("action_plan"):
-                    _section_header("📌", "MD Action Plan")
+                    _section_header("📌", "다음 액션 (MD Action Plan)")
                     st.success(jd["action_plan"])
                 # ── 3. 수정 대안 제안 ──
                 if jd.get("alternative_clause"):
                     render_alternative_clause(jd["alternative_clause"])
-                # ── 4. 법령 인용 검증 ──
+                # ── 상세 근거 (법령·형량·사규 — 법무 검토용) · 강등 ──
+                _section_header("📂", "상세 근거 (법령·형량·사규 — 법무 검토용)")
+                # 법령 인용 검증
                 cit_results = msg.get("citation_results", [])
                 if cit_results:
                     _verified = [cr for cr in cit_results if cr["verified"]]
@@ -4340,15 +4402,14 @@ def main():
                                 _st = re.sub(r'\s*제\d+조.*', '', cr["citation"]).strip()
                                 _links.append(f"[{cr['citation']}](https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=0&query={_st})")
                             st.markdown("🔗 " + " | ".join(_links))
-                # ── 5. 쟁점별 교차 분석 ──
-                _section_header("⚖️", "쟁점별 교차 분석")
+                # 쟁점별 교차 분석 (기본 접힘)
                 render_issues_table(jd.get("issues", []), msg.get("citation_results", []))
                 # ── 6. 다운로드 ──
                 if jd.get("verdict"):
                     docx_bytes = generate_review_docx(jd, msg.get("detail_text", ""), "")
                     st.divider()
                     st.caption("⚠️ 본 문서를 사내변호사 확인 없이 외부에 발송하지 마세요.")
-                    st.download_button("📥 검토의견서 다운로드 (.docx)", data=docx_bytes, file_name=f"검토의견서_{datetime.now().strftime('%Y%m%d_%H%M')}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"dl_{msg.get('msg_id', datetime.now().timestamp())}")
+                    st.download_button("📥 사전 점검 결과 다운로드 (.docx)", data=docx_bytes, file_name=f"사전점검결과_{datetime.now().strftime('%Y%m%d_%H%M')}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"dl_{msg.get('msg_id', datetime.now().timestamp())}")
             else:
                 st.markdown(msg["content"])
 
@@ -4427,19 +4488,22 @@ def main():
                         msg_data["citation_results"] = citation_results
                         msg_data["precedent_results"] = precedent_results
 
-                        # ── 1. 결론 ──
-                        render_verdict_badge(json_data.get("verdict", ""), summary=json_data.get("summary", ""))
+                        # ── 1. verdict-as-hero (심각도+신뢰배지+이유+에스컬레이션) ──
+                        enrich_triage_fields(json_data)
+                        render_verdict_hero(json_data)
 
-                        # ── 2. MD Action Plan ──
+                        # ── 2. 다음 액션 ──
                         if json_data.get("action_plan"):
-                            _section_header("📌", "MD Action Plan")
+                            _section_header("📌", "다음 액션 (MD Action Plan)")
                             st.success(json_data["action_plan"])
 
                         # ── 3. 수정 대안 제안 ──
                         if json_data.get("alternative_clause"):
                             render_alternative_clause(json_data["alternative_clause"])
 
-                        # ── 4. 법령 인용 검증 + 판례 검증 ──
+                        # ── 상세 근거 (법령·형량·사규 — 법무 검토용) · 강등 ──
+                        _section_header("📂", "상세 근거 (법령·형량·사규 — 법무 검토용)")
+                        # 법령 인용 검증 + 판례 검증
                         db_verified = [cr for cr in citation_results if cr["verified"]]
                         db_unverified = [cr for cr in citation_results if not cr["verified"]]
                         if citation_results:
@@ -4476,20 +4540,23 @@ def main():
                                     for p in unverified_prec:
                                         st.caption(f"⚠️ {p['case_no']}")
 
-                        # ── 5. 쟁점별 교차 분석 ──
-                        _section_header("⚖️", "쟁점별 교차 분석")
+                        # 쟁점별 교차 분석 (기본 접힘)
                         render_issues_table(json_data.get("issues", []), citation_results)
 
                         # ── 6. 다운로드 ──
                         docx_bytes = generate_review_docx(json_data, detail_text, display_query)
                         st.divider()
                         st.caption("⚠️ 본 문서를 사내변호사 확인 없이 외부에 발송하지 마세요.")
-                        st.download_button("📥 검토의견서 다운로드 (.docx)", data=docx_bytes, file_name=f"검토의견서_{datetime.now().strftime('%Y%m%d_%H%M')}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                        st.download_button("📥 사전 점검 결과 다운로드 (.docx)", data=docx_bytes, file_name=f"사전점검결과_{datetime.now().strftime('%Y%m%d_%H%M')}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
                         save_review_log({
                             "id": msg_data["msg_id"], "session_id": st.session_state.current_session_id, "verdict": json_data.get("verdict", "unknown"),
                             "issues": json_data.get("issues"), "action_plan": json_data.get("action_plan"), "cited_laws": json_data.get("cited_laws"),
                             "citation_verified": all(cr["verified"] for cr in citation_results) if citation_results else False,
+                            # Step 4: triage 결정 로깅 보강 (필드만 — 리포팅 UI 없음)
+                            "verdict_severity": (json_data.get("severity") or {}).get("level"),
+                            "evidence_grade": json_data.get("evidence_grade"),
+                            "escalation_advised": bool(json_data.get("escalation")),
                         })
                     else:
                         st.markdown(reply)
