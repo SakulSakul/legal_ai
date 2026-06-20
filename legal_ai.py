@@ -3373,6 +3373,37 @@ def main():
                     st.rerun()
 
         if st.session_state.admin_unlocked:
+         with st.expander("🔍 법령 최신성 점검", expanded=False):
+            st.caption("DB 블록의 구조화 형량(penalty)을 korean-law-mcp 경유 현재 법령과 대조 — 감지 전용(블록 자동 수정 안 함).")
+            if st.button("🔎 전체 블록 staleness 점검", use_container_width=True, key="staleness_check_btn"):
+                try:
+                    from staleness_util import run_staleness_check
+                    from block_assembler import load_legal_blocks
+                    _db_blocks = load_legal_blocks("legal_blocks.json")
+                    _issues = _db_blocks.get("모조품", {}).get("issues", [])
+                    with st.spinner("korean-law-mcp 경유 현재 법령 대조 중..."):
+                        _report = run_staleness_check(_issues, call_mcp_law_direct)
+                    _icon = {"OK": "🟢", "STALE": "🔴", "NEEDS_REVIEW": "🟡"}
+                    _n_stale = sum(1 for r in _report if r["verdict"] == "STALE")
+                    _n_review = sum(1 for r in _report if r["verdict"] == "NEEDS_REVIEW")
+                    _n_ok = sum(1 for r in _report if r["verdict"] == "OK")
+                    if _n_stale:
+                        st.error(f"🔴 STALE {_n_stale}건 — 법 개정 미반영 의심. 사람이 확인 후 수동 갱신 필요.")
+                    elif _n_review:
+                        st.warning(f"🟡 NEEDS_REVIEW {_n_review}건 — 자동 판정 불가, 사람 확인 필요. (OK {_n_ok}건)")
+                    else:
+                        st.success(f"🟢 전체 OK ({_n_ok}건) — 구조화 형량이 현재 법령과 일치.")
+                    for r in _report:
+                        with st.expander(f"{_icon.get(r['verdict'], '⚪')} [{r['verdict']}] {r['title']}", expanded=(r['verdict'] == 'STALE')):
+                            st.caption(f"근거 조문: {r['law_ref'] or '(없음)'}")
+                            st.write(r['summary'])
+                            for _f in r['fields']:
+                                st.caption(f"· {_f['field']}: DB {_f['db_value']} → {_icon.get(_f['verdict'], '⚪')} {_f['note']}")
+                            if r['excerpt']:
+                                st.text_area("현재 법령 발췌", r['excerpt'], height=90, key=f"stale_exc_{r['issue_id']}", disabled=True)
+                    st.info("⚠️ 감지 전용 — STALE/NEEDS_REVIEW는 사람이 확인 후 legal_blocks.json을 **수동** 갱신하세요. 코드는 블록을 자동 수정하지 않습니다.")
+                except Exception as _stale_err:
+                    st.error(f"점검 실패: {_stale_err}")
          with st.expander("⚙️ 기준 문서 DB 관리", expanded=False):
             law_count = len(st.session_state.laws_db)
             if law_count > 0:
