@@ -91,7 +91,7 @@ def test_json_data_contract_preserved():
     assert before <= set(jd.keys()), "기존 필드는 보존되어야 함"
     assert jd["summary"] == "s" and jd["issues"] == [{"a": 1}]
     # 추가 필드만 늘었는지
-    assert set(jd.keys()) - before == {"evidence_grade", "severity", "escalation"}
+    assert set(jd.keys()) - before == {"evidence_grade", "severity", "escalation", "freshness"}
 
 
 # ── verdict-as-hero 구조 가드 (소스 수준) ───────────────
@@ -112,3 +112,55 @@ def test_block_integrity_still_holds():
         db_path=os.path.join(ROOT, "legal_blocks.json"),
     )
     assert res["integrity_errors"] == []
+
+
+# ── 신선도 배지 (리스크와 직교 축) ──────────────────────
+def test_freshness_forced_uncovered_for_llm_draft():
+    """llm_draft는 항상 UNCOVERED — 거짓 '최신' 표기 방지 (§2)."""
+    jd = {"verdict": "conditional", "evidence_grade": "llm_draft", "freshness": "FRESH"}
+    T.enrich_triage_fields(jd)
+    assert jd["freshness"] == "UNCOVERED", "llm_draft인데 FRESH로 새면 안 됨"
+
+
+def test_freshness_db_guaranteed_defaults_needs_review():
+    """db_guaranteed는 주입값 없으면 NEEDS_REVIEW — 거짓 FRESH 금지."""
+    jd = {"verdict": "rejected", "evidence_grade": "db_guaranteed"}
+    T.enrich_triage_fields(jd)
+    assert jd["freshness"] == "NEEDS_REVIEW"
+
+
+def test_freshness_db_guaranteed_keeps_injected_valid():
+    jd = {"verdict": "rejected", "evidence_grade": "db_guaranteed", "freshness": "FRESH"}
+    T.enrich_triage_fields(jd)
+    assert jd["freshness"] == "FRESH"  # 판정모듈 주입값 유지
+
+
+def test_freshness_badges_distinct_from_severity_yellow():
+    """신선도 배지 아이콘이 리스크 🟡과 겹치지 않아야(§1)."""
+    icons = {b["icon"] for b in T.FRESHNESS_BADGES.values()}
+    assert icons == {"🟢", "🔵", "🟠", "⚪"}
+    assert "🟡" not in icons, "리스크 🟡과 충돌"
+    assert set(T.FRESHNESS_BADGES) == {"FRESH", "NEEDS_REVIEW", "STALE", "UNCOVERED"}
+
+
+def test_freshness_badge_for_fallback():
+    assert T.freshness_badge_for("STALE")["icon"] == "🟠"
+    assert T.freshness_badge_for("nonsense") == T.FRESHNESS_BADGES["UNCOVERED"]
+
+
+# ── 톤 린트: 정적 카피에 공포·단정 표현 금지 (§3/§8) ────
+_FORBIDDEN = ("위험합니다", "절대 하지 마세요", "절대 하지마세요", "하면 안 됩니다", "하면 안됩니다")
+
+
+def test_static_copy_has_no_fear_phrases():
+    """우리가 만드는 배지/카피/footer 정적 문자열에 공포·단정 표현이 없어야 함.
+    (LLM 생성 슬롯·DB 법령 텍스트는 대상 아님 — 시스템 카피만.)"""
+    blobs = []
+    for d in (T.FRESHNESS_BADGES, T.EVIDENCE_BADGES, T.SEVERITY_MAP):
+        for v in d.values():
+            blobs.append(v.get("text", "") + v.get("label", ""))
+    blobs.extend(T.FRESHNESS_COPY.values())
+    blobs.append(T.ESCALATION_TEXT)
+    joined = " ".join(blobs)
+    hits = [w for w in _FORBIDDEN if w in joined]
+    assert not hits, f"정적 카피에 금지 표현: {hits}"
