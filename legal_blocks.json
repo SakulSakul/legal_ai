@@ -2,7 +2,7 @@
   "_meta": {
     "version": "1.0.0",
     "description": "법률 분석 고정 블록 DB — LLM이 생성하지 않고, 문서에 직접 삽입되는 텍스트",
-    "last_updated": "2026-04-02",
+    "last_updated": "2026-06-21",
     "update_policy": "법령 개정 시 관리자가 수동 업데이트. korean-law-mcp로 개정 여부 자동 감지 가능",
     "penalty_schema": "각 issue.penalty = {imprisonment_max_years:int|null, fine_max_krw:int|null, corporate_fine_max_krw(양벌규정):int|null, amended_date(ISO):str|null, law_ref:str}. prose(legal_analysis)의 형량을 기계가 읽도록 병렬 구조화한 메타데이터 — prose는 불변, penalty 숫자는 반드시 prose에 등장해야 함(verify_block_integrity 정합성 검증). 향후 토픽 추가 시 동일 구조로."
   },
@@ -70,7 +70,13 @@
           "corporate_fine_max_krw": null,
           "amended_date": null,
           "law_ref": "부정경쟁방지법 제18조 제4항 제1호"
-        }
+        },
+        "dependencies": [
+          {"name": "부정경쟁방지 및 영업비밀보호에 관한 법률", "type": "법률",
+           "articles": [
+             {"no": "제18조", "effective_date": "2025-10-01"}
+           ]}
+        ]
       },
       {
         "id": "bonded_store_notice",
