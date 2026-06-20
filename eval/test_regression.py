@@ -107,14 +107,20 @@ def test_block_integrity_holds():
 
 
 def test_embedding_graceful_fallback_without_key(monkeypatch):
-    """임베딩 백엔드는 키/호출 실패 시 None 반환 → 앱이 죽지 않음 (§2.6)."""
+    """임베딩 백엔드는 키 해석 불가 시 None 반환 → 앱이 죽지 않음 (§2.6).
+
+    소스(env/secrets.toml/streamlit) 무관하게 검증하기 위해 _get_api_key를
+    직접 무력화한다 (secrets.toml이 존재해도 테스트 전제가 깨지지 않음).
+    """
     try:
         import embedding_util
     except ImportError:
         pytest.skip("embedding_util.py 아직 미작성")
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    out = embedding_util.embed(["테스트 문장"])
+    monkeypatch.setattr(embedding_util, "_get_api_key", lambda: "")
+    monkeypatch.setattr(embedding_util, "_mem_cache", {})
+    monkeypatch.setattr(embedding_util, "_disk_loaded", True)  # 디스크 캐시 히트 차단
+    monkeypatch.setattr(embedding_util, "_backend", None)      # 기본 백엔드 사용
+    out = embedding_util.embed(["임의의 미캐시 문장 " + "x" * 8])
     assert out is None, "키 없을 때 embed()는 None을 반환해 키워드 폴백을 유도해야 함"
 
 

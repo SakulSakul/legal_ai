@@ -38,11 +38,28 @@ _backend: Optional[Callable[[List[str], str], Optional[List[List[float]]]]] = No
 
 # ── 키 조회 (streamlit 비의존, env 우선) ─────────────────
 def _get_api_key() -> str:
+    # 1) 환경변수 우선
     for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
         v = os.environ.get(k)
         if v:
             return v
-    # streamlit secrets가 있으면 보조로 시도 (없어도 무방)
+    # 2) .streamlit/secrets.toml 직접 읽기 (streamlit 런타임 없이도 동작 — 오프라인 eval/CI)
+    try:
+        import tomllib
+        here = os.path.dirname(os.path.abspath(__file__))
+        for path in (
+            os.path.join(here, ".streamlit", "secrets.toml"),
+            os.path.expanduser("~/.streamlit/secrets.toml"),
+        ):
+            if os.path.exists(path):
+                with open(path, "rb") as f:
+                    data = tomllib.load(f)
+                for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+                    if data.get(k):
+                        return data[k]
+    except Exception:
+        pass
+    # 3) streamlit 런타임 secrets (앱 구동 중일 때)
     try:
         import streamlit as st
         for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
