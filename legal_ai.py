@@ -41,11 +41,16 @@ def get_secret(key, default=""):
     except Exception:
         return os.environ.get(key, default)
 
-# 모델명 외부 설정 지원 (Secrets에 없으면 기본값 사용)
+# 모델 티어링 (속도/비용 — 신뢰성 핵심인 최종 종합만 Opus). 모델명은 전부 여기 한 곳에서
+# (코드 인라인 하드코딩 금지 — #26 EOL 404 교훈). preview 금지 = GA 문자열만(또 404 방지).
+#   · 최종 종합(Stage 3, 추론 핵심) → Opus 유지
+#   · 기계적 Claude(MCP 법령조회 등) → 빠른 Haiku 티어
+#   · Stage 1 검색/수집 → Gemini 3.5 Flash(GA, capable·빠름) / 폴백 3.1 Flash-Lite(저지연)
 CLAUDE_MODEL = get_secret("CLAUDE_MODEL", "claude-opus-4-8")
+CLAUDE_MODEL_TOOLS = get_secret("CLAUDE_MODEL_TOOLS", "claude-haiku-4-5-20251001")
 GEMINI_MODELS = [
-    get_secret("GEMINI_MODEL_PRIMARY", "gemini-3.1-pro-preview"),
-    get_secret("GEMINI_MODEL_FALLBACK", "gemini-3-flash-preview"),
+    get_secret("GEMINI_MODEL_PRIMARY", "gemini-3.5-flash"),
+    get_secret("GEMINI_MODEL_FALLBACK", "gemini-3.1-flash-lite"),
 ]
 
 # ── Lazy 클라이언트 초기화 ────────────────────────────────────
@@ -981,7 +986,7 @@ def call_mcp_law(query, max_tokens=2048):
             time.sleep(2)
 
         response = client.beta.messages.create(
-            model=CLAUDE_MODEL,
+            model=CLAUDE_MODEL_TOOLS,  # 기계적 MCP 법령조회 — Opus 불필요(빠른 Haiku 티어)
             max_tokens=max_tokens,
             system=f"법제처 API 키: {law_api_key}. 도구 호출 시 apiKey에 이 키를 사용하세요.\n"
                    "⚠️ 약칭 주의: '표시광고법'은 '표시·광고의 공정화에 관한 법률'(공정거래법 계열)이다. "
@@ -3581,7 +3586,7 @@ def main():
             else:
                 st.warning("📚 법령 DB 미설정")
 
-            st.caption(f"🤖 Claude: `{CLAUDE_MODEL}`")
+            st.caption(f"🤖 Claude(종합): `{CLAUDE_MODEL}` · 도구: `{CLAUDE_MODEL_TOOLS}`")
             st.caption(f"🤖 Gemini: `{GEMINI_MODELS[0]}` → `{GEMINI_MODELS[1]}`")
 
             # 법령 API 연결 상태 확인 (MCP 경유) + 법령 DB 수동 업데이트
@@ -3656,7 +3661,7 @@ def main():
                             try:
                                 _law_key = get_secret("LAW_OC") or ""
                                 resp = _client.beta.messages.create(
-                                    model=CLAUDE_MODEL,
+                                    model=CLAUDE_MODEL_TOOLS,  # MCP 경로 스모크 — 도구 티어와 일치
                                     max_tokens=500,
                                     system=(
                                         f"법제처 API 키: {_law_key}. 도구 호출 시 apiKey에 이 키를 사용하세요."
