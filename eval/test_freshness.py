@@ -139,3 +139,35 @@ def test_freshness_util_is_pure():
     src = open(os.path.join(ROOT, "freshness_util.py"), encoding="utf-8").read()
     for forbidden in ("import requests", "import streamlit", "get_secret", "http", "call_mcp", "call_kpd"):
         assert forbidden not in src, f"freshness_util은 순수여야 함: '{forbidden}'"
+
+
+# ── §11(판촉비) freshness 온보딩 + 신호 살아있음 (S4 — 거짓 FRESH 금지) ──
+def _promo_block():
+    """legal_blocks.json의 판촉비분담 토픽 deps를 한 블록으로 합침(블록경로 _compute와 동일)."""
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _db = json.load(open(os.path.join(_root, "legal_blocks.json"), encoding="utf-8"))
+    deps = []
+    for iss in _db["판촉비분담"]["issues"]:
+        deps += iss.get("dependencies") or []
+    return {"id": "판촉비분담", "dependencies": deps}
+
+
+def test_promo_cost_11_onboarded_with_resolver_date():
+    """§11이 freshness 레지스트리(deps)에 2025-01-21로 온보딩됐는지(리졸버 실측값, 추측 금지)."""
+    arts = [a for d in _promo_block()["dependencies"] for a in d.get("articles", [])]
+    a11 = [a for a in arts if a.get("no") == "제11조"]
+    assert a11 and a11[0]["effective_date"] == "2025-01-21"
+
+
+def test_promo_fresh_is_computed_when_live_matches():
+    """기록 2025-01-21 == 리졸버 현재값 → '계산된' FRESH(정적 주입 아님)."""
+    b = _promo_block()
+    live = {F._key(t): t["stored"] for t in F.iter_targets(b["dependencies"])}
+    assert F.check_block_freshness(b, live)["verdict"] == F.FRESH
+
+
+def test_promo_signal_alive_auto_stale_on_amendment():
+    """★작업3: 리졸버가 더 늦은 시행일 반환(개정)하면 STALE 자동 전환 — 신호가 거짓말 안 함."""
+    b = _promo_block()
+    live = {F._key(t): "2099-01-01" for t in F.iter_targets(b["dependencies"])}
+    assert F.check_block_freshness(b, live)["verdict"] == F.STALE

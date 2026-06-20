@@ -267,3 +267,11 @@ def test_s2_brief_points_short_via_title():
     b = N.build_brief(jd)
     law = [lv for lv in b["leverage"] if lv["source"] == "법령"][0]
     assert law["point"] == "50% 상한 (제11조④)"  # 제목 사용, 400자 prose 아님
+
+
+def test_s4_freshness_computed_not_hardcoded():
+    """S4: 블록경로 freshness가 정적 'FRESH' 주입이 아니라 계산값(check_block_freshness)인지."""
+    src = _src()
+    assert '"freshness": "FRESH" if any' not in src  # 정적 거짓 단언 제거
+    assert "_compute_block_freshness" in src
+    assert "check_block_freshness" in src and "freshness_util" in src

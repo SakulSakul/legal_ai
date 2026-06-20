@@ -71,6 +71,48 @@ _TOPIC_ACTION_PLAN = {
     ),
 }
 
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _compute_block_freshness(topic_key):
+    """블록 토픽 freshness를 '계산'(정적 FRESH 주입 금지 — 거짓 단언 방지, S4).
+    토픽 issues의 dependencies(기록 시행일) vs KPD MCP 리졸버 현재값을 freshness_util로 비교
+    → FRESH/STALE/NEEDS_REVIEW/UNCOVERED. 기록 시행일이 개정으로 뒤처지면 자동 STALE.
+    미온보딩(deps 없음)·리졸버 미응답 → None(enrich가 NEEDS_REVIEW 처리, 거짓 FRESH 금지).
+    1h 캐시 = 빠른 블록경로 보호(시행일은 자주 안 바뀜) + 개정 시 1h 내 자동 전환.
+    순수모듈 freshness_util은 미수정 — 그 판정 함수를 '배선'만 한다.
+    """
+    try:
+        import kpd_mcp as _kpd
+        from freshness_util import check_block_freshness, iter_targets, _key
+        from block_assembler import load_legal_blocks
+        deps = []
+        for iss in load_legal_blocks("legal_blocks.json").get(topic_key, {}).get("issues", []):
+            deps += iss.get("dependencies") or []
+        if not deps:
+            return None  # 미온보딩 → 거짓 FRESH 금지(enrich가 NEEDS_REVIEW)
+
+        def _resolve(dep_name, article_no, dep_type, ref):
+            if dep_type == "행정규칙":
+                _raw = call_kpd_legal_research("search_admin_rules", query=dep_name)
+                _r = _kpd.parse_admin_rules(_raw or "", exact_name=dep_name)
+                return _r["effective_date"] if _r["ok"] else None
+            _r = _kpd.resolve_law_effective_date(
+                lambda action, **p: call_kpd_legal_research(action, **p),
+                dep_name, article_no, law_type=("법률" if dep_type == "법률" else None))
+            return _r["effective_date"] if _r["ok"] else None
+
+        live = {}
+        for t in iter_targets(deps):
+            try:
+                live[_key(t)] = _resolve(t["dep"], t["no"], t.get("type"), t.get("ref"))
+            except Exception:
+                live[_key(t)] = None
+        return check_block_freshness({"dependencies": deps}, live)["verdict"]
+    except Exception as e:
+        logger.warning(f"블록 freshness 계산 실패({topic_key}): {e}")
+        return None
+
+
 # ── Lazy 클라이언트 초기화 ────────────────────────────────────
 @st.cache_resource
 def init_supabase():
@@ -2298,8 +2340,9 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
                     "cited_precedents": [],
                     # Step 4: 블록삽입 경로 = 형량 DB 보장 → 검증된 근거 등급
                     "evidence_grade": evidence_grade_for(matched_topics),
-                    # 블록 = 큐레이션·의존성 추적됨 → 신선도 검증 대상(거짓 disclaimer 방지, S4)
-                    "freshness": "FRESH" if any(iss.get("dependencies") for iss in _b_issues) else None,
+                    # 신선도 = '계산값'(정적 FRESH 주입 금지 — 거짓 단언 방지). 기록 시행일 vs
+                    # KPD 리졸버 현재값 비교(freshness_util). §11 개정 시 자동 STALE 전환(S4).
+                    "freshness": _compute_block_freshness(matched_topics[0]),
                 }
                 
                 # issues 변환
