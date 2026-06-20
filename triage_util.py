@@ -12,28 +12,27 @@ Step 4 출력 재설계의 '데이터' 책임만 담당한다. 렌더(st.*)는 l
     llm_draft는 항상 UNCOVERED 강제. LLM이 만들지 않고 판정모듈/주입값에서 옴.
 """
 
-# verdict(기존 값) → 평이한 3단계 심각도 (주니어도 즉시 이해)
+# verdict → 평이한 3단계 심각도. 리스크 축 = '채운 신호등 칩'(가장 강함, Warm 시맨틱 틴트).
 SEVERITY_MAP = {
-    "rejected":    {"level": "stop",    "icon": "🔴", "label": "진행 금지",         "color": "#C62828", "bg": "#FCE4EC"},
-    "conditional": {"level": "caution", "icon": "🟡", "label": "법무 확인 후 진행", "color": "#F57F17", "bg": "#FFF8E1"},
-    "approved":    {"level": "go",      "icon": "🟢", "label": "진행 가능",         "color": "#2E7D32", "bg": "#E8F5E9"},
+    "rejected":    {"level": "stop",    "icon": "🔴", "label": "진행 금지",         "color": "#A93226", "bg": "#F6E7E4"},
+    "conditional": {"level": "caution", "icon": "🟡", "label": "법무 확인 후 진행", "color": "#A07020", "bg": "#F7EFE0"},
+    "approved":    {"level": "go",      "icon": "🟢", "label": "진행 가능",         "color": "#1F7A3A", "bg": "#E6F0E7"},
 }
-DEFAULT_SEVERITY = {"level": "unknown", "icon": "⚪", "label": "판단 보류", "color": "#616161", "bg": "#F5F5F5"}
+DEFAULT_SEVERITY = {"level": "unknown", "icon": "⚪", "label": "판단 보류", "color": "#87867F", "bg": "#F0EEE6"}
 
-# 신뢰 경계 배지 — 주니어 과신 방지 핵심 안전장치
+# 근거 배지 — 브랜드 액센트(검증) vs 황색(초안). 신호등 계열과 다른 시각 언어.
 EVIDENCE_BADGES = {
-    "db_guaranteed": {"text": "🔒 사규·법령 DB 근거 (검증된 분석)", "color": "#1565C0", "bg": "#E3F2FD"},
-    "llm_draft":     {"text": "⚠️ AI 초안 · 반드시 법무 검증 필요", "color": "#9C6500", "bg": "#FFF8E1"},
+    "db_guaranteed": {"text": "🔒 사규·법령 DB 근거 (검증된 분석)", "color": "#9A0C24", "bg": "#FCEBEE"},
+    "llm_draft":     {"text": "⚠️ AI 초안 · 반드시 법무 검증 필요", "color": "#A07020", "bg": "#F7EFE0"},
 }
 
-# 신선도 배지 — 리스크(severity)와 '직교'하는 별도 축. 값은 freshness_util/
-# staleness_util 판정에서 오며 LLM이 만들지 않는다. 리스크 배지의 🟡과 겹치지
-# 않도록 아이콘·팔레트를 분리(NEEDS_REVIEW=🔵, STALE=🟠).
+# 신선도 배지 — 리스크와 '직교'. slate 아웃라인 칩 + 중립 아이콘(채도 낮게 — 두 번째
+# 신호등으로 안 읽히게). 녹/황/적 채움 금지: 칩은 slate 단색, 상태는 아이콘/라벨로 구분.
 FRESHNESS_BADGES = {
-    "FRESH":        {"text": "최신 확인됨",    "icon": "🟢", "color": "#2E7D32", "bg": "#E8F5E9"},
-    "NEEDS_REVIEW": {"text": "추가 확인 필요",  "icon": "🔵", "color": "#1565C0", "bg": "#E3F2FD"},
-    "STALE":        {"text": "개정 반영 필요",  "icon": "🟠", "color": "#E65100", "bg": "#FFF3E0"},
-    "UNCOVERED":    {"text": "최신성 미검증",   "icon": "⚪", "color": "#616161", "bg": "#F5F5F5"},
+    "FRESH":        {"text": "최신 확인됨",    "icon": "✓", "color": "#475569", "bg": "#EDEEF0"},
+    "NEEDS_REVIEW": {"text": "추가 확인 필요",  "icon": "?", "color": "#475569", "bg": "#EDEEF0"},
+    "STALE":        {"text": "개정 반영 필요",  "icon": "⟳", "color": "#475569", "bg": "#EDEEF0"},
+    "UNCOVERED":    {"text": "최신성 미검증",   "icon": "—", "color": "#475569", "bg": "#EDEEF0"},
 }
 
 # 신선도 상태별 안내 카피 (§4). 겁주지 않고 '추가 확인' 방향. FRESH는 배너 없음.

@@ -2,7 +2,7 @@
 #  🤝 공정거래 실무 어시스턴트 v2.1 — 면세점 MD/바이어용
 #  이중 모델: Gemini(문서/검색) + Claude(법률검토) + 고가용성 우회
 #  보안: 자동 DLP(개인/기업정보) + 협력사명 지정 마스킹 탑재
-#  디자인: 신세계그룹 뉴스룸 테마 적용 (Noto Sans KR, #E02B20)
+#  디자인: DF 콤파스 Warm Editorial (Pretendard, parchment #F5F4ED, accent #C8102E)
 #
 #  v2.0 통일: MCP 경유 — 모든 법령 API 호출을 LawAPI(korean-law-mcp) 경유로 통일
 #  (Streamlit Cloud IP 차단 회피, 잔여 직접 호출 제거)
@@ -2714,9 +2714,9 @@ def _wrap_saryu_brackets(text):
 def render_verdict_badge(verdict, summary=""):
     """결론 배지 + 요약을 시각적 위계가 명확한 HTML 블록으로 렌더링"""
     badges = {
-        "approved":    ("🟢 위험 요소 미발견", "(사내변호사 확인 권장)", "#E8F5E9", "#2E7D32"),
-        "conditional": ("🟡 수정 필요 사항 발견", "", "#FFF8E1", "#F57F17"),
-        "rejected":    ("🔴 중대 위험 발견", "(진행 보류 권고)", "#FCE4EC", "#C62828"),
+        "approved":    ("🟢 위험 요소 미발견", "(사내변호사 확인 권장)", "#E6F0E7", "#1F7A3A"),
+        "conditional": ("🟡 수정 필요 사항 발견", "", "#F7EFE0", "#A07020"),
+        "rejected":    ("🔴 중대 위험 발견", "(진행 보류 권고)", "#F6E7E4", "#A93226"),
     }
     label, sub, bg_color, text_color = badges.get(verdict, ("⚪ 판단 보류", "", "#F5F5F5", "#616161"))
 
@@ -2781,7 +2781,7 @@ def render_verdict_hero(jd):
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span style="font-size:26px;font-weight:800;color:{sev['color']};line-height:1.1;">{sev['icon']} {sev['label']}</span>
             <span style="font-size:12px;font-weight:700;color:{eg['color']};background:{eg['bg']};padding:4px 11px;border-radius:12px;">{eg['text']}</span>
-            <span style="font-size:12px;font-weight:700;color:{fr['color']};background:{fr['bg']};padding:4px 11px;border-radius:12px;">{fr['icon']} {fr['text']}</span>
+            <span style="font-size:12px;font-weight:600;color:{fr['color']};background:transparent;border:1px solid {fr['color']};padding:3px 10px;border-radius:12px;">{fr['icon']} {fr['text']}</span>
         </div>
         {reason_html}
         {escalation_html}
@@ -3114,154 +3114,49 @@ def generate_review_docx(json_data, detail_text, query_text):
 
 # ── Streamlit UI 메인 함수 ────────────────────────────────────
 def main():
-    st.set_page_config(page_title="공정거래 실무 어시스턴트 v2.1", page_icon="🤝", layout="wide")
+    st.set_page_config(page_title="공정거래 실무 어시스턴트 v2.1", page_icon="⚖️", layout="wide")
 
     st.markdown("""
     <style>
-    /* ━━━ 신세계그룹 뉴스룸 디자인 시스템 ━━━
-       배경: #FFFFFF (화이트)
-       텍스트: #000000 (진한 검정)
-       액센트: #E02B20 (밝은 빨강)
-       폰트: Noto Sans KR
-       제목: 데스크탑 40px / 모바일 8.57vw
-       본문: 데스크탑 18px / 모바일 4.29vw
-       심플하고 화려함 배제, 뉴스 웹사이트 스타일
-    */
-
-    /* 1. 웹 폰트: Noto Sans KR (뉴스룸 공식 폰트) */
-    @import url("https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap");
-
-    /* 2. 전체 타이포그래피 */
-    html, body, [class*="css"] { 
-        font-family: 'Noto Sans KR', -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif !important; 
-        letter-spacing: -0.02em; 
-        color: #000000;
-        font-size: 16px;
-        line-height: 1.7;
+    /* === DF COMPASS Warm Editorial — ported === */
+    @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@latest/dist/web/static/pretendard.css");
+    :root {
+      --c-primary:    #1F1E1D;
+      --c-accent:     #C8102E;
+      --c-accent-dark:#9A0C24;
+      --c-accent-bg:  #FCEBEE;
+      --c-text:       #3D3C38;
+      --c-caption:    #87867F;
+      --c-muted:      #B5B3A9;
+      --c-border:     #E8E6DC;
+      --c-surface:    #FAF9F5;
+      --c-bg:         #F5F4ED;
+      --font: 'Pretendard', -apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif;
     }
-
-    /* 앱 배경: 화이트 (뉴스룸 동일) */
-    .stApp { background-color: #FFFFFF !important; }
-
-    /* 3. 채팅 메시지 블록 */
-    .stChatMessage { 
-        border-radius: 4px; 
-        padding: 24px 28px; 
-        margin-bottom: 16px; 
-        border: 1px solid #E8E8E8; 
-        background-color: #FFFFFF !important; 
-        line-height: 1.7;
-        font-size: 16px;
+    .stApp { background-color: var(--c-bg) !important; }
+    section[data-testid="stSidebar"] { background: var(--c-surface) !important; border-right: 1px solid var(--c-border) !important; }
+    html, body, [class*="css"] {
+      font-family: var(--font) !important;
+      color: var(--c-text);
+      font-size: 16px; line-height: 1.75; letter-spacing: -0.005em;
+      word-break: keep-all; overflow-wrap: anywhere;
+      -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
     }
-
-    /* 📱 4. 모바일 반응형 */
-    @media (max-width: 768px) {
-        .stChatMessage {
-            padding: 16px 18px;
-            font-size: 15px;
-        }
-        html, body, [class*="css"] {
-            font-size: 15px;
-        }
-    }
-
-    /* 5. 버튼 공통 (뉴스룸 — 심플, 직선적) */
-    div.stButton > button:first-child { 
-        border-radius: 2px; 
-        font-weight: 500; 
-        font-family: 'Noto Sans KR', sans-serif !important;
-        transition: all 0.15s ease; 
-    }
-
-    /* 🔴 프라이머리 버튼 (신세계 밝은 빨강 #E02B20) */
-    button[kind="primary"] { 
-        background-color: #E02B20 !important; 
-        color: #FFFFFF !important; 
-        border: none !important; 
-    }
-    button[kind="primary"]:hover {
-        background-color: #C41E15 !important; 
-        box-shadow: none !important;
-    }
-
-    /* ⚪ 세컨더리 버튼 (블랙 아웃라인) */
-    button[kind="secondary"] { 
-        background-color: #FFFFFF !important; 
-        color: #000000 !important; 
-        border: 1px solid #000000 !important; 
-    }
-    button[kind="secondary"]:hover {
-        background-color: #000000 !important;
-        color: #FFFFFF !important;
-    }
-
-    /* 6-a. 검토 결과 Alert 블록 (success/info 등) — 본문과 동일 크기 */
-    [data-testid="stAlert"] {
-        font-size: 14px !important;
-        line-height: 1.7 !important;
-    }
-    [data-testid="stAlert"] p {
-        font-size: 14px !important;
-    }
-
-    /* 6-b. Expander 제목 — 정돈된 크기 */
-    [data-testid="stExpander"] summary span {
-        font-size: 14px !important;
-        font-weight: 500 !important;
-    }
-
-    /* 6. 사이드바 */
-    [data-testid="stSidebar"] { 
-        background-color: #FAFAFA !important;
-        border-right: 1px solid #E8E8E8; 
-    }
-    
-    /* 인라인 코드 (뉴스룸 레드 톤) */
-    code { 
-        color: #E02B20; 
-        background-color: #FFF5F5; 
-        border-radius: 2px; 
-        padding: 0.15em 0.4em;
-        font-size: 0.9em;
-    }
-    pre { 
-        border-radius: 2px; 
-        background-color: #F5F5F5 !important; 
-        border: 1px solid #E8E8E8; 
-    }
-
-    /* 헤딩 스타일 (뉴스룸 — 굵고 깔끔) */
-    h1 { font-weight: 900 !important; color: #000000 !important; }
-    h2 { font-weight: 700 !important; color: #000000 !important; }
-    h3 { font-weight: 700 !important; color: #333333 !important; }
-
-    /* 7. 헤딩 앵커 링크 제거 */
-    .stMarkdown a[href^="#"],
-    [data-testid="stHeaderActionElements"] {
-        display: none !important;
-    }
-    h1 a, h2 a, h3 a, h4 a, h5 a, h6 a {
-        display: none !important;
-        pointer-events: none !important;
-    }
-
-    /* 8. Expander 스타일 (심플) */
-    .streamlit-expanderHeader {
-        font-weight: 500 !important;
-        font-size: 15px !important;
-        color: #000000 !important;
-    }
-
-    /* 9. 구분선 */
-    hr { border-color: #E8E8E8 !important; }
-
-    /* 10. success/info/warning 박스 톤 다운 */
-    [data-testid="stAlert"] {
-        border-radius: 2px !important;
-        font-size: 15px;
-    }
+    h1,h2,h3,h4 { color: var(--c-primary); font-weight: 700; }
+    .nx-topbar { position: fixed; top: 0; left: 0; right: 0; height: 4px; background: var(--c-accent); z-index: 9999; }
+    #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stHeader"] { visibility: hidden; }
+    .stChatMessage { background: var(--c-surface) !important; border: 1px solid var(--c-border); border-radius: 8px; padding: 24px 28px; margin-bottom: 16px; }
+    div.stButton > button { background: #fff; color: var(--c-primary); border: 1.5px solid var(--c-primary); border-radius: 6px; font-weight: 500; transition: all .15s ease; }
+    div.stButton > button:hover { background: var(--c-primary); color: #fff; }
+    button[kind="primary"] { background: var(--c-primary) !important; color: #fff !important; border: 1.5px solid var(--c-primary) !important; }
+    a { color: var(--c-accent); }
+    a:hover { color: var(--c-accent-dark); text-decoration: underline; }
+    code, [data-testid="stCodeBlock"] code { color: var(--c-accent-dark); background: var(--c-accent-bg); border-radius: 4px; }
+    [data-testid="stExpander"] { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: 8px; }
+    [data-testid="stCaptionContainer"], .stCaption { color: var(--c-caption); }
     </style>
     """, unsafe_allow_html=True)
+    st.markdown('<div class="nx-topbar"></div>', unsafe_allow_html=True)
 
     app_pw = get_secret("APP_PASSWORD")
     if app_pw:
