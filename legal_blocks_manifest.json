@@ -1,13 +1,13 @@
 {
   "_meta": {
-    "generated_at": "2026-06-20T15:19:28Z",
+    "generated_at": "2026-06-20T16:47:42Z",
     "note": "블록 무결성 골든 해시. 블록을 의도적으로 바꾸면 이 스크립트를 재실행해 갱신·커밋.",
     "source": "legal_blocks.json",
     "total_blocks": 8
   },
   "blocks": {
     "모조품::__topic__": "702bc2e60f6bf6c6deb79776920ce668d6e1819fec3ec4d67f28a4b54b23cfd0",
-    "모조품::bonded_store_notice": "fc1323af5db71748ca6d7727e04755069ea4f034649508f7899dfa83303794b1",
+    "모조품::bonded_store_notice": "620738d94c41264051e5f49746cf04a0337f493293f3eb6ab0b26e869fedbbe0",
     "모조품::consumer_protection": "f27a7354839d3d529cb67097a18fd36ffe9062a9800591d4467efe05be70b910",
     "모조품::criminal_fraud_347": "d75b091cc64826495ca8b7b85623ffc2d400621b807e038cd9c8e0db3c205d32",
     "모조품::customs_269": "cc12735898007b66f79c124beb92f9d79182899a08178f0597577268a56f5b3f",

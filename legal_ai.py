@@ -3432,6 +3432,46 @@ def main():
                 except Exception as _kpd_err:
                     st.error(f"K Public Data MCP 호출 실패: {_kpd_err}")
                     st.caption("도달 불가 시 §1 fallback(korean-law 재사용) 검토.")
+         with st.expander("🛡 의존성 freshness 점검 (Stage 1)", expanded=False):
+            st.caption("블록의 법적 근거(의존 법령·고시)가 현행인지 조문 단위로 점검 — 탐지 전용·답변 경로 무영향. bonded_store_notice만 검증됨, 나머지는 UNCOVERED(§8 온보딩 대기).")
+            if st.button("🛡 전체 블록 freshness sweep", use_container_width=True, key="freshness_sweep_btn"):
+                try:
+                    import kpd_mcp as _kpd
+                    from freshness_util import sweep as _sweep
+                    from block_assembler import load_legal_blocks as _llb
+
+                    def _kpd_resolve(dep_name, article_no, dep_type, ref):
+                        if dep_type == "행정규칙":
+                            _raw = call_kpd_legal_research("search_admin_rules", query=dep_name)
+                            _r = _kpd.parse_admin_rules(_raw or "", exact_name=dep_name)
+                            return _r["effective_date"] if _r["ok"] else None
+                        _law_type = "법률" if dep_type == "법률" else None
+                        _r = _kpd.resolve_law_effective_date(
+                            lambda action, **p: call_kpd_legal_research(action, **p),
+                            dep_name, article_no, law_type=_law_type)
+                        return _r["effective_date"] if _r["ok"] else None
+
+                    _fblocks = _llb("legal_blocks.json").get("모조품", {}).get("issues", [])
+                    with st.spinner("K Public Data MCP 경유 현행 시행일 대조 중..."):
+                        _frep = _sweep(_fblocks, _kpd_resolve)
+                    _ic = {"FRESH": "🟢", "STALE": "🔴", "NEEDS_REVIEW": "🟡", "UNCOVERED": "⚪", "OK": "🟢"}
+                    _ns = sum(1 for r in _frep if r["verdict"] == "STALE")
+                    _nr = sum(1 for r in _frep if r["verdict"] == "NEEDS_REVIEW")
+                    if _ns:
+                        st.error(f"🔴 STALE {_ns}건 — 인용 조문 개정 감지. 사람 확인 후 블록 수동 갱신 필요.")
+                    elif _nr:
+                        st.warning(f"🟡 NEEDS_REVIEW {_nr}건 — 현행 시행일 확인 불가(사람 확인).")
+                    else:
+                        st.success("🟢 검증된 블록 모두 현행 (UNCOVERED는 온보딩 대기 — 거짓 안심 아님).")
+                    for r in _frep:
+                        with st.expander(f"{_ic.get(r['verdict'], '⚪')} [{r['verdict']}] {r['title']}", expanded=(r['verdict'] == 'STALE')):
+                            st.write(r['reason'])
+                            for t in r.get('targets', []):
+                                _unit = f"{t['dep']} {t['no']}" if t['no'] else t['dep']
+                                st.caption(f"· {_unit}: 저장 {t['stored']} / 현행 {t.get('live') or '?'} → {_ic.get(t['verdict'], '⚪')} {t['verdict']}")
+                    st.info("⚠️ Stage 1 탐지 전용 — STALE/NEEDS_REVIEW는 사람이 확인 후 수동 갱신. UNCOVERED는 §8 온보딩 필요(절대 현행으로 간주 금지). 코드는 블록을 자동 수정하지 않습니다.")
+                except Exception as _fe:
+                    st.error(f"freshness sweep 실패: {_fe}")
          with st.expander("🔍 법령 최신성 점검", expanded=False):
             st.caption("DB 블록의 구조화 형량(penalty)을 korean-law-mcp 경유 현재 법령과 대조 — 감지 전용(블록 자동 수정 안 함).")
             if st.button("🔎 전체 블록 staleness 점검", use_container_width=True, key="staleness_check_btn"):

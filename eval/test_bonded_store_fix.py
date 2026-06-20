@@ -41,13 +41,15 @@ def test_erroneous_176_2_removed():
 
 
 def test_dependencies_schema():
+    """Stage 1: 조문 단위 effective_date 또는 행정규칙 rule_effective_date."""
     deps = _bonded().get("dependencies")
     assert isinstance(deps, list) and len(deps) == 3, deps
     for d in deps:
         assert d.get("name"), f"name 누락: {d}"
-        assert d.get("effective_date"), f"effective_date 누락: {d}"
-    names = {d["name"] for d in deps}
-    assert "관세법" in names
+        arts = d.get("articles") or []
+        has_anchor = any(isinstance(a, dict) and a.get("effective_date") for a in arts) or d.get("rule_effective_date")
+        assert has_anchor, f"시행일 앵커(조문별 또는 rule) 없음: {d}"
+    assert "관세법" in {d["name"] for d in deps}
 
 
 def test_penalty_law_ref_updated():
