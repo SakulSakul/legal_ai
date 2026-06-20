@@ -87,9 +87,18 @@
           "law_ref": "관세법 제178조(반입정지 등과 특허의 취소)"
         },
         "dependencies": [
-          {"name": "관세법", "type": "법률", "articles": ["제178조", "제235조"], "effective_date": "2026-01-01"},
-          {"name": "관세법 시행규칙", "type": "법규명령", "articles": ["제69조의5"], "effective_date": "2026-04-01"},
-          {"name": "보세판매장 특허 및 운영에 관한 고시", "type": "행정규칙", "ref": "관세청고시 2025-44호", "articles": ["제52조"], "effective_date": "2025-09-01"}
+          {"name": "관세법", "type": "법률",
+           "articles": [
+             {"no": "제178조", "effective_date": "2026-01-01"},
+             {"no": "제235조", "effective_date": "2026-01-01"}
+           ]},
+          {"name": "관세법 시행규칙", "type": "법규명령",
+           "articles": [
+             {"no": "제69조의5", "effective_date": "2026-04-01"}
+           ]},
+          {"name": "보세판매장 특허 및 운영에 관한 고시", "type": "행정규칙",
+           "ref": "관세청고시 2025-44호", "rule_effective_date": "2025-09-01",
+           "articles": [{"no": "제52조"}]}
         ]
       },
       {
