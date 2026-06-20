@@ -27,6 +27,7 @@ from triage_util import (
     enrich_triage_fields, evidence_grade_for, EVIDENCE_BADGES,
     FRESHNESS_BADGES, FRESHNESS_COPY, freshness_badge_for,
 )
+from negotiation_util import build_brief
 
 # ── 로깅 설정 ────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -578,7 +579,7 @@ def build_system_gemini_stage1(docs, laws_db):
         '    {"source": "사규/계약서 문서명", "clause": "조항번호/제목", "content": "해당 원문 발췌", "relevance": "위반|부합|공백"}\n'
         '  ],\n'
         '  "law_findings": [\n'
-        '    {"law_name": "대규모유통업법", "article": "제11조", "title": "조문 제목", "content": "Google Search로 확인한 조문 핵심 내용 요약", "effective_date": "시행일자", "search_confirmed": true}\n'
+        '    {"law_name": "대규모유통업법", "article": "제11조", "title": "조문 제목", "content": "조문 핵심 내용 — 금지/상한 조문이면 같은 조의 예외·단서·적용제외 항(예: 제11조⑤ 적용제외)도 반드시 함께", "effective_date": "시행일자", "search_confirmed": true}\n'
         '  ],\n'
         '  "precedent_findings": [\n'
         '    {"case_no": "대법원 2019.11.14. 선고 2019다12345 판결", "summary": "핵심 판시사항", "search_confirmed": true}\n'
@@ -596,8 +597,10 @@ def build_system_gemini_stage1(docs, laws_db):
         "보세판매장 특허 및 운영에 관한 고시 등\n\n"
 
         "██ 특별 검토 규칙 ██\n"
-        "- 【최우선 필수】 보세판매장고시는 모든 질의에서 law_findings에 반드시 포함할 것.\n"
-        "  보세판매장고시를 law_findings에서 빠뜨리면 시스템 오류로 간주됨.\n"
+        "- 【관련성 게이트】 보세판매장고시는 '관련 질의'에서만 law_findings에 포함할 것.\n"
+        "  관련 = 보세/면세점/통관/특허/반입·반출/모조품·가품 등 보세판매장 운영과 직접 닿는 질의.\n"
+        "  무관 질의(순수 판촉비·분담비율·단가·수수료·입퇴점 조건 등 거래조건만 묻는 경우)에는\n"
+        "  보세판매장고시·소비자기본법을 law_findings에 넣지 마라(무관 법령을 동급 쟁점으로 올리면 노이즈).\n"
         "  「보세판매장 특허 및 운영에 관한 고시」 — 특허요건(제3조), 시설요건(제4조), "
         "물품반입(제7조), 판매/인도(제8조), 특허심사(제15조), 행정처분(제18조), 판매대상물품(제28조) 등\n"
         "  「보세판매장 운영에 관한 고시」 — 판매장운영(제3조), 물품반입(제7조), "
@@ -629,7 +632,16 @@ def build_system_gemini_stage1(docs, laws_db):
         "     - 국가 특허 지위→높은 주의의무, 정품 보증 소비자 기대, 외국인 고객 국제 파급\n"
         "  ⚠️ 위 7개 영역 모두 검토. 형량 비워두기('원문 참조') 절대 금지.\n"
         "- 위험도 등급 기준: 🔴 위험=형사처벌 또는 특허취소 직결 / 🟡 주의=행정제재·민사배상 중심\n"
-        "- 관세법: 특허취소(제178조), 밀수출입(제269조 제2항), 지식재산권보호(제235조) 포함.\n\n"
+        "- 관세법: 특허취소(제178조), 밀수출입(제269조 제2항), 지식재산권보호(제235조) 포함.\n"
+        "- 【판매촉진비·분담비율 질의 — 예외 조항 필수 수집】 대규모유통업법 제11조는 ④에서 납품업자\n"
+        "  분담비율 100분의 50 상한을 두지만, ⑤에서 '납품업자가 자발적으로 요청 + 다른 납품업자와\n"
+        "  차별화되는 판촉행사'면 상호 협의로 분담비율을 정할 수 있고 제1항부터 제4항까지 적용하지\n"
+        "  아니한다(= 50% 초과도 합법 가능, 시행 2025-01-21). 판촉비/분담/판매촉진 질의 시 제11조\n"
+        "  ④(상한)와 ⑤(적용제외 예외)를 반드시 함께 law_findings에 수집할 것. ⑤를 빠뜨리고 50%\n"
+        "  상한만 수집하면 과보수 오답이 된다.\n"
+        "- 【일반 규칙 — 예외 절 동반 수집】 금지·상한·의무 조문을 수집할 때는 같은 조문의 예외 절\n"
+        "  (단서 '다만…', 적용제외 항 '제N항을 적용하지 아니한다', 별항/별호)을 반드시 함께 수집하라.\n"
+        "  금지 항만 가져오고 예외 항을 빠뜨리면 구조적 과보수가 된다.\n\n"
 
         "━━━ [당사 사규] ━━━\n" + saryu_text +
         "\n\n━━━ [당사 표준 계약서] ━━━\n" + contract_text +
@@ -1142,10 +1154,15 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
     verified_precedents = []
     dropped_precedents = []
     
+    # provenance(출처) 기계 태깅 — retrieval 버킷(cat)으로 [사규]/[계약]/[법령] 부여.
+    # LLM이 추정·창작 못 하게 gatekeeper_text에 출처를 명시(작업 2 프롬프트가 이 태그만 신뢰).
+    def _src_of(cat):
+        return "계약" if cat in ("contract", "yakjeong") else "사규"
+
     # 1. 사규 분석 결과 → Gemini가 못 찾았으면 키워드 기반 원문 직접 주입
     saryu_findings = gemini_raw_json.get("saryu_findings", [])
     if saryu_findings:
-        refined_parts.append("━━━ [사규 분석 결과 (Gemini 확인)] ━━━")
+        refined_parts.append("━━━ [출처:사규] 사규 분석 결과 (Gemini 확인) ━━━")
         for sf in saryu_findings:
             refined_parts.append(f"- [{sf.get('relevance','?')}] {sf.get('source','?')} {sf.get('clause','')}: {sf.get('content','')[:200]}")
 
@@ -1169,13 +1186,14 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
             _keywords = set(query_text.replace(" ", ""))
 
         if _keywords:
-            refined_parts.append("━━━ [사규/계약서 원문 — 키워드 기반 검색 결과] ━━━")
+            refined_parts.append("━━━ [근거 문서 원문 — 키워드 기반 검색 결과] ━━━")
             _found_any = False
             for doc in docs:
                 if doc.get("cat") not in ("saryu", "contract", "yakjeong"):
                     continue
                 full_text = doc.get("text", "")
                 label = doc.get("label", doc.get("name", ""))
+                _src = _src_of(doc.get("cat"))  # 사규 vs 계약 — 버킷 기계 태깅
                 if not full_text:
                     continue
 
@@ -1191,21 +1209,22 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
 
                 if matched_paragraphs:
                     _found_any = True
-                    refined_parts.append(f"📄 [{label}] — 키워드 매칭 {len(matched_paragraphs)}건")
+                    refined_parts.append(f"📄 [출처:{_src}] [{label}] — 키워드 매칭 {len(matched_paragraphs)}건")
                     for mp in matched_paragraphs[:12]:  # 최대 12개 문단
                         refined_parts.append(f"  → {mp}")
                     logger.info(f"Gatekeeper 사규 키워드 검색: [{label}] {len(matched_paragraphs)}건 매칭 (키워드: {_keywords})")
 
             if not _found_any:
                 # 키워드 매칭 실패 → 각 문서의 앞/중간/끝 구간을 균등 샘플링
-                refined_parts.append("━━━ [사규 원문 — 키워드 미매칭, 균등 샘플링 주입] ━━━")
+                refined_parts.append("━━━ [근거 문서 원문 — 키워드 미매칭, 균등 샘플링 주입] ━━━")
                 for doc in docs:
                     if doc.get("cat") in ("saryu", "contract", "yakjeong"):
                         label = doc.get("label", doc.get("name", ""))
+                        _src = _src_of(doc.get("cat"))
                         full = doc.get("text", "")
                         doc_len = len(full)
                         if doc_len <= 5000:
-                            refined_parts.append(f"📄 [{label}] (전문)\n{full}")
+                            refined_parts.append(f"📄 [출처:{_src}] [{label}] (전문)\n{full}")
                         else:
                             # 앞 2000자 + 중간 2000자 + 끝 1000자 = 5000자
                             mid_start = doc_len // 2 - 1000
@@ -1214,12 +1233,12 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
                                 full[mid_start:mid_start+2000] + "\n...(중략)...\n" +
                                 full[-1000:]
                             )
-                            refined_parts.append(f"📄 [{label}] (샘플링 {doc_len}자 중 5000자)\n{sample}")
+                            refined_parts.append(f"📄 [출처:{_src}] [{label}] (샘플링 {doc_len}자 중 5000자)\n{sample}")
                 logger.info("Gatekeeper: 키워드 미매칭 → 균등 샘플링 주입")
-    
+
     # 2. 법령 → 사내 DB 대조 + API 보조 검증
     law_findings = gemini_raw_json.get("law_findings", [])
-    refined_parts.append("\n━━━ [법령 검증 결과] ━━━")
+    refined_parts.append("\n━━━ [출처:법령] 법령 검증 결과 ━━━")
     
     for lf in law_findings:
         law_name = lf.get("law_name", "")
@@ -1326,32 +1345,50 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
         for ra in risk_areas:
             refined_parts.append(f"- {ra}")
     
-    # 5. ██ 보세판매장고시 + 소비자기본법 무조건 강제 주입 ██
-    # 면세점 전용 앱 — Gemini 수집 여부와 무관하게 항상 DB 원문 주입
+    # 5. ██ 면세점 baseline 법령 — 관련성 게이트 (무조건주입 → 관련 시 쟁점, 무관 시 강등) ██
+    # 기존: 모든 질의에 보세판매장고시·소비자기본법을 무조건 주입 → 무관 쟁점이 동급으로
+    #       붙는 노이즈 근원. 변경: 질의 관련성으로 게이트하되, 무관해도 '삭제'가 아니라
+    #       접힌 '기타 참고 법령' 한 줄로 '강등'(안전 커버리지 보호 — 역회귀 방지).
     forced_law_shorts = {
-        "보세판매장고시": {"제3조", "제4조", "제5조", "제7조", "제8조", "제10조", 
+        "보세판매장고시": {"제3조", "제4조", "제5조", "제7조", "제8조", "제10조",
                         "제15조", "제18조", "제19조", "제20조", "제21조", "제28조"},
         "보세판매장운영고시": {"제3조", "제7조", "제9조", "제14조", "제28조"},
         "소비자기본법": {"제4조", "제19조", "제20조"},
     }
-    
+    # 관련성 키워드 (질의·요약 기준). 보수적으로 — 면세점 baseline은 관련 신호가 넓다.
+    _q_relv = ((user_query or "") + " " + str(gemini_raw_json.get("query_summary", ""))).lower()
+    _bonded_kw = ("보세판매장", "면세점", "모조품", "위조", "가품", "짝퉁", "정품", "통관",
+                  "특허", "반입", "퇴점", "입점", "밀수", "보세", "수입", "수출")
+    _consumer_kw = ("소비자", "리콜", "표시", "광고", "안전", "결함", "하자", "환불", "교환",
+                    "b2c", "일반판매", "판매장", "고객")
+    _relevance = {
+        "보세판매장고시":     any(k in _q_relv for k in _bonded_kw),
+        "보세판매장운영고시": any(k in _q_relv for k in _bonded_kw),
+        "소비자기본법":       any(k in _q_relv for k in _consumer_kw),
+    }
+    demoted_laws = []  # 관련 낮아 강등된 baseline (접힘 참고용 — 쟁점 아님)
+
     for force_short, force_articles in forced_law_shorts.items():
         force_laws = [db_law for db_law in laws_db if db_law.get("law_short") == force_short]
         if not force_laws:
             continue
-        
-        # 이미 Gemini가 수집했는지 확인
         already_found = any(
             force_short in lf.get("law_name", "")
             for lf in gemini_raw_json.get("law_findings", [])
         )
         if already_found:
             continue
-        
+
+        if not _relevance.get(force_short, True):
+            # 강등(드롭 아님): 접힌 참고 1줄. 쟁점/verified_laws에는 안 올림.
+            demoted_laws.append(force_short)
+            logger.info(f"Gatekeeper: {force_short} 관련성 낮음 → 강등(참고)")
+            continue
+
         section_name = force_short
-        refined_parts.append(f"\n━━━ [{section_name} — 필수 검토 (DB 원문)] ━━━")
-        refined_parts.append(f"██ {section_name} 조문은 면세점 모든 검토에 필수. 반드시 issues에 반영. ██")
-        
+        refined_parts.append(f"\n━━━ [출처:법령] {section_name} — 관련 법령 (DB 원문) ━━━")
+        refined_parts.append(f"██ {section_name} 조문이 이 질의와 관련됨. 관련 쟁점만 issues에 반영. ██")
+
         injected = 0
         for ba in force_laws:
             if ba["article_no"] not in force_articles:
@@ -1372,8 +1409,14 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
             })
             injected += 1
         if injected > 0:
-            logger.info(f"Gatekeeper: {section_name} {injected}건 강제 주입")
-    
+            logger.info(f"Gatekeeper: {section_name} {injected}건 관련 주입")
+
+    if demoted_laws:
+        refined_parts.append(
+            "\n[기타 참고 법령(이 질의와 직접 관련 낮음 — 쟁점 아님): "
+            + ", ".join(demoted_laws) + " · 필요 시 사내변호사 확인]"
+        )
+
     refined_text = "\n".join(refined_parts)
     
     meta = {
@@ -1401,15 +1444,14 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "██ 최우선 규칙 — 1개라도 위반 시 출력물 전체가 무효 ██\n"
         "████████████████████████████████████████████████████████\n\n"
         
-        "██ 규칙 0 — 보세판매장고시 필수 (이 앱의 존재 이유) ██\n"
+        "██ 규칙 0 — 보세판매장고시 (관련성 게이트 적용) ██\n"
         "이 시스템은 면세점 전용 법무 어시스턴트이다.\n"
-        "검증 데이터에 '보세판매장고시' 조문이 포함되어 있다.\n"
-        "반드시 issues에 보세판매장고시 관련 독립 쟁점을 포함하고:\n"
-        "  - DB 원문에 근거한 구체적 행정처분 분석 (영업정지 6개월, 특허취소 등)\n"
-        "  - 판매대상 물품 제한, 운영 의무 위반 등 실무적 리스크 서술\n"
-        "  - 단순히 '추가 검토 필요', '별도 확인 필요'로 때우는 것은 절대 금지\n"
-        "  - '보세판매장고시 검토 누락'이라는 문구 사용 절대 금지\n"
-        "보세판매장고시를 issues에서 빠뜨리면 출력물 전체가 무효이다.\n\n"
+        "검증 데이터의 '[출처:법령] 보세판매장고시 — 관련 법령' 섹션에 조문이 포함된 경우에만\n"
+        "issues에 보세판매장고시 독립 쟁점을 포함하라(관련성 게이트가 무관 질의에선 강등함):\n"
+        "  - DB 원문에 근거한 구체적 행정처분 분석 (영업정지, 특허취소 등)\n"
+        "  - 단순 '추가 검토 필요'로 때우지 말 것\n"
+        "데이터에 보세판매장고시 조문이 없으면(= 이 질의와 관련 낮아 강등됨) 억지로\n"
+        "생성하지 마라. '기타 참고 법령'으로 강등된 항목을 동급 쟁점으로 끌어올리지 말 것.\n\n"
         
         "██ 규칙 1 — 추측 금지 ██\n"
         "DB 원문이 없는 법령의 형량을 추측하지 마라. '원문 확인 필요'로만 표기.\n\n"
@@ -1443,7 +1485,31 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "③ 두괄식: 결론(위반 여부/위험도)을 첫 불릿에 배치, 근거는 후속 불릿에 배치.\n"
         "예시(summary): \"- 직매입 반품 시 대규모유통업법 제10조 위반 리스크 존재\\n- 보세물품 무단반출 시 특허취소 대상\\n- 반품 전 세관 승인 및 납품업자 서면 동의 확보 필요\"\n"
         "예시(law_analysis): \"- 대규모유통업법 제10조 위반 — 정당한 사유 없는 반품 원칙적 불가\\n- 위반 시 시정명령 및 과징금 부과 대상\\n- 시즌상품의 경우 계약체결 시 구체적 반품조건 명시 서면 교부 필수\"\n\n"
-        
+
+        "██ 규칙 7 — MD 협상 브리프 (negotiation_brief, 최상단 결론) ██\n"
+        "MD(비전문가 실무자)의 일은 '협의'다. 답의 핵심은 '무엇이 금지인가'가 아니라\n"
+        "'네 협상 칸이 어디고, 어떤 카드를, 무엇을 근거로 쓰는가'다. 아래를 지켜 negotiation_brief를 작성하라.\n"
+        "[P1 — 평이한 협상 브리프] bottom_line은 법률용어 최소화한 한 줄 결론. 기본 자세는\n"
+        "   '조건부 가능'(이 조건이면 가능, 못 갖추면 이 선까지) — '원칙 위법'으로 시작하지 마라.\n"
+        "   상세 legalese는 issues에만. negotiation_brief는 MD가 20초에 읽는 평이한 한국어.\n"
+        "[P2 — 출처는 버킷에서만(창작 금지)] leverage[].source는 반드시 검증 데이터의\n"
+        "   [출처:사규]/[출처:계약]/[출처:법령] 버킷 헤더에 근거해서만 부여하라. 네가 출처를\n"
+        "   추정·창작하면 안 된다. 데이터에 근거 출처가 없으면 그 레버리지를 만들지 마라.\n"
+        "   role 매핑: 법령→shield(방패·룰북), 계약→table(협상 테이블·내가 서명), 사규→internal(내부 유연성).\n"
+        "   binding: 법정 상한 등 못 바꿈=fixed, 예외 충족 시 가능=conditional, 내부 재량=negotiable.\n"
+        "[P3 — 예외 우선 노출(과보수 금지, 과허용도 금지)] 각 제약마다 금지만이 아니라\n"
+        "   법·규정에 명기된 예외(단서 '다만…', 별항/별호, 적용제외, 특례·시행령·고시)를 반드시 노출하라.\n"
+        "   · 예외 있음 → leverage 항목에 exception + conditions(자격요건) + documents(입증 서류)를 세트로,\n"
+        "     입증 책임이 누구에게 있는지 명시. (있는 예외를 조용히 빠뜨리는 게 핵심 실패다.)\n"
+        "   · 예외 없음(데이터로 확인) → no_room에 '못 움직이는 선'으로.\n"
+        "   · 데이터에서 예외를 못 찾음 → exception_uncertain에 '예외 가능성 사내변호사 확인' 으로.\n"
+        "     (못 찾음 ≠ 없음. 단정하지 말 것.)\n"
+        "   · [예시·필수] 대규모유통업법 제11조: ④(분담 50% 상한)를 쟁점화하면, 같은 조 ⑤(납품업자\n"
+        "     자발 요청+차별화 시 ①~④ 적용제외 → 50% 초과 협의 가능)를 반드시 같은 leverage의\n"
+        "     exception으로 노출하라. ④만 단정하고 ⑤를 빠뜨리면 법률 오류다(자발+차별화면 60%도 합법).\n"
+        "escalation은 '사내변호사에게 무엇 하나만 확인하면 되는지'로 좁혀라(예: '예외 입증서류 충분한지').\n"
+        "중복 제거: 쟁점별 실무 권고는 negotiation_brief로 통합하고 issues에는 법적 근거만 남겨라.\n\n"
+
         "████ 필수 쟁점 포함 규칙 (모조품/가품 관련) ████\n"
         "모조품 관련 질의 시 아래 7개를 각각 독립 쟁점으로 출력:\n"
         "⚠️ 모든 형량/벌금/제재는 반드시 {{법령약칭_조문번호_내용}} Placeholder로 작성. 숫자 직접 기재 절대 금지.\n"
@@ -1472,6 +1538,23 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         '  "summary": "개조식 3~4줄 요약 (불릿 - 사용, 명사형 종결: ~불가/~필요/~존재/~대상)",\n'
         '  "verdict": "approved | conditional | rejected",\n'
         '  "verdict_reason": "종합 판단 근거 (전달된 데이터에 근거하여)",\n'
+        '  "negotiation_brief": {\n'
+        '    "bottom_line": "조건부 가능 형태의 평이한 결론 한 줄 (예: 60%는 원칙 불가(법정 50%)이나, 자발적 서면요청+차별화 입증 시 합법 가능)",\n'
+        '    "leverage": [\n'
+        '      {\n'
+        '        "source": "법령|사규|계약  ← [출처:X] 버킷에서만, 창작 금지",\n'
+        '        "role": "shield|table|internal",\n'
+        '        "binding": "fixed|conditional|negotiable",\n'
+        '        "point": "MD 평이한 말로 핵심 (법률용어 최소화)",\n'
+        '        "exception": "예외 경로 또는 null",\n'
+        '        "conditions": ["예외 자격요건 (예외 있을 때 필수)"],\n'
+        '        "documents": ["챙길 입증 서류 (예외 있을 때)"]\n'
+        '      }\n'
+        '    ],\n'
+        '    "no_room": ["진짜 못 움직이는 선 — 예외 없음·데이터로 확인된 항목"],\n'
+        '    "exception_uncertain": ["예외를 데이터에서 못 찾아 사내변호사 확인 권장한 항목"],\n'
+        '    "escalation": "사내변호사에게 확인할 단 하나 (예: 예외 입증서류 충분한지)"\n'
+        '  },\n'
         '  "issues": [\n'
         '    {\n'
         '      "issue_no": 1, "title": "쟁점 제목", "risk_level": "high|medium|low",\n'
@@ -2791,6 +2874,60 @@ def render_verdict_hero(jd):
     st.markdown(html, unsafe_allow_html=True)
 
 
+def render_negotiation_brief(jd):
+    """MD 협상 브리프 — hero 바로 아래, 상세 법령 근거보다 위(기본 노출).
+    출처(법령/사규/계약)를 레버리지(🛡 방패/🃏 카드/📄 테이블/📋 내부)로 번역하고, 예외를
+    자격요건·서류와 세트로, '없음(🚫) vs 못 찾음(❔)'을 구분해 평이하게 보여준다.
+    provenance/예외 정규화는 negotiation_util(순수)에서 — 가짜 출처 배지·예외 침묵 방지.
+    """
+    # 모델이 brief를 emit했으면 사용(richer), 아니면 issues로 결정론 조립(형태 보장).
+    b = build_brief(jd)
+    if not b:
+        return  # 이슈도 브리프도 없음(구버전·빈 응답) → 미표시(하위호환)
+
+    p = ['<div style="background:#FAF9F5;border:1px solid #E5E2D8;border-radius:8px;padding:16px 20px;margin-bottom:12px;">']
+    p.append('<div style="font-size:13px;font-weight:700;color:#9A0C24;letter-spacing:.02em;margin-bottom:6px;">🤝 협상 브리프</div>')
+    if b["bottom_line"]:
+        p.append(f'<div style="font-size:16px;font-weight:700;line-height:1.5;color:#3D3C38;margin-bottom:10px;">결론: {b["bottom_line"]}</div>')
+
+    # 레버리지 — 예외 있는 항목은 🃏 카드(줄 수 있는 카드), 없으면 출처 아이콘(🛡/📄/📋)
+    for lv in b["leverage"]:
+        icon = "🃏" if lv["has_exception"] else lv["icon"]
+        head = "줄 수 있는 카드 (예외·조건부)" if lv["has_exception"] else lv["source_label"]
+        binding = f' · {lv["binding_label"]}' if lv["binding_label"] else ""
+        prov = "" if lv["provenance_ok"] else ' <span style="color:#A07020;">(근거 출처 불명)</span>'
+        p.append('<div style="margin:8px 0;">')
+        p.append(f'<div style="font-size:14px;font-weight:600;color:#3D3C38;">{icon} {head}{binding}{prov}</div>')
+        if lv["point"]:
+            p.append(f'<div style="font-size:14px;line-height:1.55;color:#3D3C38;margin-left:22px;">{lv["point"]}</div>')
+        if lv["has_exception"]:
+            if lv["exception"]:
+                p.append(f'<div style="font-size:13px;line-height:1.5;color:#475569;margin-left:22px;">예외: {lv["exception"]}</div>')
+            if lv["conditions"]:
+                p.append(f'<div style="font-size:13px;color:#475569;margin-left:22px;">자격요건: {" / ".join(lv["conditions"])}</div>')
+            if lv["documents"]:
+                p.append(f'<div style="font-size:13px;color:#475569;margin-left:22px;">└ 챙길 서류: {" / ".join(lv["documents"])}</div>')
+        p.append('</div>')
+
+    # 못 움직이는 선 (예외 없음·확인됨) — '없음'을 명시
+    if b["no_room"]:
+        items = "".join(f"<li>{x}</li>" for x in b["no_room"])
+        p.append('<div style="font-size:14px;font-weight:600;color:#A93226;margin-top:10px;">🚫 여기는 못 움직임 (예외 없음·확인)</div>')
+        p.append(f'<ul style="font-size:13px;line-height:1.6;color:#3D3C38;margin:4px 0 0 0;padding-left:40px;">{items}</ul>')
+
+    # 못 찾음 (≠ 없음) — 사내변호사 확인. '없음'과 시각적으로 구분.
+    if b["exception_uncertain"]:
+        items = "".join(f"<li>{x}</li>" for x in b["exception_uncertain"])
+        p.append('<div style="font-size:14px;font-weight:600;color:#475569;margin-top:10px;">❔ 예외 가능성 미확인 (사내변호사 확인 권장)</div>')
+        p.append(f'<ul style="font-size:13px;line-height:1.6;color:#3D3C38;margin:4px 0 0 0;padding-left:40px;">{items}</ul>')
+
+    if b["escalation"]:
+        p.append(f'<div style="font-size:13px;font-weight:700;color:#9A0C24;margin-top:12px;">→ {b["escalation"]}</div>')
+
+    p.append('</div>')
+    st.markdown("".join(p), unsafe_allow_html=True)
+
+
 def _section_header(icon, title):
     """통일된 섹션 헤더 (h3보다 작고 정돈된 스타일)"""
     st.markdown(
@@ -3255,8 +3392,7 @@ def main():
 - 비밀번호 입력 후 이용
 
 **2. 검토 요청 방법 (일반 사용자)**
-- **1단계 (사내 기준 자문):** 채팅창에 규정 관련 질문 입력
-- **2단계 (심층 법무 검토):** "검토", "위반", "적법" 등 키워드 포함하여 질문하거나 파일 첨부
+- **법무 검토:** 채팅창에 규정·계약 관련 질문을 입력하거나, "검토"·"위반"·"적법" 등 키워드를 포함해 질문하거나 파일을 첨부
 - **리비전 비교:** 당사 초안(V1)과 협력사 수정본(V2)을 나란히 업로드하면 변경된 독소조항을 자동 비교
 
 **3. 검토의견서 해석법**
@@ -4400,15 +4536,15 @@ def main():
       if not st.session_state.messages and st.session_state.docs:
         st.markdown("### 💡 AI 법무 자문 100% 활용 가이드")
         st.info(
-            "본 시스템은 질문의 목적에 따라 **두 가지 수준의 맞춤형 자문**을 제공합니다.\n\n"
-            "🔹 **[1단계] 사내 기준 자문:** 일상적인 규정 문의 시, 등록된 당사 사규와 표준계약서를 바탕으로 신속한 실무 기준을 안내합니다.\n"
-            "🔹 **[2단계] 심층 법무 검토:** 계약서/약정서가 첨부되거나 위법성 판단을 요청하면, 내부 사규와 외부 현행 법령을 교차 분석하여 정식 '검토 의견서'를 발행합니다."
+            "본 시스템은 등록된 당사 사규·표준계약서와 외부 현행 법령을 교차 분석하여 "
+            "**심층 법무 검토 의견서**를 발행하는 도구입니다.\n\n"
+            "🔹 규정·계약 관련 질문을 입력하거나, 계약서/약정서를 첨부해 위법성·독소조항 분석을 요청하세요."
         )
-        
+
         samples = [
-            ("🔹 [1단계] 단순 사내 규정 문의", "현재 등록된 당사에 따르면, 브랜드 자발적 사유로 매장을 리뉴얼할 때 인테리어 비용 분담 기준이 어떻게 돼?"),
-            ("🔹 [2단계] 심층 법률 조항 검토", "협력사가 특약매입 판촉비 분담률을 60%로 요구하고 있어. 법률적으로 이게 맞음? 수용 가능한지 당사 기준과 대규모유통업법을 비교해서 분석해줘."),
-            ("🔹 [2단계] 첨부파일 교차 검토", "[파일 첨부 후 클릭] 첨부한 파견 약정서(협력사 회신본) 내용 중, 당사 표준 규정에 어긋나거나 법 위반 소지가 있는 독소조항을 찾아내 줘.")
+            ("🔹 사내 기준 문의", "현재 등록된 당사에 따르면, 브랜드 자발적 사유로 매장을 리뉴얼할 때 인테리어 비용 분담 기준이 어떻게 돼?"),
+            ("🔹 심층 법률 조항 검토", "협력사가 특약매입 판촉비 분담률을 60%로 요구하고 있어. 법률적으로 이게 맞음? 수용 가능한지 당사 기준과 대규모유통업법을 비교해서 분석해줘."),
+            ("🔹 첨부파일 교차 검토", "[파일 첨부 후 클릭] 첨부한 파견 약정서(협력사 회신본) 내용 중, 당사 표준 규정에 어긋나거나 법 위반 소지가 있는 독소조항을 찾아내 줘.")
         ]
         cols = st.columns(3)
         for i, (cat, q) in enumerate(samples):
@@ -4425,6 +4561,8 @@ def main():
                 enrich_triage_fields(jd)
                 # ── 1. verdict-as-hero (심각도+신뢰배지+이유+에스컬레이션) ──
                 render_verdict_hero(jd)
+                # ── 1.5. MD 협상 브리프 (출처→레버리지 + 예외 우선) ──
+                render_negotiation_brief(jd)
                 # ── 2. 다음 액션 ──
                 if jd.get("action_plan"):
                     _section_header("📌", "다음 액션 (MD Action Plan)")
@@ -4540,6 +4678,8 @@ def main():
                         # ── 1. verdict-as-hero (심각도+신뢰배지+이유+에스컬레이션) ──
                         enrich_triage_fields(json_data)
                         render_verdict_hero(json_data)
+                        # ── 1.5. MD 협상 브리프 (출처→레버리지 + 예외 우선) ──
+                        render_negotiation_brief(json_data)
 
                         # ── 2. 다음 액션 ──
                         if json_data.get("action_plan"):
