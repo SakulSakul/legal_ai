@@ -41,7 +41,7 @@ def get_secret(key, default=""):
         return os.environ.get(key, default)
 
 # 모델명 외부 설정 지원 (Secrets에 없으면 기본값 사용)
-CLAUDE_MODEL = get_secret("CLAUDE_MODEL", "claude-sonnet-4-20250514")
+CLAUDE_MODEL = get_secret("CLAUDE_MODEL", "claude-opus-4-8")
 GEMINI_MODELS = [
     get_secret("GEMINI_MODEL_PRIMARY", "gemini-3.1-pro-preview"),
     get_secret("GEMINI_MODEL_FALLBACK", "gemini-3-flash-preview"),
@@ -216,8 +216,17 @@ def save_review_log(log_data):
         init_supabase().table("review_logs").upsert(log_data).execute()
         return True
     except Exception as e:
-        logger.error(f"검토 이력 저장 실패: {e}")
-        return False
+        # 신규 컬럼(verdict_severity/evidence_grade/escalation_advised) 미존재 등으로
+        # 전체 upsert가 실패하면 감사 로그가 통째 유실됨 → 핵심 컬럼만 남겨 재시도.
+        logger.warning(f"검토 이력 전체 저장 실패({e}) — 핵심 컬럼만 재시도(신규 컬럼 미존재 가능)")
+        _core_keys = {"id", "session_id", "verdict", "issues", "action_plan", "cited_laws", "citation_verified"}
+        core = {k: v for k, v in log_data.items() if k in _core_keys}
+        try:
+            init_supabase().table("review_logs").upsert(core).execute()
+            return True
+        except Exception as e2:
+            logger.error(f"검토 이력 저장 실패(핵심 컬럼도): {e2}")
+            return False
 
 def load_laws():
     try:
@@ -960,7 +969,7 @@ def call_mcp_law(query, max_tokens=2048):
             time.sleep(2)
 
         response = client.beta.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=CLAUDE_MODEL,
             max_tokens=max_tokens,
             system=f"법제처 API 키: {law_api_key}. 도구 호출 시 apiKey에 이 키를 사용하세요.\n"
                    "⚠️ 약칭 주의: '표시광고법'은 '표시·광고의 공정화에 관한 법률'(공정거래법 계열)이다. "
@@ -3616,7 +3625,7 @@ def main():
                             try:
                                 _law_key = get_secret("LAW_OC") or ""
                                 resp = _client.beta.messages.create(
-                                    model="claude-sonnet-4-20250514",
+                                    model=CLAUDE_MODEL,
                                     max_tokens=500,
                                     system=(
                                         f"법제처 API 키: {_law_key}. 도구 호출 시 apiKey에 이 키를 사용하세요."
