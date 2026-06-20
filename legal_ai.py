@@ -53,6 +53,66 @@ GEMINI_MODELS = [
     get_secret("GEMINI_MODEL_FALLBACK", "gemini-3.1-flash-lite"),
 ]
 
+# 블록경로 토픽별 권장 행동(B2) — 모조품 디폴트가 타 토픽에 누수되지 않게 토픽 단위로.
+# 미등록 토픽은 빈값 → 협상 브리프의 권장 행동이 담당. 개조식·명사형.
+_TOPIC_ACTION_PLAN = {
+    "모조품": (
+        "· 즉시: 의심상품 판매중단·재고조사\n"
+        "· 24시간: 법무담당부서 긴급대응팀 구성\n"
+        "· 1주: 공급업체 전면 재심사\n"
+        "· 1개월: 보세판매장 준수체계 재구축"
+    ),
+    "판촉비분담": (
+        "· 협력사 발신 '자발적 요청' 공문 확보\n"
+        "· 차별화 행사 입증자료(기획안) 확보\n"
+        "· 2요건 충족 시 서면약정·동시교부(§11①②)\n"
+        "· 미충족 시 분담률 50% 재협의\n"
+        "· 사내변호사 확인 = '⑤ 입증서류 충분성'만"
+    ),
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _compute_block_freshness(topic_key):
+    """블록 토픽 freshness를 '계산'(정적 FRESH 주입 금지 — 거짓 단언 방지, S4).
+    토픽 issues의 dependencies(기록 시행일) vs KPD MCP 리졸버 현재값을 freshness_util로 비교
+    → FRESH/STALE/NEEDS_REVIEW/UNCOVERED. 기록 시행일이 개정으로 뒤처지면 자동 STALE.
+    미온보딩(deps 없음)·리졸버 미응답 → None(enrich가 NEEDS_REVIEW 처리, 거짓 FRESH 금지).
+    1h 캐시 = 빠른 블록경로 보호(시행일은 자주 안 바뀜) + 개정 시 1h 내 자동 전환.
+    순수모듈 freshness_util은 미수정 — 그 판정 함수를 '배선'만 한다.
+    """
+    try:
+        import kpd_mcp as _kpd
+        from freshness_util import check_block_freshness, iter_targets, _key
+        from block_assembler import load_legal_blocks
+        deps = []
+        for iss in load_legal_blocks("legal_blocks.json").get(topic_key, {}).get("issues", []):
+            deps += iss.get("dependencies") or []
+        if not deps:
+            return None  # 미온보딩 → 거짓 FRESH 금지(enrich가 NEEDS_REVIEW)
+
+        def _resolve(dep_name, article_no, dep_type, ref):
+            if dep_type == "행정규칙":
+                _raw = call_kpd_legal_research("search_admin_rules", query=dep_name)
+                _r = _kpd.parse_admin_rules(_raw or "", exact_name=dep_name)
+                return _r["effective_date"] if _r["ok"] else None
+            _r = _kpd.resolve_law_effective_date(
+                lambda action, **p: call_kpd_legal_research(action, **p),
+                dep_name, article_no, law_type=("법률" if dep_type == "법률" else None))
+            return _r["effective_date"] if _r["ok"] else None
+
+        live = {}
+        for t in iter_targets(deps):
+            try:
+                live[_key(t)] = _resolve(t["dep"], t["no"], t.get("type"), t.get("ref"))
+            except Exception:
+                live[_key(t)] = None
+        return check_block_freshness({"dependencies": deps}, live)["verdict"]
+    except Exception as e:
+        logger.warning(f"블록 freshness 계산 실패({topic_key}): {e}")
+        return None
+
+
 # ── Lazy 클라이언트 초기화 ────────────────────────────────────
 @st.cache_resource
 def init_supabase():
@@ -2250,17 +2310,39 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
                 
                 # JSON 형식으로 변환 (기존 UI 호환)
                 block_data = db[matched_topics[0]]
+                _b_issues = block_data.get("issues", [])
+                # verdict 파생(S1): 예외/조건부 경로(⑤ 등)가 있으면 🟡 조건부, 🔴은 예외없는
+                # hard-no만. 모든 블록에 rejected 하드코딩 금지(모조품=rejected, 판촉비=conditional).
+                _has_exc = any(
+                    ("예외" in iss.get("title", "") or "적용제외" in iss.get("title", "")
+                     or "_exception_" in iss.get("id", ""))
+                    for iss in _b_issues
+                )
+                _has_red = any(iss.get("risk_level") == "🔴" for iss in _b_issues)
+                if _has_exc:
+                    _verdict = "conditional"
+                elif _has_red:
+                    _verdict = "rejected"
+                elif any(iss.get("risk_level") == "🟡" for iss in _b_issues):
+                    _verdict = "conditional"
+                else:
+                    _verdict = "approved"
+                # action_plan 토픽별(B2): 모조품 디폴트가 타 토픽에 누수되지 않게 토픽맵. 미등록은 빈값(브리프 권장행동이 담당).
+                action_plan = _TOPIC_ACTION_PLAN.get(matched_topics[0], "")
                 json_data = {
                     "summary": block_data["summary"],
-                    "verdict": "rejected",
+                    "verdict": _verdict,
                     "verdict_reason": block_data["summary"],
                     "issues": [],
-                    "action_plan": "즉시: 의심상품 판매중단·재고조사 → 24시간: 법무담당부서 긴급대응팀 구성 → 1주: 공급업체 전면 재심사 → 1개월: 보세판매장 준수체계 재구축",
+                    "action_plan": action_plan,
                     "alternative_clause": None,
                     "cited_laws": [],
                     "cited_precedents": [],
                     # Step 4: 블록삽입 경로 = 형량 DB 보장 → 검증된 근거 등급
                     "evidence_grade": evidence_grade_for(matched_topics),
+                    # 신선도 = '계산값'(정적 FRESH 주입 금지 — 거짓 단언 방지). 기록 시행일 vs
+                    # KPD 리졸버 현재값 비교(freshness_util). §11 개정 시 자동 STALE 전환(S4).
+                    "freshness": _compute_block_freshness(matched_topics[0]),
                 }
                 
                 # issues 변환
@@ -2288,9 +2370,15 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
                         "rule_analysis": gr.get("saryu_analysis", "사규 분석 대기중"),
                         "recommendation": gr.get("recommendation", "실무 권고 대기중"),
                     })
+                    # B4: 법령명/조문 분리 — law_name=조문번호 앞까지, article=첫 제N조.
+                    # (기존 split(" ")[0] + 전체문자열 = 'law명 law명...' 중복 출력 버그)
+                    _al = issue.get("applicable_laws", "") or ""
+                    _m = re.search(r"제\d+조(?:의\d+)?", _al)
+                    _art = _m.group(0) if _m else ""
+                    _lname = re.sub(r"\s*제\d+조.*$", "", _al).strip() or _al
                     json_data["cited_laws"].append({
-                        "law_name": issue["applicable_laws"].split(" ")[0] if issue["applicable_laws"] else "",
-                        "article": issue["applicable_laws"],
+                        "law_name": _lname,
+                        "article": _art,
                     })
                 
                 # JSON + 마크다운 형식으로 reply 조립
@@ -2880,54 +2968,72 @@ def render_verdict_hero(jd):
 
 
 def render_negotiation_brief(jd):
-    """MD 협상 브리프 — hero 바로 아래, 상세 법령 근거보다 위(기본 노출).
-    출처(법령/사규/계약)를 레버리지(🛡 방패/🃏 카드/📄 테이블/📋 내부)로 번역하고, 예외를
-    자격요건·서류와 세트로, '없음(🚫) vs 못 찾음(❔)'을 구분해 평이하게 보여준다.
-    provenance/예외 정규화는 negotiation_util(순수)에서 — 가짜 출처 배지·예외 침묵 방지.
+    """MD 협상 브리프 (S3): [결론] → [판단 근거(법률/계약/사규/약정·행정규칙)] → [권장 행동].
+    개조식·명사형·짧게. 원칙(🛡 fixed)/예외(🃏 conditional) 분리, 조문 전문은 [상세 근거]
+    expander로(여기엔 한 줄 요약). build_brief가 모델 brief 또는 issues 조립을 제공(형태 보장),
+    provenance/예외 정규화는 negotiation_util(순수) — 가짜 출처·예외 오탐 방지.
     """
     # 모델이 brief를 emit했으면 사용(richer), 아니면 issues로 결정론 조립(형태 보장).
     b = build_brief(jd)
     if not b:
         return  # 이슈도 브리프도 없음(구버전·빈 응답) → 미표시(하위호환)
 
-    p = ['<div style="background:#FAF9F5;border:1px solid #E5E2D8;border-radius:8px;padding:16px 20px;margin-bottom:12px;">']
-    p.append('<div style="font-size:13px;font-weight:700;color:#9A0C24;letter-spacing:.02em;margin-bottom:6px;">🤝 협상 브리프</div>')
-    if b["bottom_line"]:
-        p.append(f'<div style="font-size:16px;font-weight:700;line-height:1.5;color:#3D3C38;margin-bottom:10px;">결론: {b["bottom_line"]}</div>')
-
-    # 레버리지 — 예외 있는 항목은 🃏 카드(줄 수 있는 카드), 없으면 출처 아이콘(🛡/📄/📋)
+    SRC2CAT = {"법령": "법률", "계약": "계약", "사규": "사규"}
+    groups = {"법률": [], "계약": [], "사규": []}
+    law_levers = []
     for lv in b["leverage"]:
-        icon = "🃏" if lv["has_exception"] else lv["icon"]
-        head = "줄 수 있는 카드 (예외·조건부)" if lv["has_exception"] else lv["source_label"]
-        binding = f' · {lv["binding_label"]}' if lv["binding_label"] else ""
-        prov = "" if lv["provenance_ok"] else ' <span style="color:#A07020;">(근거 출처 불명)</span>'
-        p.append('<div style="margin:8px 0;">')
-        p.append(f'<div style="font-size:14px;font-weight:600;color:#3D3C38;">{icon} {head}{binding}{prov}</div>')
-        if lv["point"]:
-            p.append(f'<div style="font-size:14px;line-height:1.55;color:#3D3C38;margin-left:22px;">{lv["point"]}</div>')
-        if lv["has_exception"]:
-            if lv["exception"]:
-                p.append(f'<div style="font-size:13px;line-height:1.5;color:#475569;margin-left:22px;">예외: {lv["exception"]}</div>')
-            if lv["conditions"]:
-                p.append(f'<div style="font-size:13px;color:#475569;margin-left:22px;">자격요건: {" / ".join(lv["conditions"])}</div>')
-            if lv["documents"]:
-                p.append(f'<div style="font-size:13px;color:#475569;margin-left:22px;">└ 챙길 서류: {" / ".join(lv["documents"])}</div>')
-        p.append('</div>')
+        cat = SRC2CAT.get(lv["source"])
+        if not cat:
+            continue
+        groups[cat].append(lv)
+        if lv["source"] == "법령":
+            law_levers.append(lv)
 
-    # 못 움직이는 선 (예외 없음·확인됨) — '없음'을 명시
-    if b["no_room"]:
-        items = "".join(f"<li>{x}</li>" for x in b["no_room"])
-        p.append('<div style="font-size:14px;font-weight:600;color:#A93226;margin-top:10px;">🚫 여기는 못 움직임 (예외 없음·확인)</div>')
-        p.append(f'<ul style="font-size:13px;line-height:1.6;color:#3D3C38;margin:4px 0 0 0;padding-left:40px;">{items}</ul>')
+    p = ['<div style="background:#FAF9F5;border:1px solid #E5E2D8;border-radius:8px;padding:14px 18px;margin-bottom:12px;">']
+    p.append('<div style="font-size:13px;font-weight:700;color:#9A0C24;letter-spacing:.02em;margin-bottom:8px;">🤝 협상 브리프</div>')
 
-    # 못 찾음 (≠ 없음) — 사내변호사 확인. '없음'과 시각적으로 구분.
-    if b["exception_uncertain"]:
-        items = "".join(f"<li>{x}</li>" for x in b["exception_uncertain"])
-        p.append('<div style="font-size:14px;font-weight:600;color:#475569;margin-top:10px;">❔ 예외 가능성 미확인 (사내변호사 확인 권장)</div>')
-        p.append(f'<ul style="font-size:13px;line-height:1.6;color:#3D3C38;margin:4px 0 0 0;padding-left:40px;">{items}</ul>')
+    # [결론] — 원칙(🛡 fixed) / 예외(🃏 conditional) + 입증책임. 명사형·한 줄.
+    p.append('<div style="font-size:13px;font-weight:700;color:#3D3C38;">결론</div>')
+    has_exc = any(lv["has_exception"] for lv in law_levers)
+    for lv in law_levers:
+        icon = "🃏" if lv["has_exception"] else "🛡"
+        tag = "예외" if lv["has_exception"] else "원칙"
+        p.append(f'<div style="font-size:14px;line-height:1.5;color:#3D3C38;">· {tag}: {lv["point"]} {icon}</div>')
+        if lv["has_exception"] and lv.get("exception"):
+            p.append(f'<div style="font-size:13px;line-height:1.45;color:#475569;margin-left:16px;">→ {lv["exception"]}</div>')
+    for nr in b["no_room"]:
+        p.append(f'<div style="font-size:14px;line-height:1.5;color:#A93226;">· 못 움직임: {nr} 🚫</div>')
+    if has_exc:
+        p.append('<div style="font-size:13px;color:#475569;">· 입증책임 = 우리 측</div>')
 
-    if b["escalation"]:
-        p.append(f'<div style="font-size:13px;font-weight:700;color:#9A0C24;margin-top:12px;">→ {b["escalation"]}</div>')
+    # [판단 근거] — 분류별(법률/계약/사규/약정·행정규칙). 조문 전문 아닌 한 줄 요약.
+    p.append('<div style="font-size:13px;font-weight:700;color:#3D3C38;margin-top:10px;">판단 근거 '
+             '<span style="font-weight:400;color:#999;">※ 법률 / 계약 / 사규 / 약정·행정규칙</span></div>')
+    for cat in ("법률", "계약", "사규"):
+        items = groups[cat]
+        if items:
+            prov = "" if all(lv["provenance_ok"] for lv in items) else ' <span style="color:#A07020;">(출처 일부 불명)</span>'
+            txt = " · ".join(lv["point"] for lv in items)
+            p.append(f'<div style="font-size:13px;line-height:1.5;color:#3D3C38;">· <b>{cat}</b>&nbsp;&nbsp;{txt}{prov}</div>')
+        else:
+            p.append(f'<div style="font-size:13px;color:#999;">· <b>{cat}</b>&nbsp;&nbsp;해당 없음</div>')
+    p.append('<div style="font-size:13px;color:#999;">· <b>약정·행정규칙</b>&nbsp;&nbsp;해당 없음</div>')
+
+    # [권장 행동] — 토픽별 action_plan 우선, 없으면 예외 자격요건·서류 + escalation. 명사형 bullet.
+    actions = []
+    ap = (jd.get("action_plan") or "").strip()
+    if ap:
+        actions = [ln.strip().lstrip("·-•▶ ").strip() for ln in ap.split("\n") if ln.strip()]
+    else:
+        for lv in law_levers:
+            if lv["has_exception"]:
+                actions += lv.get("conditions", []) + lv.get("documents", [])
+        if b["escalation"]:
+            actions.append(b["escalation"])
+    if actions:
+        p.append('<div style="font-size:13px;font-weight:700;color:#3D3C38;margin-top:10px;">권장 행동</div>')
+        for a in actions:
+            p.append(f'<div style="font-size:13px;line-height:1.5;color:#3D3C38;">· {a}</div>')
 
     p.append('</div>')
     st.markdown("".join(p), unsafe_allow_html=True)
@@ -4547,11 +4653,10 @@ def main():
         )
 
         samples = [
-            ("🔹 사내 기준 문의", "현재 등록된 당사에 따르면, 브랜드 자발적 사유로 매장을 리뉴얼할 때 인테리어 비용 분담 기준이 어떻게 돼?"),
             ("🔹 심층 법률 조항 검토", "협력사가 특약매입 판촉비 분담률을 60%로 요구하고 있어. 법률적으로 이게 맞음? 수용 가능한지 당사 기준과 대규모유통업법을 비교해서 분석해줘."),
             ("🔹 첨부파일 교차 검토", "[파일 첨부 후 클릭] 첨부한 파견 약정서(협력사 회신본) 내용 중, 당사 표준 규정에 어긋나거나 법 위반 소지가 있는 독소조항을 찾아내 줘.")
         ]
-        cols = st.columns(3)
+        cols = st.columns(2)
         for i, (cat, q) in enumerate(samples):
             with cols[i]:
                 if st.button(cat, key="sample_" + str(i), use_container_width=True, help=q):
@@ -4566,12 +4671,8 @@ def main():
                 enrich_triage_fields(jd)
                 # ── 1. verdict-as-hero (심각도+신뢰배지+이유+에스컬레이션) ──
                 render_verdict_hero(jd)
-                # ── 1.5. MD 협상 브리프 (출처→레버리지 + 예외 우선) ──
+                # ── 1.5. MD 협상 브리프 (결론→판단근거→권장행동, action_plan 흡수) ──
                 render_negotiation_brief(jd)
-                # ── 2. 다음 액션 ──
-                if jd.get("action_plan"):
-                    _section_header("📌", "다음 액션 (MD Action Plan)")
-                    st.success(jd["action_plan"])
                 # ── 3. 수정 대안 제안 ──
                 if jd.get("alternative_clause"):
                     render_alternative_clause(jd["alternative_clause"])
@@ -4683,13 +4784,8 @@ def main():
                         # ── 1. verdict-as-hero (심각도+신뢰배지+이유+에스컬레이션) ──
                         enrich_triage_fields(json_data)
                         render_verdict_hero(json_data)
-                        # ── 1.5. MD 협상 브리프 (출처→레버리지 + 예외 우선) ──
+                        # ── 1.5. MD 협상 브리프 (결론→판단근거→권장행동, action_plan 흡수) ──
                         render_negotiation_brief(json_data)
-
-                        # ── 2. 다음 액션 ──
-                        if json_data.get("action_plan"):
-                            _section_header("📌", "다음 액션 (MD Action Plan)")
-                            st.success(json_data["action_plan"])
 
                         # ── 3. 수정 대안 제안 ──
                         if json_data.get("alternative_clause"):

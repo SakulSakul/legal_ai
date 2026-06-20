@@ -111,13 +111,19 @@ def is_empty_brief(brief):
 # ── issues → brief 결정론 조립 (모델이 negotiation_brief를 빼먹어도 형태 보장) ──
 # 휴리스틱 신호 — 모델이 잘 채우는 issues(applicable_law/law_analysis/applicable_rule/…)에서
 # 출처·예외·금지를 추출한다. 모델의 별도 brief emit에 의존하지 않는 게 핵심(형태 안정).
-_EXCEPTION_HINTS = ("적용제외", "적용하지 아니", "적용되지 아니", "예외", "다만", "단서",
-                    "자발적", "차별화", "협의하여 정", "제5항", "⑤", "초과하여 협의")
-_NO_ROOM_HINTS = ("상한", "초과하여서는 아니", "초과할 수 없", "원칙적 불가", "금지", "불가", "할 수 없")
-# '예외 없음/적용제외 없음'은 예외가 아님 — 부정 표현 가드(거짓 양성 차단)
-_NO_EXCEPTION = ("예외 없", "예외가 없", "예외는 없", "예외 규정 없", "예외규정 없", "적용제외 없", "적용 제외 없")
+# 예외(🃏 card) 판정 — '강한' 신호만. 바른 '예외' 키워드는 '예외 없음/예외 요건 못 갖춤'에
+# 오탐(B3: §11④ 상한이 🃏로 새던 원인) → 강신호 + 부정문맥 가드로 분리.
+_EXC_STRONG = ("적용하지 아니", "적용되지 아니", "적용제외", "예외로 한다", "이 경우 제1항부터")
+_EXC_NEG = ("갖추지 못", "충족하지", "미충족", "미달", "없으면", "없는 경우", "예외 없", "해당하지 아니")
+_NO_ROOM_HINTS = ("초과하여서는 아니", "초과할 수 없", "원칙적 불가", "금지", "할 수 없", "상한")
 _CONTRACT_HINTS = ("계약", "특약", "약정", "공동판촉", "거래기본", "표준계약")
 _DOC_HINTS = ("요청", "입증", "서면", "동의", "공문", "기획안", "자료", "증빙")
+
+
+def _short(s, n=90):
+    """S2: 브리프는 짧게. 조문 전문은 [상세 근거] expander로, 브리프엔 한 줄 요약."""
+    s = (s or "").replace("**", "").strip()
+    return s if len(s) <= n else s[:n].rstrip() + "…"
 
 
 def _first_line(text):
@@ -136,50 +142,83 @@ def _line_with(text, hints):
     return ""
 
 
+def _is_exception_issue(title, law_an):
+    """B3: 이 이슈가 '예외(🃏)'인가. 제목이 예외/적용제외를 가리키거나, 본문에 강한 예외
+    신호가 부정문맥 없이 있을 때만 True. (§11④ 상한처럼 '예외 요건 못 갖춤'은 예외 아님.)"""
+    t = title or ""
+    if "예외" in t or "적용제외" in t:
+        return True
+    for ln in (law_an or "").replace("**", "").split("\n"):
+        if any(s in ln for s in _EXC_STRONG) and not any(n in ln for n in _EXC_NEG):
+            return True
+    return False
+
+
+def _exc_detail(law_an, rec):
+    """예외 경로 한 줄(짧게). 강신호 줄 우선, 부정문맥 제외."""
+    for src in (law_an, rec):
+        for ln in (src or "").replace("**", "").split("\n"):
+            s = ln.strip().lstrip("-•·▶ ").strip()
+            if any(x in s for x in _EXC_STRONG) and not any(n in s for n in _EXC_NEG):
+                return _short(s)
+    return ""
+
+
 def assemble_brief(json_data):
-    """issues로부터 결정론 brief 조립. 매핑:
-      applicable_law → 🛡 법령(shield). 예외 신호 있으면 conditional + exception(=🃏 card).
-      applicable_rule → 📄 계약(계약 신호) 또는 📋 사규. 금지인데 예외 없음 → no_room.
+    """issues로부터 결정론 brief 조립(S2 짧게·명사형). 매핑:
+      applicable_law → 🛡 법령(금지·상한, fixed). 예외 이슈(⑤ 등) → 🃏 card(conditional).
+      applicable_rule → 📄 계약(계약 신호) 또는 📋 사규. point는 '제목'(조문 전문 아님, B4 중복 방지).
+      예외가 토픽에 하나도 없으면 fixed 금지조항을 no_room(🚫 못 움직임)으로 이동.
     """
     if not isinstance(json_data, dict):
         return None
-    leverage, no_room = [], []
+    leverage = []
     for iss in (json_data.get("issues") or []):
         if not isinstance(iss, dict):
             continue
+        title = (iss.get("title") or "").strip()
         law = (iss.get("applicable_law") or "").strip()
         law_an = iss.get("law_analysis") or ""
         rec = iss.get("recommendation") or ""
         rule = (iss.get("applicable_rule") or "").strip()
         rule_an = iss.get("rule_analysis") or ""
-        if law and law not in ("해당 없음", "없음"):
-            exc_line = _line_with(law_an, _EXCEPTION_HINTS) or _line_with(rec, _EXCEPTION_HINTS)
-            has_exc = bool(exc_line) and not any(neg in exc_line for neg in _NO_EXCEPTION)
-            point = _first_line(law_an) or law
+        # 짧은 point(S2/B4): 제목 우선(조문 전문·법령명 중복 방지). 없으면 law_analysis 첫 줄 축약.
+        point = _short(title) or _short(_first_line(law_an))
+        if law and law not in ("해당 없음", "없음") and point:
+            has_exc = _is_exception_issue(title, law_an)
             lv = {
                 "source": "법령", "role": "shield",
                 "binding": "conditional" if has_exc else "fixed",
-                "point": point if law in point else f"{law} — {point}",
+                "point": point,
             }
             if has_exc:
                 conds = _line_with(rec, _DOC_HINTS) or _line_with(law_an, ("요청", "입증", "차별화", "자발"))
-                lv["exception"] = exc_line
-                lv["conditions"] = [conds] if conds else []
+                lv["exception"] = _exc_detail(law_an, rec) or "예외 경로 있음(상세 근거 참조)"
+                lv["conditions"] = [_short(conds)] if conds else []
                 lv["documents"] = []
             leverage.append(lv)
-            if not has_exc and any(h in law_an for h in _NO_ROOM_HINTS):
-                no_room.append(point if law in point else f"{law} — {point}")
         if rule and rule not in ("해당 없음", "없음"):
             is_contract = any(h in (rule + rule_an) for h in _CONTRACT_HINTS)
             leverage.append({
                 "source": "계약" if is_contract else "사규",
                 "role": "table" if is_contract else "internal",
                 "binding": "negotiable",
-                "point": f"{rule} — {_first_line(rule_an)}" if rule_an else rule,
+                "point": _short(f"{rule} — {_first_line(rule_an)}" if rule_an else rule),
             })
+    # 동일 레버리지 중복 제거(이슈마다 같은 사규/계약이 반복될 수 있음 — S2 간결).
+    _seen, _dedup = set(), []
+    for lv in leverage:
+        k = (lv["source"], lv["point"])
+        if k in _seen:
+            continue
+        _seen.add(k)
+        _dedup.append(lv)
+    leverage = _dedup
+    # 금지·상한 조항은 🛡 fixed 레버리지로 유지(렌더가 분류별 판단근거로 표시). no_room은
+    # 모델이 emit한 brief에서만(진짜 hard-no를 LLM이 명시한 경우) — 자동 이동 안 함.
     return {
-        "bottom_line": _first_line(json_data.get("verdict_reason")) or _first_line(json_data.get("summary")),
-        "leverage": leverage, "no_room": no_room,
+        "bottom_line": _short(_first_line(json_data.get("verdict_reason")) or _first_line(json_data.get("summary"))),
+        "leverage": leverage, "no_room": [],
         "exception_uncertain": [], "escalation": "",
     }
 

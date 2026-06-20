@@ -185,12 +185,15 @@ def test_assemble_detects_exception_as_card():
     assert law["conditions"]  # 자격요건 추출
 
 
-def test_assemble_no_exception_goes_no_room():
-    """예외 신호 없는 금지·상한 → no_room(못 움직임). '예외 없음'은 거짓 예외로 안 잡힘."""
-    jd = {"issues": [{"applicable_law": "X법 제1조", "law_analysis": "절대 금지·상한, 예외 없음"}]}
+def test_prohibition_is_fixed_shield_not_card():
+    """예외 신호 없는 금지·상한 → 🛡 fixed shield(🃏 아님). '예외 요건 못 갖춤'은 거짓 예외로
+    안 잡힘(B3 회귀가드 — §11④ 상한이 🃏로 새던 버그)."""
+    jd = {"issues": [{"title": "50% 상한", "applicable_law": "X법 제1조",
+                      "law_analysis": "분담비율은 50%를 초과하여서는 아니 된다. 별도의 예외 요건을 갖추지 못한 경우 위반."}]}
     b = N.build_brief(jd)
-    assert b["no_room"]
-    assert not any(lv["has_exception"] for lv in b["leverage"])
+    law = [lv for lv in b["leverage"] if lv["source"] == "법령"]
+    assert law and not any(lv["has_exception"] for lv in law)
+    assert all(lv["binding"] == "fixed" for lv in law)
 
 
 def test_build_brief_prefers_model_then_assembles():
@@ -217,3 +220,58 @@ def test_gemini_stage1_bonded_relevance_gated():
     assert "모든 질의에서 law_findings에 반드시 포함" not in src
     assert "빠뜨리면 시스템 오류로 간주" not in src
     assert "관련성 게이트" in src  # 관련 질의에서만
+
+
+# ── 답변 v2 회귀 가드 (라이브 피드백 — B1~B4·S1·S3) ───────────
+def test_b1_step1_buttons_deleted():
+    """B1: 1단계/'사내 기준 문의' 진입점 자체 삭제(relabel 아님), 버튼 2개."""
+    src = _src()
+    assert "사내 기준 문의" not in src and "사내 규정 문의" not in src
+    assert "st.columns(2)" in src
+
+
+def test_b2_action_plan_topic_separated():
+    """B2: 모조품 액션플랜이 전 토픽에 누수되지 않게 토픽맵. 블록경로 하드코딩 제거."""
+    src = _src()
+    assert "_TOPIC_ACTION_PLAN" in src
+    assert "판촉비분담" in src and "재고조사" in src  # 모조품 액션은 모조품 키에만
+    # 블록 json_data가 action_plan을 토픽맵에서(고정 모조품 문자열 직접대입 아님)
+    assert '"action_plan": action_plan' in src
+
+
+def test_s1_verdict_derived_not_hardcoded():
+    """S1: 블록경로 verdict가 파생(예외→conditional). 고정 rejected 아님."""
+    src = _src()
+    assert "_has_exc" in src and '_verdict = "conditional"' in src
+
+
+def test_s3_four_block_render_present():
+    """S3: 협상 브리프가 결론/판단근거/권장행동 + 분류 5종 구조."""
+    src = _src()
+    for blk in ("결론", "판단 근거", "권장 행동"):
+        assert blk in src
+    assert "약정·행정규칙" in src
+
+
+def test_b4_law_name_no_dup():
+    """B4: cited_laws law명 중복 버그(split[0]+전체) 제거 → 정규식 분리."""
+    src = _src()
+    assert '"article": issue["applicable_laws"],' not in src  # 옛 버그 라인 제거
+
+
+def test_s2_brief_points_short_via_title():
+    """S2: assemble가 조문 전문 아닌 '제목' 기반 짧은 point를 쓰는지(_short)."""
+    jd = {"issues": [{"title": "50% 상한 (제11조④)",
+                      "applicable_law": "대규모유통업법 제11조",
+                      "law_analysis": "x" * 400}]}
+    b = N.build_brief(jd)
+    law = [lv for lv in b["leverage"] if lv["source"] == "법령"][0]
+    assert law["point"] == "50% 상한 (제11조④)"  # 제목 사용, 400자 prose 아님
+
+
+def test_s4_freshness_computed_not_hardcoded():
+    """S4: 블록경로 freshness가 정적 'FRESH' 주입이 아니라 계산값(check_block_freshness)인지."""
+    src = _src()
+    assert '"freshness": "FRESH" if any' not in src  # 정적 거짓 단언 제거
+    assert "_compute_block_freshness" in src
+    assert "check_block_freshness" in src and "freshness_util" in src
