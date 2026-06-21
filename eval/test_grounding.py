@@ -150,3 +150,33 @@ def test_block_gemini_prompt_has_id_grounding():
     src = open(os.path.join(_ROOT, "block_assembler.py"), encoding="utf-8").read()
     assert "candidates=None" in src
     assert "cited_source_ids" in src and "문서명" in src
+
+
+# ── Bug1: UUID 누출 백스톱 (scrub) ────────────────────────────
+_UID = "854249ee-d519-4efa-9fe2-587deb57aed7"
+
+
+def test_scrub_uuid_known_to_title():
+    """후보 id면 「title」로 치환."""
+    cands = [{"id": _UID, "cat": "saryu", "kind": "사규", "title": "협력회사 판촉비용 분담 지침", "snippet": ""}]
+    cands = [G.make_candidate({"id": _UID, "cat": "saryu", "label": "협력회사 판촉비용 분담 지침"})]
+    out = G.scrub_uuids(f"제5항 및 사내 지침인 {_UID}에 따르면 분담", cands)
+    assert _UID not in out
+    assert "「협력회사 판촉비용 분담 지침」" in out
+
+
+def test_scrub_uuid_stray_removed():
+    """후보에 없는 stray UUID는 제거(군더더기 정리)."""
+    out = G.scrub_uuids(f"제5항 및 {_UID}에 따르면", [])
+    assert _UID not in out
+    assert "에 따르면" in out  # 문장 살아있음
+
+
+def test_apply_grounding_scrubs_prose_uuid():
+    """apply_grounding이 issue prose의 UUID를 정리(렌더 직전)."""
+    cands = [G.make_candidate({"id": _UID, "cat": "saryu", "label": "판촉비 지침"})]
+    jd = {"issues": [{"cited_source_ids": [_UID],
+                      "law_analysis": f"제11조 제5항 및 {_UID}에 따르면 협의 가능"}]}
+    G.apply_grounding(jd, cands)
+    assert _UID not in jd["issues"][0]["law_analysis"]
+    assert "「판촉비 지침」" in jd["issues"][0]["law_analysis"]

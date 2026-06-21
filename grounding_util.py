@@ -9,6 +9,7 @@ grounding_util.py — 내부문서(사규·계약·약정) 인용 grounding (str
 소스 비의존: 후보가 legal_ai `docs` 테이블이든 DF 콤파스 `nexus_*`든 동일 레이어를 통과한다
 (Phase 1a=docs.id 와이어링 / Phase 1b=nexus 이전 — 이 모듈은 그대로).
 """
+import re
 
 _CAT_LABEL = {"saryu": "사규", "contract": "계약", "yakjeong": "약정"}
 INTERNAL_CATS = ("saryu", "contract", "yakjeong")
@@ -87,12 +88,40 @@ def is_hallucinated_name(name, candidates):
     return not any(n == c["title"] for c in (candidates or []))
 
 
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+# prose에서 UUID 누출을 정리할 텍스트 필드(문서명은 「title」로만 나와야 함)
+_PROSE_FIELDS = ("law_analysis", "rule_analysis", "recommendation", "target_clause", "summary")
+
+
+def scrub_uuids(text, candidates):
+    """prose에서 raw UUID 백스톱(Bug1) — 후보 id면 「title」로 치환, 후보 밖 stray는 제거.
+    LLM이 본문에서 문서를 id로 지칭한 누출을 렌더 직전 정리. id는 cited_source_ids에만 있어야 함."""
+    if not text or "-" not in text:
+        return text
+    by_id = {c["id"].lower(): c for c in (candidates or [])}
+
+    def _repl(m):
+        c = by_id.get(m.group(0).lower())
+        return f"「{c['title']}」" if c else ""
+
+    out = _UUID_RE.sub(_repl, text)
+    if out == text:
+        return text
+    # 치환/제거 후 군더더기 정리: 빈 꺾쇠, 연속 공백, 매달린 '및'/구두점 앞 공백
+    out = out.replace("「」", "")
+    out = re.sub(r"\s*및\s*(?=[,.)\]}」]|$)", "", out)
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\s+([,.)\]}])", r"\1", out)
+    return out.strip()
+
+
 def apply_grounding(json_data, candidates):
     """LLM 출력(json_data)의 내부문서 인용을 grounding(멱등). 각 issue:
       1) cited_source_ids가 있으면 → 후보 레코드 title로 applicable_rule을 '레코드에서' 재작성.
       2) 없고 기존 applicable_rule이 후보 title과 정확히 일치하면 유지(멤버십 통과).
       3) 둘 다 아니면(후보 밖 자유텍스트 = 환각) → '해당 없음'(날조 0, 안전한 실패).
-    grounded_sources(렌더/감사용 {id,kind,title})도 부착. 법 인용(applicable_law)은 미수정(법 쪽 무회귀)."""
+    + prose의 UUID 누출 백스톱(scrub_uuids). grounded_sources({id,kind,title}) 부착.
+    법 인용(applicable_law)은 미수정(법 쪽 무회귀)."""
     if not isinstance(json_data, dict):
         return json_data
     for iss in (json_data.get("issues") or []):
@@ -103,12 +132,20 @@ def apply_grounding(json_data, candidates):
         if recs:
             iss["grounded_sources"] = [{"id": r["id"], "kind": r["kind"], "title": r["title"]} for r in recs]
             iss["applicable_rule"] = " / ".join(f"「{r['title']}」" for r in recs)
-            continue
-        iss["grounded_sources"] = []
-        cur = (iss.get("applicable_rule") or "").strip().strip("「」")
-        if cur and not is_hallucinated_name(cur, candidates):
-            continue  # 자유텍스트지만 후보 title과 정확 일치 → 멤버십 통과
-        iss["applicable_rule"] = "해당 없음"  # 후보 밖 = 환각 → 구조적 배제
+        else:
+            iss["grounded_sources"] = []
+            cur = (iss.get("applicable_rule") or "").strip().strip("「」")
+            if not (cur and not is_hallucinated_name(cur, candidates)):
+                iss["applicable_rule"] = "해당 없음"  # 후보 밖 = 환각 → 구조적 배제
+        # UUID 누출 백스톱 — prose 필드의 raw id를 「title」로/제거
+        for f in _PROSE_FIELDS:
+            if iss.get(f):
+                iss[f] = scrub_uuids(iss[f], candidates)
+    # 최상위 prose도 스크럽(요약·결론·액션에 id 누출 방지)
+    for f in ("summary", "verdict_reason", "action_plan"):
+        if json_data.get(f):
+            json_data[f] = scrub_uuids(json_data[f], candidates)
+    return json_data
     return json_data
 
 

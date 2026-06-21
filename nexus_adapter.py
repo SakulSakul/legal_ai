@@ -23,7 +23,10 @@ logger = logging.getLogger(__name__)
 
 SAJU_CATEGORY = "공정거래"
 # nexus_chunks ⋈ nexus_documents (PostgREST 임베디드 리소스). 읽기 전용 컬럼만.
-_SELECT = "id,document_id,article_no,text,nexus_documents(id,title,superseded_by)"
+_SELECT = "id,document_id,article_no,text,nexus_documents(id,title,doc_kind,superseded_by)"
+# doc_kind → grounding cat 결정론 매핑(Bug2: 분류를 LLM 임의 아닌 doc_kind로).
+#   rule=사규 / contract=계약 / agreement=약정. 미상은 사규(공정거래 셋은 전부 rule).
+_DOCKIND_CAT = {"rule": "saryu", "contract": "contract", "agreement": "yakjeong"}
 
 
 def map_rows_to_candidates(rows):
@@ -37,7 +40,8 @@ def map_rows_to_candidates(rows):
         doc = r.get("nexus_documents") or {}
         if doc.get("superseded_by") not in (None, "", "null"):
             continue  # 구버전 — 현행 아님(freshness)
-        rec = {"id": r.get("id"), "cat": "saryu",
+        _cat = _DOCKIND_CAT.get((doc.get("doc_kind") or "").strip().lower(), "saryu")
+        rec = {"id": r.get("id"), "cat": _cat,
                "label": doc.get("title") or r.get("title"),
                "text": r.get("text") or ""}
         c = grounding_util.make_candidate(rec)
