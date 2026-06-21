@@ -189,13 +189,16 @@ def fetch_legal_blocks(topic_key: str, db: dict) -> dict:
 # 4. 사규 연계 프롬프트 생성 (Stage 2 준비)
 # ============================================================
 
-def build_gemini_prompt(topic_key: str, blocks: dict, 사규_texts: list[str]) -> str:
+def build_gemini_prompt(topic_key: str, blocks: dict, 사규_texts: list[str], candidates=None) -> str:
     """
     Gemini에게 보낼 프롬프트를 생성한다.
 
     핵심: Gemini에게 법률 분석을 쓰라고 하지 않는다.
     각 쟁점의 ID와 제목만 알려주고,
     해당 쟁점에 맞는 사규 조항·사규 관점·실무 권고만 생성하게 한다.
+
+    candidates: 내부문서 후보 [{id,kind,title,snippet}] (grounding_util). 주어지면 사규 인용을
+    cited_source_ids(후보 id)로만 받는다 — 문서명 창작 금지(환각 구조적 차단).
     """
 
     issue_list = ""
@@ -223,7 +226,32 @@ def build_gemini_prompt(topic_key: str, blocks: dict, 사규_texts: list[str]) -
 
 ## 쟁점 목록
 {issue_list}
+"""
 
+    if candidates:
+        cand_lines = "\n".join(
+            f"- id={c['id']} [{c['kind']}] {c['title']} :: {c['snippet'][:120]}" for c in candidates)
+        prompt += f"""
+## 내부문서 후보 (인용은 아래 id로만 — 문서명 창작 금지)
+{cand_lines}
+
+## 출력 형식 (JSON)
+각 쟁점 ID별로 아래 형식으로 출력하십시오. 사규·계약 인용은 **cited_source_ids에 위 후보 id만** 넣고,
+관련 내부문서가 없으면 빈 배열로 두십시오(문서명을 새로 지어내지 마십시오 — 시스템이 후보 밖 인용을 드롭합니다):
+
+```json
+{{
+  "{blocks['issues'][0]['id']}": {{
+    "cited_source_ids": ["후보 목록의 id만"],
+    "saryu_analysis": "사규/계약 관점 분석 (2~3문장 — 문서명은 cited_source_ids로 지목, 본문 창작 금지)",
+    "recommendation": "종합 실무 권고 (2~3문장)"
+  }},
+  ...
+}}
+```
+"""
+    else:
+        prompt += f"""
 ## 사규 원문
 {chr(10).join(사규_texts)}
 

@@ -28,6 +28,7 @@ from triage_util import (
     FRESHNESS_BADGES, FRESHNESS_COPY, freshness_badge_for,
 )
 from negotiation_util import build_brief
+import grounding_util
 
 # ── 로깅 설정 ────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -1500,9 +1501,10 @@ def gatekeeper_process(gemini_raw_json, laws_db, docs=None, user_query=""):
     return meta, refined_text
 
 
-def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
+def build_system_claude_v3(gatekeeper_text, gatekeeper_meta, internal_candidates=""):
     """Stage 3: Claude Senior Lawyer — 정제된 데이터만으로 법리 해석 + 최종 보고서.
     외부 지식 사용 금지 — 오직 전달된 텍스트 안에서만 추론.
+    internal_candidates: 내부문서(사규·계약·약정) 후보집합 텍스트(grounding_util) — 인용은 이 id로만.
     """
     return (
         "████████████████████████████████████████████████████████\n"
@@ -1594,7 +1596,12 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         "아래 정제된 검증 데이터만을 기반으로 법리 해석과 실무 권고를 작성하세요.\n\n"
         
         "━━━ [검증 데이터] ━━━\n" + gatekeeper_text +
-        
+        "\n\n━━━ [내부문서 grounding — 인용은 id로만] ━━━\n" + (internal_candidates or
+            "(내부문서 후보 미제공 — 내부문서 인용 시 cited_source_ids 빈 배열)") +
+        "\n⚠️ 내부문서(사규·계약·약정) 인용은 위 후보 목록의 id를 cited_source_ids에 넣는다. "
+        "후보에 없는 문서명을 새로 지어내지 마라(시스템이 후보 밖 인용을 드롭한다). 문서명은 "
+        "시스템이 레코드에서 찍으므로 applicable_rule에 사규명을 창작하지 말 것.\n"
+
         "\n\n━━━ [답변 형식] ━━━\n"
         "반드시 아래 JSON 형식으로만 출력하세요. JSON 외의 마크다운 설명은 작성하지 마세요.\n"
         "모든 분석 내용은 JSON의 issues 안에 넣으세요.\n\n"
@@ -1626,8 +1633,9 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta):
         '      "target_clause": "검토 대상 원문",\n'
         '      "applicable_law": "법령/고시명 제X조 (예: 상표법 제230조)",\n'
         '      "law_analysis": "법령·행정규칙 관점 — 형량은 반드시 {{법령약칭_조문번호_형량}} Placeholder 사용 (예: {{상표법_제230조_형량}}에 처한다)",\n'
-        '      "applicable_rule": "「사규명」 (예: 「MD 협력회사 입점 및 퇴점 지침」 제5조) — 사규명은 반드시 꺾쇠「」로 감싸기",\n'
-        '      "rule_analysis": "사규 관점 — 사규명 인용 시 반드시 「」 사용 (예: 「직매입거래 기본계약서」 제22조에 따르면...)",\n'
+        '      "cited_source_ids": ["내부문서 후보 목록의 id만 — 인용할 내부문서(사규·계약·약정)의 id. 후보에 없으면 빈 배열, 문서명 창작 금지"],\n'
+        '      "applicable_rule": "비워두거나 후보 title 그대로 — 시스템이 cited_source_ids로 레코드에서 문서명을 찍는다(여기서 새 사규명 창작 금지)",\n'
+        '      "rule_analysis": "사규/계약 관점 분석 문장(분석만 — 문서명은 cited_source_ids로 지목, 본문 창작 금지)",\n'
         '      "recommendation": "종합 권고안"\n'
         '    }\n'
         '  ],\n'
@@ -2347,15 +2355,18 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
                 
                 # issues 변환
                 gemini_results = {}
+                # 내부문서 grounding: docs 후보(id)를 gemini에 줘서 cited_source_ids로만 인용받음.
+                _blk_cands = grounding_util.make_candidates(st.session_state.get("docs", []))
                 try:
                     from block_assembler import parse_gemini_response, build_gemini_prompt, fetch_legal_blocks
                     blocks = fetch_legal_blocks(matched_topics[0], db)
-                    prompt = build_gemini_prompt(matched_topics[0], blocks, saryu_texts)
+                    prompt = build_gemini_prompt(matched_topics[0], blocks, saryu_texts,
+                                                 candidates=_blk_cands or None)
                     gemini_resp = call_gemini(prompt, messages)
                     gemini_results = parse_gemini_response(gemini_resp)
                 except Exception as e:
                     logger.warning(f"블록 파이프라인 Gemini 사규연계 실패: {e}")
-                
+
                 for i, issue in enumerate(block_data["issues"], 1):
                     issue_id = issue["id"]
                     gr = gemini_results.get(issue_id, {})
@@ -2366,7 +2377,10 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
                         "target_clause": user_query,
                         "applicable_law": issue["applicable_laws"],
                         "law_analysis": issue["legal_analysis"],
-                        "applicable_rule": gr.get("applicable_saryu", "사규 분석 대기중"),
+                        # 사규 인용 = cited_source_ids(후보 id) → apply_grounding이 레코드 title로 렌더.
+                        # 후보 없으면 구버전 free-text(역시 apply_grounding이 멤버십 검증).
+                        "cited_source_ids": gr.get("cited_source_ids", []),
+                        "applicable_rule": gr.get("applicable_saryu", "") if not _blk_cands else "",
                         "rule_analysis": gr.get("saryu_analysis", "사규 분석 대기중"),
                         "recommendation": gr.get("recommendation", "실무 권고 대기중"),
                     })
@@ -2433,8 +2447,10 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
         if not gatekeeper_text:
             gatekeeper_text = f"Gemini 수집 결과:\n{gemini_reply[:3000]}"
         
-        # Stage 3: Claude Senior Lawyer — 최종 법리 해석
-        claude_system = build_system_claude_v3(gatekeeper_text, gatekeeper_meta)
+        # Stage 3: Claude Senior Lawyer — 최종 법리 해석 (내부문서 인용은 후보 id로만 grounding)
+        _ic = grounding_util.candidates_prompt_block(
+            grounding_util.make_candidates(st.session_state.get("docs", [])))
+        claude_system = build_system_claude_v3(gatekeeper_text, gatekeeper_meta, internal_candidates=_ic)
         st.caption("⚖️ Stage 3: 최종 법리 해석 및 보고서 작성 중 (Claude)...")
         
         # Claude에게는 원래 사용자 질문만 전달 (정제 데이터는 system에)
@@ -4772,7 +4788,14 @@ def main():
 
                         # ██ 후처리 필터: AI 할루시네이션 강제 차단 ██
                         json_data = _filter_b2b_consumer_issues(json_data, user_query=safe_query)
-                        json_data = _validate_saryu_names(json_data)
+                        # 내부문서 인용 grounding(구조적 배제): docs 후보 있으면 cited_source_ids/
+                        # 정확-멤버십으로 검증 → 후보 밖 자유텍스트 사규명은 '해당 없음'(환각 0).
+                        # 본문 title은 레코드에서. 후보 없으면(docs 미적재) 기존 가드 유지(무회귀).
+                        _doc_cands = grounding_util.make_candidates(st.session_state.get("docs", []))
+                        if _doc_cands:
+                            json_data = grounding_util.apply_grounding(json_data, _doc_cands)
+                        else:
+                            json_data = _validate_saryu_names(json_data)
 
                         citation_results = verify_citations(json_data.get("cited_laws", []), st.session_state.laws_db)
                         precedent_results = verify_precedents(json_data.get("cited_precedents", []))
