@@ -120,6 +120,53 @@ def test_nexus_adapter_is_read_only():
     assert "nexus_chunks" in src and "superseded_by" in src and "공정거래" in src
 
 
+# ── #38 write 가드: nexus_* write 시도 → raise, read는 무회귀 ──
+class _RWQuery(_FakeQuery):
+    """read 체인 + write 메서드(insert/update/delete/upsert)를 모두 가진 mock 빌더."""
+    def insert(self, *a, **k):
+        self._wrote = ("insert", a, k); return self
+    def update(self, *a, **k):
+        self._wrote = ("update", a, k); return self
+    def delete(self, *a, **k):
+        self._wrote = ("delete", a, k); return self
+    def upsert(self, *a, **k):
+        self._wrote = ("upsert", a, k); return self
+
+
+class _RWClient:
+    def __init__(self, data):
+        self._data = data
+    def table(self, name):
+        return _RWQuery(self._data)
+
+
+def test_guard_blocks_nexus_write():
+    """nexus_ prefix 테이블 write 시도(insert/update/delete/upsert)는 NexusWriteForbidden."""
+    client = _RWClient(_rows())
+    t = NX._read_only_table(client, "nexus_chunks")
+    for op in ("insert", "update", "delete", "upsert"):
+        try:
+            getattr(t, op)({"x": 1})
+            assert False, f"nexus write({op})가 막히지 않음"
+        except NX.NexusWriteForbidden:
+            pass
+    assert issubclass(NX.NexusWriteForbidden, PermissionError)
+
+
+def test_guard_allows_nexus_read():
+    """가드 후에도 read(.select 체인)는 정상 — fetch가 후보를 그대로 반환(무회귀)."""
+    cands = NX.fetch_nexus_candidates("판촉비 분담", client=_RWClient(_rows()))
+    assert cands and {c["id"] for c in cands} <= {"c1", "c2"}
+
+
+def test_guard_skips_non_nexus_tables():
+    """비-nexus 테이블(docs 등)은 가드 미적용 — 자기 테이블 write 무영향."""
+    client = _RWClient(_rows())
+    t = NX._read_only_table(client, "docs")
+    assert not isinstance(t, NX._ReadOnlyTable)  # 프록시로 안 감쌈
+    t.insert({"x": 1})  # 예외 없이 통과
+
+
 def test_legal_ai_wires_nexus_with_docs_fallback():
     """legal_ai가 _internal_candidates로 버킷별 전용 소스(사규=nexus→docs폴백, 계약/약정=docs)."""
     src = open(os.path.join(_ROOT, "legal_ai.py"), encoding="utf-8").read()

@@ -6,6 +6,7 @@ nexus_adapter.py — DF 콤파스 nexus_* 읽기 전용 어댑터 (내부문서 
 
 원칙:
   - nexus_*는 DF 콤파스 소유 → **읽기 전용**(SELECT만, 쓰기 0). DB View 생성도 안 함(앱측 쿼리+매핑만).
+    #38: service_role 권한으로도 못 쓰게 코드 가드(NexusWriteForbidden)로 봉인 — nexus_ prefix write는 raise.
   - 현행본만: nexus_documents.superseded_by IS NULL (내부문서 freshness 공짜 — 외부 리졸버 불필요).
   - 사규 = nexus_chunks.categories @> {공정거래}.
   - 임베딩 컬럼 미확인 → FTS 대용 키워드 랭킹 기본(+ synonym 확장 훅). 임베딩 확인되면 하이브리드로.
@@ -20,6 +21,49 @@ import re
 import grounding_util
 
 logger = logging.getLogger(__name__)
+
+
+# ── nexus write 가드 (#38) ────────────────────────────────────
+# legal_ai는 service_role로 연결 → 권한상 nexus_*에 쓸 수 있음. DB는 안 건드리기로 했으니
+# (DF 콤파스 깰 위험) 코드 레벨 트립와이어로 봉인. 규칙은 prefix 기준 —
+# nexus_documents·nexus_chunks·향후 nexus_* 자동 커버. write는 raise, read(.select 체인)는 무변경.
+class NexusWriteForbidden(PermissionError):
+    """nexus_*는 DF 콤파스 소유 — legal_ai에서 read-only. write 시도는 코드로 봉인."""
+
+
+# 쓰기성 메서드(insert/update/delete/upsert). 메서드명 문자열 set — 정적 read-only 검사에 안 걸림.
+_WRITE_METHODS = frozenset({"insert", "update", "delete", "upsert"})
+
+
+class _ReadOnlyTable:
+    """nexus_* 테이블 프록시 — read 체인(select/eq/overlaps/limit/execute…)은 그대로 위임,
+    write 메서드는 NexusWriteForbidden. 체인 반환값도 다시 감싸 가드 유지(execute 응답만 raw)."""
+
+    def __init__(self, inner, name):
+        self._inner = inner
+        self._name = name
+
+    def __getattr__(self, attr):
+        if attr in _WRITE_METHODS:
+            raise NexusWriteForbidden(
+                f"nexus_* is read-only in legal_ai (table={self._name}, op={attr})")
+        target = getattr(self._inner, attr)
+        if not callable(target):
+            return target
+
+        def _wrapped(*a, **k):
+            res = target(*a, **k)
+            # execute() 응답은 raw(데이터). 그 외 빌더 반환은 계속 가드.
+            return res if attr == "execute" else _ReadOnlyTable(res, self._name)
+
+        return _wrapped
+
+
+def _read_only_table(client, name):
+    """nexus_ prefix 테이블은 읽기 전용 프록시로 감싼다(write 시 raise). 비-nexus는 그대로."""
+    table = client.table(name)
+    return _ReadOnlyTable(table, name) if str(name).startswith("nexus_") else table
+
 
 SAJU_CATEGORY = "공정거래"
 # nexus_chunks ⋈ nexus_documents (PostgREST 임베디드 리소스). 읽기 전용 컬럼만.
@@ -84,7 +128,7 @@ def fetch_nexus_candidates(query, client=None, categories=None, limit=None, top_
     if limit is None:
         limit = 40 if categories else 1000
     try:
-        q = client.table("nexus_chunks").select(_SELECT)
+        q = _read_only_table(client, "nexus_chunks").select(_SELECT)
         if categories:
             q = q.overlaps("categories", list(categories))  # categories && {…} (union, 단일배제 아님)
         resp = q.limit(limit).execute()
