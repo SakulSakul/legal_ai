@@ -275,3 +275,16 @@ def test_s4_freshness_computed_not_hardcoded():
     assert '"freshness": "FRESH" if any' not in src  # 정적 거짓 단언 제거
     assert "_compute_block_freshness" in src
     assert "check_block_freshness" in src and "freshness_util" in src
+
+
+def test_promo_action_plan_branch_placement():
+    """A(P0): 권장행동 §11①②는 ⑤-미충족 가지에만. ⑤ 충족 시 ①②③④ 적용제외이므로
+    충족 가지에 §11①②를 의무로 두면 인용 오류(라이브 60% 답 오배치 회귀가드)."""
+    src = _src()
+    # ⑤ 미충족 가지: §11①②③④ 적용 + 서면약정(§11①②)
+    assert "[⑤ 미충족 시] §11①②③④ 적용" in src
+    assert "서면약정·동시교부(§11①②)" in src
+    # ⑤ 충족 가지: §11①②는 의무 아님(입증자료)
+    assert "§11①② 의무 아님" in src
+    # 옛 버그 문구(충족 시 서면약정 의무) 제거
+    assert "2요건 충족 시 서면약정·동시교부(§11①②)" not in src
