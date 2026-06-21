@@ -237,7 +237,8 @@ def build_gemini_prompt(topic_key: str, blocks: dict, 사규_texts: list[str], c
 
 ## 출력 형식 (JSON)
 각 쟁점 ID별로 아래 형식으로 출력하십시오. 사규·계약 인용은 **cited_source_ids에 위 후보 id만** 넣고,
-관련 내부문서가 없으면 빈 배열로 두십시오(문서명을 새로 지어내지 마십시오 — 시스템이 후보 밖 인용을 드롭합니다):
+관련 내부문서가 없으면 빈 배열로 두십시오(문서명을 새로 지어내지 마십시오 — 시스템이 후보 밖 인용을 드롭합니다).
+⚠️ saryu_analysis·recommendation 본문에서 문서를 지칭할 땐 제목을 「제목」으로 쓰고, UUID/id를 문장에 절대 쓰지 마십시오(id는 cited_source_ids에만):
 
 ```json
 {{

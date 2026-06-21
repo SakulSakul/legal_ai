@@ -126,3 +126,16 @@ def test_legal_ai_wires_nexus_with_docs_fallback():
     assert "_internal_candidates" in src
     assert "nexus_adapter.fetch_nexus_candidates" in src
     assert "make_candidates(st.session_state" in src  # docs 폴백 잔존
+
+
+# ── Bug2: doc_kind → cat 결정론 매핑 ──────────────────────────
+def test_doc_kind_maps_to_category():
+    rows = [
+        {"id": "r1", "nexus_documents": {"title": "판촉비 지침", "doc_kind": "rule", "superseded_by": None}},
+        {"id": "k1", "nexus_documents": {"title": "특약매입 계약", "doc_kind": "contract", "superseded_by": None}},
+        {"id": "a1", "nexus_documents": {"title": "공동판촉 약정", "doc_kind": "agreement", "superseded_by": None}},
+    ]
+    by_id = {c["id"]: c for c in NX.map_rows_to_candidates(rows)}
+    assert by_id["r1"]["kind"] == "사규"   # rule → 사규
+    assert by_id["k1"]["kind"] == "계약"   # contract → 계약
+    assert by_id["a1"]["kind"] == "약정"   # agreement → 약정

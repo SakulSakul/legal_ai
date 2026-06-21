@@ -14,6 +14,7 @@ negotiation_util.py — MD 협상 브리프(negotiation_brief)의 순수 로직 
 SOURCE_ROLE = {
     "법령": {"icon": "🛡", "label": "양보 안 해도 되는 선 (법·룰북)",   "role": "shield"},
     "계약": {"icon": "📄", "label": "거래 성립 지점 (계약·협의)",       "role": "table"},
+    "약정": {"icon": "📄", "label": "약정 (거래처와의 약속)",          "role": "table"},
     "사규": {"icon": "📋", "label": "우리 사규 (내부 유연성)",         "role": "internal"},
 }
 UNKNOWN_SOURCE = {"icon": "❔", "label": "근거 출처 불명", "role": "unknown"}
@@ -197,7 +198,19 @@ def assemble_brief(json_data):
                 lv["conditions"] = [_short(conds)] if conds else []
                 lv["documents"] = []
             leverage.append(lv)
-        if rule and rule not in ("해당 없음", "없음"):
+        gs = iss.get("grounded_sources") or []
+        if gs:
+            # Bug2: 분류 = grounded kind(nexus doc_kind 결정론). LLM이 사규를 계약 칸에 못 넣음.
+            for g in gs:
+                _src = g.get("kind") if g.get("kind") in ("사규", "계약", "약정") else "사규"
+                leverage.append({
+                    "source": _src,
+                    "role": "table" if _src in ("계약", "약정") else "internal",
+                    "binding": "negotiable",
+                    "point": _short(f"「{g['title']}」 — {_first_line(rule_an)}" if rule_an else f"「{g['title']}」"),
+                })
+        elif rule and rule not in ("해당 없음", "없음"):
+            # 폴백(grounding 없음): 텍스트 휴리스틱. nexus 경로에선 위 grounded 분기를 탐.
             is_contract = any(h in (rule + rule_an) for h in _CONTRACT_HINTS)
             leverage.append({
                 "source": "계약" if is_contract else "사규",

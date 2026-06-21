@@ -1616,6 +1616,9 @@ def build_system_claude_v3(gatekeeper_text, gatekeeper_meta, internal_candidates
         "\n⚠️ 내부문서(사규·계약·약정) 인용은 위 후보 목록의 id를 cited_source_ids에 넣는다. "
         "후보에 없는 문서명을 새로 지어내지 마라(시스템이 후보 밖 인용을 드롭한다). 문서명은 "
         "시스템이 레코드에서 찍으므로 applicable_rule에 사규명을 창작하지 말 것.\n"
+        "⚠️ 본문(law_analysis/rule_analysis/recommendation 등)에서 문서를 지칭할 땐 반드시 제목을 "
+        "「제목」 형태로 써라. UUID/id(예: 854249ee-…)를 문장에 절대 쓰지 마라 — id는 "
+        "cited_source_ids에만 넣는다.\n"
 
         "\n\n━━━ [답변 형식] ━━━\n"
         "반드시 아래 JSON 형식으로만 출력하세요. JSON 외의 마크다운 설명은 작성하지 마세요.\n"
@@ -3009,8 +3012,8 @@ def render_negotiation_brief(jd):
     if not b:
         return  # 이슈도 브리프도 없음(구버전·빈 응답) → 미표시(하위호환)
 
-    SRC2CAT = {"법령": "법률", "계약": "계약", "사규": "사규"}
-    groups = {"법률": [], "계약": [], "사규": []}
+    SRC2CAT = {"법령": "법률", "계약": "계약", "사규": "사규", "약정": "약정"}
+    groups = {"법률": [], "계약": [], "사규": [], "약정": []}
     law_levers = []
     for lv in b["leverage"]:
         cat = SRC2CAT.get(lv["source"])
@@ -3040,15 +3043,15 @@ def render_negotiation_brief(jd):
     # [판단 근거] — 분류별(법률/계약/사규/약정·행정규칙). 조문 전문 아닌 한 줄 요약.
     p.append('<div style="font-size:13px;font-weight:700;color:#3D3C38;margin-top:10px;">판단 근거 '
              '<span style="font-weight:400;color:#999;">※ 법률 / 계약 / 사규 / 약정·행정규칙</span></div>')
-    for cat in ("법률", "계약", "사규"):
+    for cat in ("법률", "계약", "사규", "약정"):
         items = groups[cat]
+        _label = "약정·행정규칙" if cat == "약정" else cat
         if items:
             prov = "" if all(lv["provenance_ok"] for lv in items) else ' <span style="color:#A07020;">(출처 일부 불명)</span>'
             txt = " · ".join(lv["point"] for lv in items)
-            p.append(f'<div style="font-size:13px;line-height:1.5;color:#3D3C38;">· <b>{cat}</b>&nbsp;&nbsp;{txt}{prov}</div>')
+            p.append(f'<div style="font-size:13px;line-height:1.5;color:#3D3C38;">· <b>{_label}</b>&nbsp;&nbsp;{txt}{prov}</div>')
         else:
-            p.append(f'<div style="font-size:13px;color:#999;">· <b>{cat}</b>&nbsp;&nbsp;해당 없음</div>')
-    p.append('<div style="font-size:13px;color:#999;">· <b>약정·행정규칙</b>&nbsp;&nbsp;해당 없음</div>')
+            p.append(f'<div style="font-size:13px;color:#999;">· <b>{_label}</b>&nbsp;&nbsp;해당 없음</div>')
 
     # [권장 행동] — 토픽별 action_plan 우선, 없으면 예외 자격요건·서류 + escalation. 명사형 bullet.
     actions = []
