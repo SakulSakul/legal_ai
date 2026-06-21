@@ -115,13 +115,25 @@ def _law_items(raw):
             for it in _md_items(raw)]
 
 
+def _name_variants(name):
+    """KPD 결과명 '정식명 (약칭)' → (정식명, 약칭|None). 약칭 접미사 분리.
+    (예: '대규모유통업에서의 거래 공정화에 관한 법률 (대규모유통업법)')."""
+    s = str(name or "").strip()
+    m = re.match(r"^(.*?)\s*\(([^)]*)\)\s*$", s)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return s, None
+
+
 def parse_search_laws(raw, exact_name, law_type=None):
     """search_laws 응답에서 '정확 매칭' 1건의 law_id·시행일 추출.
-    동명 다건(관세법/관세법 시행령 …) 또는 0건이면 ok=False(오선택 방지)."""
+    KPD 결과명의 '(약칭)' 접미사를 분리해 정식명·약칭 어느 쪽과도 정확 일치 허용
+    (시행령 등 부분일치 오선택은 여전히 배제). 동명 다건/0건이면 ok=False."""
     target = str(exact_name).strip()
     matches = []
     for it in _law_items(raw):
-        if it["name"] != target:
+        base, alias = _name_variants(it["name"])
+        if target != base and target != alias:
             continue
         if law_type and it.get("law_type") and it["law_type"] != law_type:
             continue

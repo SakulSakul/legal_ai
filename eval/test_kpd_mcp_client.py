@@ -146,3 +146,33 @@ def test_kpd_mcp_is_pure():
     src = open(os.path.join(ROOT, "kpd_mcp.py"), encoding="utf-8").read()
     for forbidden in ("import requests", "import streamlit", "get_secret", "railway", "http"):
         assert forbidden not in src, f"kpd_mcp.py는 순수 파서여야 함: '{forbidden}' 발견"
+
+
+# ── 약칭 접미사 매칭 (S4 §11 disclaimer 근본원인 회귀가드) ────
+_MD_ALIAS = """## 법령 검색 결과
+1. [268287] 대규모유통업에서의 거래 공정화에 관한 법률 (대규모유통업법)
+   법률 | 소관: 공정거래위원회 | 시행: 20250121 | 타법개정
+2. [260093] 대규모유통업에서의 거래 공정화에 관한 법률 시행령 (대규모유통업법 시행령)
+   대통령령 | 소관: 공정거래위원회 | 시행: 20240209 | 일부개정"""
+
+
+def test_name_variants_splits_alias():
+    assert K._name_variants("대규모유통업에서의 거래 공정화에 관한 법률 (대규모유통업법)") == \
+        ("대규모유통업에서의 거래 공정화에 관한 법률", "대규모유통업법")
+    assert K._name_variants("관세법") == ("관세법", None)
+
+
+def test_search_laws_matches_despite_alias_suffix():
+    """KPD 결과명의 '(약칭)' 접미사 때문에 정확매칭 0건 → NEEDS_REVIEW 오판되던 버그(S4).
+    정식명·약칭 어느 쪽으로 검색해도 법률 1건 매칭, 시행일 정규화."""
+    r1 = K.parse_search_laws(_MD_ALIAS, "대규모유통업에서의 거래 공정화에 관한 법률", law_type="법률")
+    assert r1["ok"] and str(r1["law_id"]) == "268287"
+    assert r1["effective_date"] == "2025-01-21"   # 20250121 → 정규화
+    r2 = K.parse_search_laws(_MD_ALIAS, "대규모유통업법", law_type="법률")
+    assert r2["ok"] and str(r2["law_id"]) == "268287"
+
+
+def test_search_laws_alias_does_not_pick_siheng():
+    """약칭 매칭이 시행령을 오선택하지 않음(법률만)."""
+    r = K.parse_search_laws(_MD_ALIAS, "대규모유통업에서의 거래 공정화에 관한 법률", law_type="법률")
+    assert str(r["law_id"]) == "268287"  # 법률(시행령 260093 아님)
