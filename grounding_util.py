@@ -41,16 +41,66 @@ def make_candidate(rec):
     }
 
 
-def make_candidates(records, cats=INTERNAL_CATS):
-    """레코드 목록 → 후보집합(닫힌 집합). cats로 도메인 필터. id 중복 제거."""
+# ── 큰 docs 런타임 섹션추출 (#39 2B) ──────────────────────────
+# 문제: 큰 계약서(예 특약매입 5118자)는 판촉 조항이 긴 본문에 묻혀 snippet[:240]/프롬프트[:120]
+# 밖으로 잘림 → LLM이 관련성을 못 봄(작은 약정서는 전체가 보여 인용됨). 크기 비대칭 버그.
+# 해법: 큰 docs를 제N조 단위로 런타임 분할해 *판촉 관련 조*가 짧고 on-point한 독립 후보로 떠
+#       작은 약정서와 동등 경쟁. RAG 재색인 아님 — in-memory split, docs 쓰기 0.
+#       각 조 후보의 title은 부모 문서명(렌더는 「특약매입 계약서」로 — 조 단위 노출 아님).
+_ARTICLE_MARK = re.compile(r"(제\s*\d+\s*조(?:의\s*\d+)?)")
+_LARGE_DOC_CHARS = 800  # 이보다 길면 조 단위 분할(작은 약정서 ~수백자와 동등 경쟁 보장)
+
+
+def _split_articles(text):
+    """본문을 제N조 경계로 분할 → [(head, segment), …]. 마커 2개 미만이면 [](분할 불가)."""
+    parts = _ARTICLE_MARK.split(text or "")  # [전문, '제1조', 본문1, '제2조', 본문2, …]
+    if len(parts) < 3:
+        return []
+    sections, i = [], 1
+    while i < len(parts) - 1:
+        head = parts[i].strip()
+        seg = (head + parts[i + 1]).strip()
+        if seg:
+            sections.append((head, seg))
+        i += 2
+    return sections
+
+
+def expand_doc_sections(rec, large_chars=_LARGE_DOC_CHARS):
+    """큰 docs 레코드를 제N조 단위 후보로 확장(런타임). 작거나 조 마커 없으면 원 레코드 1건.
+    부모(전문) 후보는 실 id로 유지(인용 호환) + 각 조는 합성 id, title=부모 문서명."""
+    base = make_candidate(rec)
+    if not base:
+        return []
+    text = (rec.get("text") or rec.get("snippet") or "")
+    if len(text) <= large_chars:
+        return [base]
+    sections = _split_articles(text)
+    if not sections:
+        return [base]
+    out, seen = [base], {base["id"]}
+    for head, seg in sections:
+        sid = f"{base['id']}::{head.replace(' ', '')}"
+        if sid in seen:
+            continue
+        seen.add(sid)
+        out.append({"id": sid, "cat": base["cat"], "kind": base["kind"],
+                    "title": base["title"], "snippet": seg[:240]})
+    return out
+
+
+def make_candidates(records, cats=INTERNAL_CATS, expand_large=False):
+    """레코드 목록 → 후보집합(닫힌 집합). cats로 도메인 필터. id 중복 제거.
+    expand_large=True면 큰 docs를 제N조 단위 후보로 확장(#39 2B — on-point 조 가시화)."""
     out, seen = [], set()
     for rec in (records or []):
         if cats is not None and _rec_cat(rec) not in cats:
             continue
-        c = make_candidate(rec)
-        if c and c["id"] not in seen:
-            seen.add(c["id"])
-            out.append(c)
+        items = expand_doc_sections(rec) if expand_large else [make_candidate(rec)]
+        for c in items:
+            if c and c["id"] not in seen:
+                seen.add(c["id"])
+                out.append(c)
     return out
 
 
@@ -131,7 +181,9 @@ def apply_grounding(json_data, candidates):
         recs = ground_ids(cited, candidates)
         if recs:
             iss["grounded_sources"] = [{"id": r["id"], "kind": r["kind"], "title": r["title"]} for r in recs]
-            iss["applicable_rule"] = " / ".join(f"「{r['title']}」" for r in recs)
+            # 같은 문서의 여러 조가 인용되면(2B 섹션추출) title 중복 → 표시용 dedup(순서 유지).
+            _titles = list(dict.fromkeys(r["title"] for r in recs))
+            iss["applicable_rule"] = " / ".join(f"「{t}」" for t in _titles)
         else:
             iss["grounded_sources"] = []
             cur = (iss.get("applicable_rule") or "").strip().strip("「」")
