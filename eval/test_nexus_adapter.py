@@ -139,3 +139,48 @@ def test_doc_kind_maps_to_category():
     assert by_id["r1"]["kind"] == "사규"   # rule → 사규
     assert by_id["k1"]["kind"] == "계약"   # contract → 계약
     assert by_id["a1"]["kind"] == "약정"   # agreement → 약정
+
+
+# ── category 라우팅: 블록=필터 / LLM=전체 폴백 (silent miss 방지) ──
+class _TrackQuery(_FakeQuery):
+    def __init__(self, data, rec):
+        super().__init__(data); self._rec = rec
+    def overlaps(self, col, vals):
+        self._rec["overlaps"] = (col, list(vals)); return self
+    def contains(self, col, vals):
+        self._rec["contains"] = (col, list(vals)); return self
+
+
+class _TrackClient:
+    def __init__(self, data):
+        self._data = data; self.rec = {}
+    def table(self, name):
+        self.rec["table"] = name; return _TrackQuery(self._data, self.rec)
+
+
+def test_categories_filter_uses_overlaps_union():
+    """블록경로: categories 주면 overlaps(union) 필터 — 단일배제 아님."""
+    c = _TrackClient(_rows())
+    NX.fetch_nexus_candidates("판촉비", client=c, categories=["공정거래"])
+    assert c.rec.get("overlaps") == ("categories", ["공정거래"])
+    assert "contains" not in c.rec
+
+
+def test_full_fallback_applies_no_category_filter():
+    """LLM경로(categories=None): category 필터 미적용 = 전체 코퍼스 폴백(공정거래 디폴트 금지)."""
+    c = _TrackClient(_rows())
+    NX.fetch_nexus_candidates("개인정보 제3자 제공", client=c, categories=None)
+    assert "overlaps" not in c.rec and "contains" not in c.rec  # 필터 0
+
+
+# ── 배선 가드: 블록토픽 결정론, LLM 전체 폴백 ─────────────────
+import os
+_ROOT2 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_block_topic_category_map_and_llm_full_fallback():
+    src = open(os.path.join(_ROOT2, "legal_ai.py"), encoding="utf-8").read()
+    assert "_BLOCK_TOPIC_CAT" in src
+    assert '"판촉비분담": ["공정거래"]' in src           # 블록토픽 결정론
+    assert "block_topic=matched_topics[0]" in src        # 블록경로만 토픽 전달
+    assert "모르면 공정거래 디폴트' 금지" in src or "공정거래 디폴트 금지" in src
