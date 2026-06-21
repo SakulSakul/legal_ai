@@ -29,6 +29,7 @@ from triage_util import (
 )
 from negotiation_util import build_brief
 import grounding_util
+import nexus_adapter
 
 # ── 로깅 설정 ────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -112,6 +113,20 @@ def _compute_block_freshness(topic_key):
     except Exception as e:
         logger.warning(f"블록 freshness 계산 실패({topic_key}): {e}")
         return None
+
+
+def _internal_candidates(query=""):
+    """내부문서(사규·계약) 인용 grounding 후보집합 — nexus 우선(읽기 전용 어댑터),
+    실패/RLS 거부/미연결 시 docs 폴백(grounding_util). 둘 다 grounding_util 후보 형식이라
+    동일 레이어(ground_ids/apply_grounding)를 통과한다. 단일 소스 종착=nexus(Phase 1b, RLS read
+    확인 후 docs 제거). nexus가 안 잡히면 로깅됨(조용한 폴백 진단)."""
+    try:
+        nx = nexus_adapter.fetch_nexus_candidates(query, client=init_supabase())
+        if nx:
+            return nx
+    except Exception as e:
+        logger.warning(f"nexus 후보 조회 실패(→docs 폴백): {e}")
+    return grounding_util.make_candidates(st.session_state.get("docs", []))
 
 
 # ── Lazy 클라이언트 초기화 ────────────────────────────────────
@@ -2355,8 +2370,9 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
                 
                 # issues 변환
                 gemini_results = {}
-                # 내부문서 grounding: docs 후보(id)를 gemini에 줘서 cited_source_ids로만 인용받음.
-                _blk_cands = grounding_util.make_candidates(st.session_state.get("docs", []))
+                # 내부문서 grounding: nexus(읽기전용)→docs 폴백 후보(id)를 gemini에 줘서
+                # cited_source_ids로만 인용받음(문서명 창작 금지).
+                _blk_cands = _internal_candidates(user_query)
                 try:
                     from block_assembler import parse_gemini_response, build_gemini_prompt, fetch_legal_blocks
                     blocks = fetch_legal_blocks(matched_topics[0], db)
@@ -2448,8 +2464,7 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
             gatekeeper_text = f"Gemini 수집 결과:\n{gemini_reply[:3000]}"
         
         # Stage 3: Claude Senior Lawyer — 최종 법리 해석 (내부문서 인용은 후보 id로만 grounding)
-        _ic = grounding_util.candidates_prompt_block(
-            grounding_util.make_candidates(st.session_state.get("docs", [])))
+        _ic = grounding_util.candidates_prompt_block(_internal_candidates(user_query))
         claude_system = build_system_claude_v3(gatekeeper_text, gatekeeper_meta, internal_candidates=_ic)
         st.caption("⚖️ Stage 3: 최종 법리 해석 및 보고서 작성 중 (Claude)...")
         
@@ -4790,8 +4805,8 @@ def main():
                         json_data = _filter_b2b_consumer_issues(json_data, user_query=safe_query)
                         # 내부문서 인용 grounding(구조적 배제): docs 후보 있으면 cited_source_ids/
                         # 정확-멤버십으로 검증 → 후보 밖 자유텍스트 사규명은 '해당 없음'(환각 0).
-                        # 본문 title은 레코드에서. 후보 없으면(docs 미적재) 기존 가드 유지(무회귀).
-                        _doc_cands = grounding_util.make_candidates(st.session_state.get("docs", []))
+                        # 본문 title은 레코드에서. nexus(읽기전용)→docs 폴백. 후보 없으면 기존 가드(무회귀).
+                        _doc_cands = _internal_candidates(safe_query)
                         if _doc_cands:
                             json_data = grounding_util.apply_grounding(json_data, _doc_cands)
                         else:
