@@ -121,11 +121,14 @@ def test_nexus_adapter_is_read_only():
 
 
 def test_legal_ai_wires_nexus_with_docs_fallback():
-    """legal_ai가 _internal_candidates(nexus 우선→docs 폴백)로 후보를 얻는지."""
+    """legal_ai가 _internal_candidates로 버킷별 전용 소스(사규=nexus→docs폴백, 계약/약정=docs)."""
     src = open(os.path.join(_ROOT, "legal_ai.py"), encoding="utf-8").read()
     assert "_internal_candidates" in src
     assert "nexus_adapter.fetch_nexus_candidates" in src
-    assert "make_candidates(st.session_state" in src  # docs 폴백 잔존
+    assert 'st.session_state.get("docs"' in src  # docs 소스 잔존
+    # nexus-XOR-docs 폐기: 계약/약정은 항상 docs에서(병렬 버킷)
+    assert 'cats=("contract", "yakjeong")' in src
+    assert 'cats=("saryu",)' in src  # 사규는 nexus 실패 시 docs 폴백
 
 
 # ── Bug2: doc_kind → cat 결정론 매핑 ──────────────────────────

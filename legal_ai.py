@@ -125,22 +125,31 @@ _BLOCK_TOPIC_CAT = {
 
 
 def _internal_candidates(query="", block_topic=None):
-    """내부문서(사규·계약) 인용 grounding 후보집합 — nexus 우선(읽기 전용), 실패/RLS 거부 시
-    docs 폴백. 둘 다 grounding_util 후보 형식 → 동일 레이어 통과.
+    """내부문서 인용 grounding 후보집합 — '버킷별 전용 소스'(nexus-XOR-docs 폐기).
+    nexus와 docs는 같은 버킷의 폴백이 아니라 다른 버킷의 병렬 소스다:
+      · 사규: nexus 우선(읽기 전용, #36 category 라우팅). 실패/RLS 거부 시 docs[saryu] 폴백.
+      · 계약·약정: 항상 docs[contract,yakjeong](병렬 — nexus가 사규를 줘도 함께 조회).
+    nexus·docs 둘 다 grounding_util 후보 형식 → 동일 닫힌집합(#31 ground_ids/apply_grounding)
+    통과. LLM이 cited_source_ids로 관련만 선택, 후보밖·미인용은 드롭. #33 결정론 분류가 cat로
+    버킷 배정. 별도 관련성 필터 불필요.
 
-    category 라우팅(refined 옵션 A):
-      · 블록경로: block_topic→category 결정론(정밀·빠름). 판촉비분담→공정거래 무회귀.
-      · LLM경로(block_topic=None): category=None = 전체 코퍼스 폴백. 키워드로 좁히지 않음
-        (좁게 오라우팅 < 넓게). 보세·개인정보 등 인-스코프 도메인 silent miss 제거.
-    핵심 불변식: 어떤 경로든 '모르면 공정거래 디폴트' 금지."""
+    category 라우팅(#36): 블록경로 block_topic→category 결정론 / LLM경로 전체 폴백(좁히지 않음).
+
+    ⛔ DF 콤파스 무접촉: nexus_*는 읽기만(#36 기존분, 이 함수가 nexus 상호작용을 늘리지 않음 —
+    계약/약정은 docs에서만). docs는 legal_ai 소유, 읽기 전용(쓰기 0)."""
     cats = _BLOCK_TOPIC_CAT.get(block_topic) if block_topic else None
+    docs = st.session_state.get("docs", [])
+    out = []
+    # 사규: nexus 우선 → 실패/RLS 시 docs[saryu] 폴백(레거시 사규). docs[saryu]는 nexus 성공 시 미추가(이중 사규 방지).
+    saryu = None
     try:
-        nx = nexus_adapter.fetch_nexus_candidates(query, client=init_supabase(), categories=cats)
-        if nx:
-            return nx
+        saryu = nexus_adapter.fetch_nexus_candidates(query, client=init_supabase(), categories=cats)
     except Exception as e:
-        logger.warning(f"nexus 후보 조회 실패(→docs 폴백): {e}")
-    return grounding_util.make_candidates(st.session_state.get("docs", []))
+        logger.warning(f"nexus 사규 조회 실패(→docs[saryu] 폴백): {e}")
+    out += saryu if saryu else grounding_util.make_candidates(docs, cats=("saryu",))
+    # 계약·약정: 항상 docs(병렬 전용 소스, nexus 아님). nexus-XOR-docs 폐기의 핵심.
+    out += grounding_util.make_candidates(docs, cats=("contract", "yakjeong"))
+    return out
 
 
 # ── Lazy 클라이언트 초기화 ────────────────────────────────────
