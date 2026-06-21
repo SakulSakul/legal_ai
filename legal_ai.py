@@ -116,13 +116,26 @@ def _compute_block_freshness(topic_key):
         return None
 
 
-def _internal_candidates(query=""):
-    """내부문서(사규·계약) 인용 grounding 후보집합 — nexus 우선(읽기 전용 어댑터),
-    실패/RLS 거부/미연결 시 docs 폴백(grounding_util). 둘 다 grounding_util 후보 형식이라
-    동일 레이어(ground_ids/apply_grounding)를 통과한다. 단일 소스 종착=nexus(Phase 1b, RLS read
-    확인 후 docs 제거). nexus가 안 잡히면 로깅됨(조용한 폴백 진단)."""
+# 블록토픽 → nexus category 결정론 매핑(신뢰 신호: 블록 분류는 결정론). 키워드 추측 안 씀.
+# 매핑에 없거나 블록토픽 없으면(LLM경로) None = 전체 코퍼스 폴백 — '공정거래 디폴트 금지'(silent miss 방지).
+_BLOCK_TOPIC_CAT = {
+    "판촉비분담": ["공정거래"],
+    "모조품": ["공정거래"],
+}
+
+
+def _internal_candidates(query="", block_topic=None):
+    """내부문서(사규·계약) 인용 grounding 후보집합 — nexus 우선(읽기 전용), 실패/RLS 거부 시
+    docs 폴백. 둘 다 grounding_util 후보 형식 → 동일 레이어 통과.
+
+    category 라우팅(refined 옵션 A):
+      · 블록경로: block_topic→category 결정론(정밀·빠름). 판촉비분담→공정거래 무회귀.
+      · LLM경로(block_topic=None): category=None = 전체 코퍼스 폴백. 키워드로 좁히지 않음
+        (좁게 오라우팅 < 넓게). 보세·개인정보 등 인-스코프 도메인 silent miss 제거.
+    핵심 불변식: 어떤 경로든 '모르면 공정거래 디폴트' 금지."""
+    cats = _BLOCK_TOPIC_CAT.get(block_topic) if block_topic else None
     try:
-        nx = nexus_adapter.fetch_nexus_candidates(query, client=init_supabase())
+        nx = nexus_adapter.fetch_nexus_candidates(query, client=init_supabase(), categories=cats)
         if nx:
             return nx
     except Exception as e:
@@ -2375,8 +2388,8 @@ def dispatch_with_fallback(model_choice, messages, docs, laws_db):
                 # issues 변환
                 gemini_results = {}
                 # 내부문서 grounding: nexus(읽기전용)→docs 폴백 후보(id)를 gemini에 줘서
-                # cited_source_ids로만 인용받음(문서명 창작 금지).
-                _blk_cands = _internal_candidates(user_query)
+                # cited_source_ids로만 인용받음(문서명 창작 금지). 블록토픽→category 결정론(정밀).
+                _blk_cands = _internal_candidates(user_query, block_topic=matched_topics[0])
                 try:
                     from block_assembler import parse_gemini_response, build_gemini_prompt, fetch_legal_blocks
                     blocks = fetch_legal_blocks(matched_topics[0], db)

@@ -70,21 +70,28 @@ def rank_candidates(candidates, query, synonyms=None, top_k=8):
     return [candidates[i] for i in ranked[:top_k]]
 
 
-def fetch_nexus_candidates(query, client=None, category=SAJU_CATEGORY, limit=40, top_k=8):
-    """nexus에서 현행 사규 청크 후보를 읽어 grounding 후보로(읽기 전용). client 주입 가능(테스트).
+def fetch_nexus_candidates(query, client=None, categories=None, limit=None, top_k=8):
+    """nexus에서 현행 내부문서 청크 후보를 읽어 grounding 후보로(읽기 전용). client 주입 가능(테스트).
+
+    categories: 도메인 필터(list). None이면 '전체 코퍼스 폴백'(category 필터 없음) — silent miss 방지
+      핵심: '모르면 공정거래 디폴트' 금지. 블록경로는 블록토픽→category 결정론으로 list를 주고,
+      LLM경로(토픽 분류기 없음)는 None으로 좁히지 않는다(좁게 오라우팅 < 넓게).
     실패/RLS거부/빈 결과 → None(호출측 docs 폴백, 로깅). 절대 예외를 위로 던지지 않음."""
     if client is None:
         return None
+    # 필터 시엔 좁아 적은 limit, 전체 폴백 시엔 코퍼스 전체 풀(클라 랭킹이 다 보도록 —
+    # 임의 truncation에 의한 recall 미스 방지. 코퍼스 ~수백 청크, 한 쿼리로 감당).
+    if limit is None:
+        limit = 40 if categories else 1000
     try:
-        resp = (client.table("nexus_chunks")
-                .select(_SELECT)
-                .contains("categories", [category])
-                .limit(limit)
-                .execute())
+        q = client.table("nexus_chunks").select(_SELECT)
+        if categories:
+            q = q.overlaps("categories", list(categories))  # categories && {…} (union, 단일배제 아님)
+        resp = q.limit(limit).execute()
         rows = getattr(resp, "data", None) or []
         cands = map_rows_to_candidates(rows)
         if not cands:
-            logger.info("nexus 후보 0건(현행 공정거래 청크 없음/RLS) → docs 폴백")
+            logger.info(f"nexus 후보 0건(categories={categories or '전체'}/RLS) → docs 폴백")
             return None
         return rank_candidates(cands, query, top_k=top_k)
     except Exception as e:
