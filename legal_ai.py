@@ -3065,26 +3065,25 @@ def render_negotiation_brief(jd):
     if has_exc:
         p.append('<div style="font-size:13px;color:#475569;">· 입증책임 = 우리 측</div>')
 
-    # #41 결정론 백스톱: relevance 게이트 통과 버킷 대표(_doc_bucket_reps)를 내부문서 칸(계약/사규/
-    # 약정)에 보장 — LLM 인용이 1/3 흔들려도 약정 칸이 매번 채워지게. 무관(게이트 미통과)은 reps에
-    # 아예 없어 주입 안 됨(억지 표시 금지). 이미 brief에 있으면(title 중복) 스킵. 법률 칸은 미개입.
-    for _rep in (jd.get("_doc_bucket_reps") or {}).values():
-        _cat = _rep.get("kind")
-        _title = (_rep.get("title") or "").strip()
-        if _cat not in groups or not _title:
-            continue
-        if any(_title in (lv.get("point") or "") for lv in groups[_cat]):
-            continue  # LLM이 이미 인용함 — 중복 방지
-        groups[_cat].append({"source": _cat, "point": f"「{_title}」",
-                             "provenance_ok": True, "has_exception": False})
+    # #42 패널 각 버킷 = 그 문서 고유 원문 인용 스니펫(닫힌집합 text, LLM 공통 분석 복사 금지).
+    # #41 백스톱(title-only)을 격상 — 게이트 통과 버킷 대표의 *원문 발췌*를 결정론 표시(변형 0).
+    # 무관(게이트 미통과)은 reps에 없어 미표시. 법률 칸은 LLM 유지(§11④⑤). 4칸 고유 내용 보장.
+    _reps = jd.get("_doc_bucket_reps") or {}
 
-    # [판단 근거] — 분류별(법률/계약/사규/약정·행정규칙). 조문 전문 아닌 한 줄 요약.
+    # [판단 근거] — 분류별(법률/계약/사규/약정·행정규칙). 패널=문서 원문 인용, prose=종합 판단(별도).
     p.append('<div style="font-size:13px;font-weight:700;color:#3D3C38;margin-top:10px;">판단 근거 '
              '<span style="font-weight:400;color:#999;">※ 법률 / 계약 / 사규 / 약정·행정규칙</span></div>')
     for cat in ("법률", "계약", "사규", "약정"):
         items = groups[cat]
         _label = "약정·행정규칙" if cat == "약정" else cat
-        if items:
+        rep = _reps.get(cat) if cat != "법률" else None   # 법률은 LLM leverage 유지
+        if rep:
+            # 결정론: 그 문서 원문 스니펫(닫힌집합 그대로 — 환각 0). 길면 발췌 + …(전체는 detail).
+            _snip = " ".join((rep.get("snippet") or "").split())
+            _snip = (_snip[:160] + "…") if len(_snip) > 160 else _snip
+            _body = f'「{rep["title"]}」 {_snip}' if _snip else f'「{rep["title"]}」'
+            p.append(f'<div style="font-size:13px;line-height:1.5;color:#3D3C38;">· <b>{_label}</b>&nbsp;&nbsp;{_body}</div>')
+        elif items:
             prov = "" if all(lv["provenance_ok"] for lv in items) else ' <span style="color:#A07020;">(출처 일부 불명)</span>'
             txt = " · ".join(lv["point"] for lv in items)
             p.append(f'<div style="font-size:13px;line-height:1.5;color:#3D3C38;">· <b>{_label}</b>&nbsp;&nbsp;{txt}{prov}</div>')

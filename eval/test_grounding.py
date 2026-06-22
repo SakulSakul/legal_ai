@@ -308,6 +308,48 @@ def test_bucket_reps_boost_is_query_conditional():
     assert "약정" not in G.relevant_bucket_reps(off, "개인정보 제3자 제공")   # 부스트 비활성 → 미주입
 
 
+# ── #42: 패널 버킷 = 그 문서 고유 원문 스니펫 (가짜 보강 제거) ──
+def test_bucket_reps_carry_verbatim_snippet():
+    """rep snippet = 후보 원문 text(닫힌집합 그대로) — LLM 재작성 0, 한 글자도 안 바뀜."""
+    cands = G.make_candidates(_bucket_docs(), cats=("contract", "yakjeong"),
+                              expand_large=True, query="특약매입 판촉비 60%")
+    reps = G.relevant_bucket_reps(cands, "특약매입 판촉비 60%")
+    by_id = {c["id"]: c for c in cands}
+    for r in reps.values():
+        assert "snippet" in r
+        assert r["snippet"] == by_id[r["id"]]["snippet"]   # 원본과 동일(환각 0)
+
+
+def test_bucket_reps_prefer_clause_section_over_preamble():
+    """계약 대표 = 판촉 조항 보유 조 청크(전문/머리말 아님) — snippet 가중 스코어(#42)."""
+    contract = {"id": "kc", "cat": "contract", "label": "특약매입 계약서",
+                "text": "특약매입 거래계약서 " + "전문 일반조항 텍스트. " * 110
+                        + "제12조 [판촉비용 분담] 공급자 판촉비용 분담비율 50% 초과 불가."}
+    cands = G.make_candidates([contract], cats=("contract",), expand_large=True, query="판촉비 분담")
+    rep = G.relevant_bucket_reps(cands, "판촉비 분담")["계약"]
+    assert "판촉비용 분담" in rep["snippet"]          # 조항 스니펫
+    assert "전문 일반조항" not in rep["snippet"]       # 전문(preamble) 아님
+
+
+def test_bucket_reps_distinct_content_per_bucket():
+    """버킷마다 서로 다른 고유 원문 — 같은 문장 복붙(가짜 다중 보강) 아님."""
+    docs = [
+        {"id": "kc", "cat": "contract", "label": "특약매입 계약서",
+         "text": "특약매입 거래계약서 " + "전문. " * 80 + "제12조 공급자 판촉비용 분담 50% 초과 불가."},
+        {"id": "yg", "cat": "yakjeong", "label": "공동 판촉행사 약정서",
+         "text": "제1조 공동 판촉행사 비용은 구매자가 50% 이상 부담."},
+        {"id": "sg", "cat": "saryu", "label": "판촉비용 분담 지침",
+         "text": "제5조 판촉비용 분담은 협력사에 50% 초과 전가 불가."},
+    ]
+    cands = G.make_candidates(docs, cats=("contract", "yakjeong", "saryu"),
+                              expand_large=True, query="판촉비 분담 50%")
+    reps = G.relevant_bucket_reps(cands, "판촉비 분담 50%")
+    snippets = [r["snippet"] for r in reps.values()]
+    assert len(snippets) == len(set(snippets))         # 모두 상이(복붙 아님)
+    assert "구매자" in reps["약정"]["snippet"]          # 약정 고유(구매자 50%)
+    assert "협력사" in reps["사규"]["snippet"]          # 사규 고유
+
+
 def test_bucket_reps_top1_per_bucket():
     """버킷당 최대 1건(top-1) — 같은 버킷 여러 후보여도 최상위만."""
     cands = G.make_candidates(_bucket_docs(), cats=("contract", "yakjeong"),
@@ -363,12 +405,13 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def test_legal_ai_wires_bucket_reps_backstop():
-    """#41: 약정 칸 결정론 — reps 계산 + 협상 브리프 패널 백스톱(게이트 통과분만)."""
+    """#41/#42: 약정 칸 결정론 — reps 계산 + 패널이 그 문서 원문 스니펫을 결정론 표시."""
     src = open(os.path.join(_ROOT, "legal_ai.py"), encoding="utf-8").read()
     assert "relevant_bucket_reps" in src                  # 게이트 대표 계산
-    assert "_doc_bucket_reps" in src                      # jd에 저장 + 패널 백스톱
-    # 백스톱이 groups 내부문서 칸에 주입(법률 칸 미개입)
+    assert "_doc_bucket_reps" in src                      # jd에 저장 + 패널
     assert 'jd.get("_doc_bucket_reps")' in src
+    # #42: 패널이 rep의 원문 snippet을 렌더(LLM 공통 분석 복사 아님)
+    assert 'rep.get("snippet")' in src
 
 
 def test_legal_ai_wires_expand_and_label_groups():
