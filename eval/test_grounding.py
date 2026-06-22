@@ -310,14 +310,17 @@ def test_bucket_reps_boost_is_query_conditional():
 
 # ── #42: 패널 버킷 = 그 문서 고유 원문 스니펫 (가짜 보강 제거) ──
 def test_bucket_reps_carry_verbatim_snippet():
-    """rep snippet = 후보 원문 text(닫힌집합 그대로) — LLM 재작성 0, 한 글자도 안 바뀜."""
+    """rep snippet = 후보 원문 발췌(#43 extract_key_clause) — 선택만, 변형 0(모든 토큰이 원문에 존재)."""
     cands = G.make_candidates(_bucket_docs(), cats=("contract", "yakjeong"),
                               expand_large=True, query="특약매입 판촉비 60%")
     reps = G.relevant_bucket_reps(cands, "특약매입 판촉비 60%")
     by_id = {c["id"]: c for c in cands}
     for r in reps.values():
-        assert "snippet" in r
-        assert r["snippet"] == by_id[r["id"]]["snippet"]   # 원본과 동일(환각 0)
+        assert r["snippet"]
+        src = " ".join(by_id[r["id"]]["text"].split())     # 공백 정규화한 원문
+        for tok in r["snippet"].rstrip("…").split():       # 발췌 토큰이 전부 원문에 = 환각 0
+            if len(tok) >= 2:
+                assert tok in src, (tok, src[:60])
 
 
 def test_bucket_reps_prefer_clause_section_over_preamble():
@@ -399,6 +402,69 @@ def test_scrub_plain_text_unchanged():
     assert G.scrub_uuids("제11조 판촉비용 분담비율 50%", []) == "제11조 판촉비용 분담비율 50%"
 
 
+# ── #43: 발췌 정밀화 (조→항, 판단근거 선별, 보일러플레이트 제외) ──
+_HANG_CONTRACT = ("제12조 [판촉비용 분담] ① 공동 판촉행사는 사전 서면합의로 한다. "
+                  "② 비용 정산은 월 단위로 한다. "
+                  "③ 공급자의 판촉비용 분담비율은 100분의 50을 초과할 수 없다. "
+                  "④ 공급자의 자발적 요청에 의한 차별화된 판촉행사는 적용을 제외한다.")
+
+
+def test_extract_clause_picks_judgment_hang_not_heading():
+    """제12조에서 ③(50%)·④(예외) 선별 — 머리말/①서두 아님(#43)."""
+    out = G.extract_key_clause(_HANG_CONTRACT, "특약매입 판촉비 분담 50%")
+    assert "100분의 50" in out and "초과할 수 없다" in out      # ③
+    assert "자발적" in out and "적용을 제외" in out             # ④
+    assert "서면합의" not in out                                # ① 서두 아님
+    assert "비용 정산은 월" not in out                          # ② 무관 아님
+
+
+def test_extract_clause_excludes_boilerplate():
+    """목적·정의·당사자·보존 보일러플레이트는 판단근거로 안 뽑힘(정량 규칙 없으면)."""
+    text = ("공동 판촉행사 약정서 본 약정의 당사자는 갑과 을이며 보존기간은 5년으로 한다. "
+            "제1조 [비용분담] 공동 판촉행사의 총 비용은 구매자가 50% 이상을 부담한다.")
+    out = G.extract_key_clause(text, "판촉비 분담 50%")
+    assert "구매자가 50% 이상" in out
+    assert "당사자" not in out and "보존기간" not in out
+
+
+def test_extract_clause_verbatim_only():
+    """발췌는 원문 부분문자열만 — 변형/창작 0(모든 토큰이 원문에)."""
+    out = G.extract_key_clause(_HANG_CONTRACT, "판촉 분담 50% 예외")
+    src = " ".join(_HANG_CONTRACT.split())
+    for tok in out.rstrip("…").split():
+        if len(tok) >= 2:
+            assert tok in src
+
+
+def test_extract_clause_fallback_not_headmatter():
+    """키워드 매치 0이어도 폴백은 머리말 truncate 아닌 비-보일러플레이트 문장."""
+    text = "제1조 [목적] 이 약정의 목적을 정한다. 제2조 갑은 을에게 통지한다."
+    out = G.extract_key_clause(text, "전혀무관질의어")
+    assert "목적" not in out                       # 보일러플레이트 회피
+    assert "통지" in out
+
+
+# ── #43: 권장행동 원기호 풀어쓰기 (제N조 제N항) ───────────────
+def test_expand_legal_refs_circled_and_section():
+    from negotiation_util import _expand_legal_refs
+    import re as _re
+    cases = {
+        "§11①②③④ 적용": "제11조 제1~4항 적용",
+        "§11④ 위반": "제11조 제4항 위반",
+        "§11①② 의무": "제11조 제1·2항 의무",
+    }
+    for src, exp in cases.items():
+        assert _expand_legal_refs(src) == exp
+    # 모든 원기호/§ 잔존 0
+    for src in ("[⑤ 충족]", "§11①②③④", "①②③ 항목"):
+        assert not _re.search(r"[①-⑮§]", _expand_legal_refs(src))
+
+
+def test_expand_legal_refs_leaves_plain_text():
+    from negotiation_util import _expand_legal_refs
+    assert _expand_legal_refs("서면약정·동시교부 필요") == "서면약정·동시교부 필요"
+
+
 # ── 배선 회귀 잠금 (소스 가드) ─────────────────────────────────
 import os
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -412,6 +478,8 @@ def test_legal_ai_wires_bucket_reps_backstop():
     assert 'jd.get("_doc_bucket_reps")' in src
     # #42: 패널이 rep의 원문 snippet을 렌더(LLM 공통 분석 복사 아님)
     assert 'rep.get("snippet")' in src
+    # #43: 권장행동 원기호 풀어쓰기(MD 가독성)
+    assert "_expand_legal_refs" in src
 
 
 def test_legal_ai_wires_expand_and_label_groups():

@@ -27,6 +27,50 @@ BINDING_LABEL = {"fixed": "못 바꿈", "conditional": "조건부", "negotiable"
 _NULLISH = ("", "null", "none", "없음", "n/a", "na")
 
 
+import re
+
+# ── 권장행동 원기호 풀어쓰기 (#43) ────────────────────────────
+# MD(비전문가)가 ⑤·①②③④·§11 약어를 못 읽음 → "제N조 제N항"으로 풀어쓴다(권장행동만; 법률 칸은 무회귀).
+_CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮"
+_CIRCLED_NUM = {c: i + 1 for i, c in enumerate(_CIRCLED)}
+
+
+def _circled_run(run):
+    """연속 원기호 run → '제N항'. 3개+ 연속이면 범위(제1~4항), 2개면 ·연결(제1·2항)."""
+    nums = [_CIRCLED_NUM[c] for c in run if c in _CIRCLED_NUM]
+    if not nums:
+        return run
+    if len(nums) == 1:
+        return f"제{nums[0]}항"
+    if len(nums) >= 3 and nums == list(range(nums[0], nums[-1] + 1)):
+        return f"제{nums[0]}~{nums[-1]}항"
+    return "제" + "·".join(str(n) for n in nums) + "항"
+
+
+def _expand_legal_refs(text):
+    """§11①②③④ → '제11조 제1~4항', 독립 원기호 ⑤ → '제5항'(맥락에 조 있으면 제N조 제N항).
+    약어/원기호 잔존 0 — MD 가독성(권장행동). 텍스트의 다른 부분은 불변."""
+    if not text:
+        return text
+    # §N[원기호…] → 제N조 [제…항]
+    def _sec(m):
+        out = f"제{m.group(1)}조"
+        if m.group(2):
+            out += " " + _circled_run(m.group(2))
+        return out
+    text = re.sub(r"§\s*(\d+)\s*([①-⑮]*)", _sec, text)
+    # 남은 독립 원기호 run → 제N항(같은 문자열에 제N조 맥락 있으면 그 조를 앞에)
+    jo = re.search(r"제(\d+)조", text)
+    prefix = f"제{jo.group(1)}조 " if jo else ""
+
+    def _hang(m):
+        start = m.start()
+        # 직전이 '조' 또는 '조 '면 이미 조 맥락 → 중복 방지(제N항만)
+        prev = text[max(0, start - 2):start]
+        return (("" if prev.rstrip().endswith("조") else prefix) + _circled_run(m.group(0)))
+    return re.sub(r"[①-⑮]+", _hang, text)
+
+
 def source_meta(source):
     """출처 문자열 → 시각 메타. 미인정 출처는 UNKNOWN(강등)."""
     return SOURCE_ROLE.get(source, UNKNOWN_SOURCE)
