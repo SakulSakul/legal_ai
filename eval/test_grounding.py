@@ -254,9 +254,121 @@ def test_prompt_block_has_bucket_representation_nudge():
     assert "관련성 우선" in block                      # 무관 억지 인용 금지
 
 
+# ── #41: relevance 게이트 버킷 대표 (약정 칸 결정론) ──────────
+def _bucket_docs():
+    return [
+        {"id": "kc", "cat": "contract", "label": "특약매입 계약서",
+         "text": "특약매입 거래계약서 " + "일반조항. " * 80
+                 + "제11조 [판촉행사] 공급자 판촉비용 분담비율 50% 초과 불가."},
+        {"id": "yg", "cat": "yakjeong", "label": "공동 판촉행사 약정서",
+         "text": "제1조 공동 판촉행사 비용분담 구매자 50% 이상 부담."},
+        {"id": "ym", "cat": "yakjeong", "label": "매장이동 약정서",
+         "text": "제1조 매장 위치 이동. 해당 없음."},
+        {"id": "yi", "cat": "yakjeong", "label": "인테리어 설치 약정서",
+         "text": "제1조 인테리어 비용 협력사 부담."},
+    ]
+
+
+def test_bucket_reps_gate_keeps_onpoint_drops_irrelevant():
+    """관련 버킷 대표(공동판촉)는 통과, 무관(매장이동·인테리어)은 게이트에서 제외."""
+    cands = G.make_candidates(_bucket_docs(), cats=("contract", "yakjeong"),
+                              expand_large=True, query="특약매입 판촉비 60%")
+    reps = G.relevant_bucket_reps(cands, "특약매입 판촉비 60%")
+    assert reps["계약"]["title"] == "특약매입 계약서"
+    assert reps["약정"]["title"] == "공동 판촉행사 약정서"   # 관련 약정만
+    # 무관 약정(매장이동·인테리어)은 top-1으로 안 뽑힘
+    assert reps["약정"]["title"] not in ("매장이동 약정서", "인테리어 설치 약정서")
+
+
+def test_bucket_reps_empty_when_no_relevant():
+    """질의와 무관하면 그 버킷 대표 없음 — 억지 주입 금지(닫힌집합 드롭 정신)."""
+    docs = [{"id": "ym", "cat": "yakjeong", "label": "매장이동 약정서", "text": "매장 위치 이동."}]
+    cands = G.make_candidates(docs, cats=("yakjeong",), expand_large=True, query="개인정보 제3자 제공")
+    reps = G.relevant_bucket_reps(cands, "개인정보 제3자 제공")
+    assert "약정" not in reps          # 무관 → 미주입
+
+
+def test_bucket_reps_cross_topic_no_overinjection():
+    """#41 교차주제 가드: 비-판촉 질의(모조품)엔 공동판촉 약정서 과주입 금지.
+    부스트(판촉/분담)가 무조건이면 공동판촉이 모든 질의에 score>0 → #37 병렬 약정으로 오주입."""
+    cands = G.make_candidates(_bucket_docs(), cats=("contract", "yakjeong"),
+                              expand_large=True, query="모조품 짝퉁 상표권 침해")
+    reps = G.relevant_bucket_reps(cands, "모조품 짝퉁 상표권 침해")
+    assert "약정" not in reps        # 판촉 약정이 모조품 질의에 안 끌려옴
+    assert "계약" not in reps        # 특약매입 계약도 모조품과 무관 → 미주입
+
+
+def test_bucket_reps_boost_is_query_conditional():
+    """부스트는 질의가 그 도메인일 때만 게이트를 돕는다(무조건 아님)."""
+    docs = [{"id": "yg", "cat": "yakjeong", "label": "공동 판촉행사 약정서",
+             "text": "제1조 공동 판촉행사 비용분담 50%."}]
+    on = G.make_candidates(docs, cats=("yakjeong",), expand_large=True, query="판촉비 분담")
+    off = G.make_candidates(docs, cats=("yakjeong",), expand_large=True, query="개인정보 제3자 제공")
+    assert G.relevant_bucket_reps(on, "판촉비 분담").get("약정", {}).get("title") == "공동 판촉행사 약정서"
+    assert "약정" not in G.relevant_bucket_reps(off, "개인정보 제3자 제공")   # 부스트 비활성 → 미주입
+
+
+def test_bucket_reps_top1_per_bucket():
+    """버킷당 최대 1건(top-1) — 같은 버킷 여러 후보여도 최상위만."""
+    cands = G.make_candidates(_bucket_docs(), cats=("contract", "yakjeong"),
+                              expand_large=True, query="판촉 분담")
+    reps = G.relevant_bucket_reps(cands, "판촉 분담")
+    assert set(reps.keys()) <= {"계약", "약정", "사규"}
+    assert isinstance(reps.get("약정"), dict)   # 단일 dict(top-1), 리스트 아님
+
+
+# ── #41: 합성 docs id 본문 누출 scrub ─────────────────────────
+def _synth_cands():
+    return G.make_candidates([
+        {"id": "특약매입.docx_contract_1773706789.495567", "cat": "contract",
+         "label": "특약매입 계약서", "text": "특약매입 거래계약서 " + "조항. " * 90
+                  + "제12조 [판촉비용] 판촉 분담 정산."},
+        {"id": "공동판촉.docx_yakjeong_1773706790.1", "cat": "yakjeong",
+         "label": "공동 판촉행사 약정서", "text": "제1조 공동 판촉 비용분담 50%."},
+    ], cats=("contract", "yakjeong"), expand_large=True, query="판촉 분담")
+
+
+def test_scrub_synthetic_docs_id_to_title():
+    """라이브 누출 재현: [파일명.docx_cat_ts::제N조] → 「title」(UUID 아님도 잡힘)."""
+    cands = _synth_cands()
+    leak = ("쟁점은 [특약매입.docx_contract_1773706789.495567::제12조, "
+            "공동판촉.docx_yakjeong_1773706790.1] 참조")
+    out = G.scrub_uuids(leak, cands)
+    assert ".docx_" not in out and "::제" not in out      # 합성 id 0건
+    assert "「특약매입 계약서」" in out and "「공동 판촉행사 약정서」" in out
+
+
+def test_scrub_synthetic_section_id_falls_back_to_parent():
+    """후보에 없는 조 청크 id여도 부모 base id로 「title」 매핑(::제N조 stray 차단)."""
+    cands = _synth_cands()
+    out = G.scrub_uuids("근거 특약매입.docx_contract_1773706789.495567::제99조 참조", cands)
+    assert "::제99조" not in out and ".docx_" not in out
+    assert "「특약매입 계약서」" in out
+
+
+def test_scrub_synthetic_stray_removed():
+    """후보에 전혀 없는 합성 id는 제거(매핑 불가 stray)."""
+    out = G.scrub_uuids("근거 미상.docx_contract_999.0 참조", [])
+    assert ".docx_" not in out and "참조" in out
+
+
+def test_scrub_plain_text_unchanged():
+    """id 없는 평문은 무변경(무회귀)."""
+    assert G.scrub_uuids("제11조 판촉비용 분담비율 50%", []) == "제11조 판촉비용 분담비율 50%"
+
+
 # ── 배선 회귀 잠금 (소스 가드) ─────────────────────────────────
 import os
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_legal_ai_wires_bucket_reps_backstop():
+    """#41: 약정 칸 결정론 — reps 계산 + 협상 브리프 패널 백스톱(게이트 통과분만)."""
+    src = open(os.path.join(_ROOT, "legal_ai.py"), encoding="utf-8").read()
+    assert "relevant_bucket_reps" in src                  # 게이트 대표 계산
+    assert "_doc_bucket_reps" in src                      # jd에 저장 + 패널 백스톱
+    # 백스톱이 groups 내부문서 칸에 주입(법률 칸 미개입)
+    assert 'jd.get("_doc_bucket_reps")' in src
 
 
 def test_legal_ai_wires_expand_and_label_groups():
