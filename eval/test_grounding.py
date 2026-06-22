@@ -131,9 +131,82 @@ def test_apply_grounding_idempotent():
     assert jd["issues"][0]["applicable_rule"] == snap
 
 
+# ── #39 2B: 큰 docs 런타임 섹션추출 (판촉 조 가시화) ──────────
+def _big_contract():
+    """특약매입 계약서 재현 — 판촉비용 분담금 조항이 긴 본문 뒤에 묻힘(snippet[:240] 밖)."""
+    text = ("특약매입 거래계약서 제1조 [목적] 기본조건을 정한다. "
+            + "본 계약은 신의성실로 이행한다. " * 60   # 앞부분 채워 판촉 조항 묻기(>800자 = 분할 대상)
+            + "제11조 [판촉비용 분담금] 을은 판촉비용 분담금을 상품대금에서 공제 부담한다. "
+            + "제20조 [기타] 관계법령에 따른다.")
+    return {"id": "k1", "cat": "contract", "label": "특약매입 계약서", "text": text}
+
+
+def test_split_articles_by_jo():
+    secs = G._split_articles("제1조 목적 제2조의2 정의 제11조 [판촉비용 분담금] 부담")
+    heads = [h for h, _ in secs]
+    assert heads == ["제1조", "제2조의2", "제11조"]
+    assert "판촉비용 분담금" in dict(secs)["제11조"]
+
+
+def test_split_articles_none_when_no_marker():
+    assert G._split_articles("조 없는 평문 텍스트") == []
+
+
+def test_expand_small_doc_unchanged():
+    """작은 docs(공동판촉 약정서 등)는 분할 없이 1건(원 레코드 id)."""
+    small = {"id": "y1", "cat": "yakjeong", "label": "공동 판촉행사 약정서",
+             "text": "제1조 [비용분담] 구매자는 50% 이상 부담."}
+    out = G.expand_doc_sections(small)
+    assert len(out) == 1 and out[0]["id"] == "y1"
+
+
+def test_expand_large_doc_surfaces_promo_article():
+    """큰 계약서 → 부모(실 id) + 제N조 후보. 판촉 조가 짧고 on-point한 독립 후보로."""
+    out = G.expand_doc_sections(_big_contract())
+    ids = {c["id"] for c in out}
+    assert "k1" in ids                       # 부모(전문) 후보 유지(인용 호환)
+    assert "k1::제11조" in ids                # 판촉 조 합성 후보
+    promo = next(c for c in out if c["id"] == "k1::제11조")
+    assert "판촉비용 분담금" in promo["snippet"]   # 묻혔던 조항이 가시화
+    assert promo["title"] == "특약매입 계약서"     # 렌더는 부모 문서명(조 단위 노출 아님)
+    assert promo["kind"] == "계약"
+
+
+def test_expand_large_buried_promo_invisible_without_split():
+    """가드: 분할 없으면(현행 snippet[:240]) 판촉 조항이 LLM 시야 밖이었음 — 회귀 잠금."""
+    base = G.make_candidate(_big_contract())
+    assert "판촉비용 분담금" not in base["snippet"]   # 버그 재현(묻힘)
+
+
+def test_make_candidates_expand_large_flag():
+    cands = G.make_candidates([_big_contract()], cats=("contract",), expand_large=True)
+    assert any("판촉비용 분담금" in c["snippet"] for c in cands)
+    # 기본(expand_large=False)은 분할 안 함(무회귀)
+    plain = G.make_candidates([_big_contract()], cats=("contract",))
+    assert len(plain) == 1 and not any("판촉비용 분담금" in c["snippet"] for c in plain)
+
+
+def test_apply_grounding_dedups_same_doc_articles():
+    """같은 문서의 여러 조가 인용돼도 계약 칸에 문서명 1회만(title dedup)."""
+    cands = G.make_candidates([_big_contract()], cats=("contract",), expand_large=True)
+    jd = {"issues": [{"cited_source_ids": ["k1::제11조", "k1::제20조"]}]}
+    G.apply_grounding(jd, cands)
+    assert jd["issues"][0]["applicable_rule"] == "「특약매입 계약서」"   # 「..」/「..」 중복 아님
+
+
 # ── 배선 회귀 잠금 (소스 가드) ─────────────────────────────────
 import os
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_legal_ai_wires_expand_and_label_groups():
+    """#39: docs 후보가 expand_large로 조 분할 + detail 라벨이 #33 kind 결정론 분리."""
+    src = open(os.path.join(_ROOT, "legal_ai.py"), encoding="utf-8").read()
+    assert "expand_large=True" in src                       # 2B 섹션추출 배선
+    assert "_issue_doc_groups" in src                       # 라벨 결정론 헬퍼
+    assert 'grounded_sources' in src
+    # detail 라벨이 kind→type 결정론 매핑을 씀(휴리스틱 단독 아님)
+    assert '"계약": ("📄 적용 계약서"' in src and '"약정": ("📝 적용 약정서"' in src
 
 
 def test_legal_ai_wires_grounding():

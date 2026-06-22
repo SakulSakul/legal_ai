@@ -146,9 +146,10 @@ def _internal_candidates(query="", block_topic=None):
         saryu = nexus_adapter.fetch_nexus_candidates(query, client=init_supabase(), categories=cats)
     except Exception as e:
         logger.warning(f"nexus 사규 조회 실패(→docs[saryu] 폴백): {e}")
-    out += saryu if saryu else grounding_util.make_candidates(docs, cats=("saryu",))
+    out += saryu if saryu else grounding_util.make_candidates(docs, cats=("saryu",), expand_large=True)
     # 계약·약정: 항상 docs(병렬 전용 소스, nexus 아님). nexus-XOR-docs 폐기의 핵심.
-    out += grounding_util.make_candidates(docs, cats=("contract", "yakjeong"))
+    # expand_large: 큰 계약서(특약매입 등)를 제N조 후보로 분할 — 판촉 조항이 묻혀 잘리지 않게(#39 2B).
+    out += grounding_util.make_candidates(docs, cats=("contract", "yakjeong"), expand_large=True)
     return out
 
 
@@ -3120,6 +3121,41 @@ def _detect_doc_type_label(rule_text):
     return "🏛️ 적용 사규", "사규"
 
 
+# #33 cat→kind(사규/계약/약정) → detail 라벨 결정론 매핑(메인 4버킷과 동일 기준).
+_KIND_DOC_LABEL = {
+    "사규": ("🏛️ 적용 사규", "사규"),
+    "계약": ("📄 적용 계약서", "계약서"),
+    "약정": ("📝 적용 약정서", "약정서"),
+}
+_KIND_GROUP_ORDER = ("사규", "계약", "약정")
+
+
+def _issue_doc_groups(issue):
+    """쟁점 적용문서를 #33 결정론 kind로 type별 분리 — 혼합 그룹 오라벨 방지(버그: 사규+약정이
+    한 문자열이면 '약정' 키워드에 걸려 사규까지 '적용 약정서'로 오라벨됨).
+    grounded_sources(kind 보유)가 있으면 그걸로 type별 분리(한 헤더에 사규+약정 안 뭉침).
+    없으면 applicable_rule 문자열 휴리스틱 폴백(무회귀). 반환 [(label, dtype, "「t」 / 「t」"), …]."""
+    gs = issue.get("grounded_sources") or []
+    if gs:
+        by_kind = {}
+        for g in gs:
+            by_kind.setdefault(g.get("kind") or "사규", []).append((g.get("title") or "").strip())
+        order = _KIND_GROUP_ORDER + tuple(k for k in by_kind if k not in _KIND_GROUP_ORDER)
+        groups = []
+        for k in order:
+            titles = [t for t in dict.fromkeys(by_kind.get(k, [])) if t]  # 동일문서 여러 조 → title dedup
+            if titles:
+                label, dtype = _KIND_DOC_LABEL.get(k, ("🏛️ 적용 사규", "사규"))
+                groups.append((label, dtype, " / ".join(f"「{t}」" for t in titles)))
+        if groups:
+            return groups
+    rule = (issue.get("applicable_rule") or "").strip()
+    if not rule:
+        return []
+    label, dtype = _detect_doc_type_label(rule)
+    return [(label, dtype, _wrap_saryu_brackets(rule))]
+
+
 def render_issues_table(issues, citation_results):
     if not issues: return
     risk_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
@@ -3151,10 +3187,9 @@ def render_issues_table(issues, citation_results):
                 if issue.get("law_analysis"):
                     st.caption(issue["law_analysis"])
             with col2:
-                rule = issue.get("applicable_rule", "")
-                if rule:
-                    _doc_label, _doc_type = _detect_doc_type_label(rule)
-                    st.markdown(f"**{_doc_label}:** {_wrap_saryu_brackets(rule)}")
+                # #33 결정론 kind로 type별 분리 표기(혼합 그룹 오라벨 방지).
+                for _doc_label, _doc_type, _joined in _issue_doc_groups(issue):
+                    st.markdown(f"**{_doc_label}:** {_joined}")
                 if issue.get("rule_analysis"):
                     st.caption(_wrap_saryu_brackets(issue["rule_analysis"]))
 
@@ -3373,16 +3408,15 @@ def generate_review_docx(json_data, detail_text, query_text):
                     run_label.bold = True
                     p.add_run(issue["law_analysis"])
 
-                # 적용 사규/계약서/약정서 + 관점
-                _dlabel, _dtype = _detect_doc_type_label(issue.get("applicable_rule", ""))
-                if issue.get("applicable_rule"):
+                # 적용 사규/계약서/약정서 + 관점 (#33 결정론 type별 분리 — 혼합 그룹 오라벨 방지)
+                for _dlabel, _dtype, _joined in _issue_doc_groups(issue):
                     p = doc.add_paragraph()
                     run_label = p.add_run(f"{_dlabel}: ")
                     run_label.bold = True
-                    p.add_run(_wrap_saryu_brackets(issue["applicable_rule"]))
+                    p.add_run(_joined)
                 if issue.get("rule_analysis"):
                     p = doc.add_paragraph()
-                    run_label = p.add_run(f"🔍 {_dtype} 관점: ")
+                    run_label = p.add_run("🔍 적용 규정 관점: ")
                     run_label.bold = True
                     p.add_run(_wrap_saryu_brackets(issue["rule_analysis"]))
 
