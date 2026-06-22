@@ -188,10 +188,70 @@ def test_make_candidates_expand_large_flag():
 
 def test_apply_grounding_dedups_same_doc_articles():
     """같은 문서의 여러 조가 인용돼도 계약 칸에 문서명 1회만(title dedup)."""
-    cands = G.make_candidates([_big_contract()], cats=("contract",), expand_large=True)
-    jd = {"issues": [{"cited_source_ids": ["k1::제11조", "k1::제20조"]}]}
+    # 두 조 모두 판촉/분담 → 둘 다 랭킹 생존(max_sections=2)하도록 구성.
+    two_promo = {"id": "k1", "cat": "contract", "label": "특약매입 계약서",
+                 "text": "특약매입 거래계약서 " + "전문 일반조항 텍스트입니다. " * 120
+                         + "제11조 [판촉행사] 판촉비용 분담비율 50%. "
+                         + "제12조 [판촉비용] 판촉 분담 정산 방법. "}
+    cands = G.make_candidates([two_promo], cats=("contract",), expand_large=True, query="판촉 분담")
+    ids = {c["id"] for c in cands}
+    assert "k1::제11조" in ids and "k1::제12조" in ids        # 둘 다 생존
+    jd = {"issues": [{"cited_source_ids": ["k1::제11조", "k1::제12조"]}]}
     G.apply_grounding(jd, cands)
     assert jd["issues"][0]["applicable_rule"] == "「특약매입 계약서」"   # 「..」/「..」 중복 아님
+
+
+# ── #40: 조 청크 flooding 차단 (단일 약정서 crowd-out 방지) ────
+def _flood_contract():
+    """다수 조를 가진 대형 계약서 — 판촉 조 1개 + 무관 조 다수(노이즈)."""
+    body = "특약매입 거래계약서 "
+    for n in (1, 2, 3, 5, 7, 9, 13, 15, 17, 19, 20):
+        body += f"제{n}조 [일반조항{n}] 일반적인 거래 조건을 정한다. " * 3
+    body += "제11조 [판촉행사] 공급자 판촉비용 분담비율은 50%를 초과할 수 없다. "
+    return {"id": "kf", "cat": "contract", "label": "특약매입 계약서", "text": body}
+
+
+def test_section_flood_capped_to_max():
+    """대형 계약서가 전체 조로 후보를 잠식하지 않게 — base + 상위 max_sections개만."""
+    out = G.expand_doc_sections(_flood_contract(), query="판촉비 분담")
+    secs = [c for c in out if "::" in c["id"]]
+    assert len(secs) <= 2                       # 조 청크 상한(flooding 차단)
+    assert len(out) <= 3                         # base + ≤2
+    assert any("제11조" in c["id"] for c in secs)  # 판촉 조는 살아남음
+
+
+def test_noise_articles_dropped_only_onpoint_kept():
+    """질의 무관 조(일반조항)는 후보에서 제외 — on-point(판촉)만."""
+    out = G.expand_doc_sections(_flood_contract(), query="판촉비 분담")
+    sec_ids = [c["id"] for c in out if "::" in c["id"]]
+    assert all("일반조항" not in c["snippet"] or "판촉" in c["snippet"] for c in out if "::" in c["id"])
+    assert not any(("제2조" in s or "제7조" in s or "제20조" in s) for s in sec_ids)  # 노이즈 드롭
+
+
+def test_yakjeong_survives_contract_flood():
+    """핵심 회귀: 큰 계약서 + 단일 약정서 → 약정서가 계약 조 청크에 밀리지 않음(#40)."""
+    docs = [_flood_contract(),
+            {"id": "yg", "cat": "yakjeong", "label": "공동 판촉행사 약정서",
+             "text": "제1조 공동 판촉행사 비용분담 구매자 50% 이상 부담."}]
+    cands = G.make_candidates(docs, cats=("contract", "yakjeong"), expand_large=True, query="판촉비 분담")
+    assert any(c["id"] == "yg" for c in cands)                       # 약정서 생존
+    contract_n = sum(1 for c in cands if c["kind"] == "계약")
+    assert contract_n <= 3                                            # 계약 청크 제한(13 → ≤3)
+
+
+def test_rank_sections_orders_by_query_relevance():
+    secs = G._split_articles("제1조 일반조항 제11조 판촉비용 분담 50% 제20조 기타사항")
+    ranked = G._rank_sections(secs, "판촉 분담")
+    assert ranked and "판촉" in ranked[0][1]      # 판촉 조가 1순위
+    heads = [h for h, _ in ranked]
+    assert "제1조" not in heads and "제20조" not in heads  # 무관 조 제외(score 0)
+
+
+def test_prompt_block_has_bucket_representation_nudge():
+    cands = G.make_candidates(_docs())
+    block = G.candidates_prompt_block(cands)
+    assert "유형(사규·계약·약정)별로 대표" in block   # 2B 버킷 대표 nudge
+    assert "관련성 우선" in block                      # 무관 억지 인용 금지
 
 
 # ── 배선 회귀 잠금 (소스 가드) ─────────────────────────────────
@@ -203,6 +263,7 @@ def test_legal_ai_wires_expand_and_label_groups():
     """#39: docs 후보가 expand_large로 조 분할 + detail 라벨이 #33 kind 결정론 분리."""
     src = open(os.path.join(_ROOT, "legal_ai.py"), encoding="utf-8").read()
     assert "expand_large=True" in src                       # 2B 섹션추출 배선
+    assert "expand_large=True, query=query" in src          # #40: 조 랭킹용 query 전달(flooding 차단)
     assert "_issue_doc_groups" in src                       # 라벨 결정론 헬퍼
     assert 'grounded_sources' in src
     # detail 라벨이 kind→type 결정론 매핑을 씀(휴리스틱 단독 아님)

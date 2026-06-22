@@ -146,10 +146,11 @@ def _internal_candidates(query="", block_topic=None):
         saryu = nexus_adapter.fetch_nexus_candidates(query, client=init_supabase(), categories=cats)
     except Exception as e:
         logger.warning(f"nexus 사규 조회 실패(→docs[saryu] 폴백): {e}")
-    out += saryu if saryu else grounding_util.make_candidates(docs, cats=("saryu",), expand_large=True)
+    out += saryu if saryu else grounding_util.make_candidates(docs, cats=("saryu",), expand_large=True, query=query)
     # 계약·약정: 항상 docs(병렬 전용 소스, nexus 아님). nexus-XOR-docs 폐기의 핵심.
-    # expand_large: 큰 계약서(특약매입 등)를 제N조 후보로 분할 — 판촉 조항이 묻혀 잘리지 않게(#39 2B).
-    out += grounding_util.make_candidates(docs, cats=("contract", "yakjeong"), expand_large=True)
+    # expand_large: 큰 계약서(특약매입 등)를 질의 관련 상위 조 후보로 분할 — 판촉 조항 가시화(#39)
+    # 하되 전체 조 flooding으로 단일 약정서를 밀어내지 않게 on-point 상위만(#40 2A). query로 랭킹.
+    out += grounding_util.make_candidates(docs, cats=("contract", "yakjeong"), expand_large=True, query=query)
     return out
 
 
