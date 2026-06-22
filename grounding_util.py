@@ -123,6 +123,32 @@ def make_candidates(records, cats=INTERNAL_CATS, expand_large=False, query=""):
     return out
 
 
+_KIND_OF_CAT = {"contract": "계약", "yakjeong": "약정", "saryu": "사규"}
+
+
+def relevant_bucket_reps(candidates, query, cats=("contract", "yakjeong", "saryu")):
+    """버킷(kind)별 relevance 게이트 통과 top-1 후보 — LLM 인용과 무관한 결정론 대표(#41).
+    게이트 = 질의 토큰(+판촉/분담 도메인) 점수>0. 무관(점수 0: 매장이동·인테리어·협력사원 등)은
+    포함하지 않음(억지 표시 금지 = 닫힌집합 드롭 정신). 같은 문서 조 청크는 title로 묶여 top-1.
+    반환 {kind: {id, kind, title}} — 패널이 LLM 인용 비결정과 무관하게 버킷을 채우게."""
+    want = {_KIND_OF_CAT[c] for c in cats if c in _KIND_OF_CAT}
+    toks = [t for t in re.split(r"[\s,./\[\]()]+", query or "") if len(t) >= 2]
+    toks = list(dict.fromkeys(toks + list(_SECTION_BOOST)))
+    best = {}  # kind -> (score, candidate)
+    for c in (candidates or []):
+        k = c.get("kind")
+        if k not in want:
+            continue
+        hay = f"{c.get('title','')} {c.get('snippet','')}"
+        score = sum(hay.count(t) for t in toks)
+        if score <= 0:
+            continue  # relevance 게이트 — 무관 문서는 결정론 주입 대상 아님
+        cur = best.get(k)
+        if cur is None or score > cur[0]:
+            best[k] = (score, c)
+    return {k: {"id": v["id"], "kind": k, "title": v["title"]} for k, (s, v) in best.items()}
+
+
 def candidates_prompt_block(candidates):
     """LLM 프롬프트용 후보 목록 텍스트 — '인용은 이 id로만, 새 문서명 창작 금지'.
     빈 후보집합이면 내부문서 인용 자체를 금지(정직한 '해당 없음')."""
@@ -163,22 +189,38 @@ def is_hallucinated_name(name, candidates):
 
 
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-# prose에서 UUID 누출을 정리할 텍스트 필드(문서명은 「title」로만 나와야 함)
+# 합성 docs id 누출(#41): {파일명}.docx_{cat}_{ts}[::제N조] — UUID 아니라 #33 UUID scrub을 통과해 샘.
+# 예: 특약매입.docx_contract_1773706789.495567::제12조 . 정규식 prefix는 공백 불포함(prose 단어 잠식 방지)
+# — 파일명에 공백 있는 알려진 id는 아래 1차 직접치환이 정확히 잡는다(여긴 stray 백스톱).
+_SYNTH_ID_RE = re.compile(r"[^\s,()\[\]「」]*\.docx_[A-Za-z]+_[\d.]+(?:::제\s*\d+조(?:의\s*\d+)?)?")
+_DANGLING_SEC_RE = re.compile(r"(」)\s*::\s*제\s*\d+조(?:의\s*\d+)?")  # base만 치환돼 남은 조 suffix
+# prose에서 id 누출을 정리할 텍스트 필드(문서명은 「title」로만 나와야 함)
 _PROSE_FIELDS = ("law_analysis", "rule_analysis", "recommendation", "target_clause", "summary")
 
 
 def scrub_uuids(text, candidates):
-    """prose에서 raw UUID 백스톱(Bug1) — 후보 id면 「title」로 치환, 후보 밖 stray는 제거.
-    LLM이 본문에서 문서를 id로 지칭한 누출을 렌더 직전 정리. id는 cited_source_ids에만 있어야 함."""
-    if not text or "-" not in text:
+    """prose에서 raw 문서 id 백스톱 — 후보 id면 「title」로 치환, 후보 밖 stray는 제거.
+    UUID(#33 Bug1) + 합성 docs id(#41 ::제N조·파일명 공백 포함) 모두 정리. LLM이 본문에서 문서를
+    id로 지칭한 누출을 렌더 직전 제거 — id는 cited_source_ids에만 있어야 함."""
+    if not text:
         return text
-    by_id = {c["id"].lower(): c for c in (candidates or [])}
+    cands = candidates or []
+    by_id = {str(c["id"]).lower(): c for c in cands}
 
-    def _repl(m):
-        c = by_id.get(m.group(0).lower())
+    def _title_for(token):
+        c = by_id.get(token.lower()) or by_id.get(token.split("::")[0].lower())
         return f"「{c['title']}」" if c else ""
 
-    out = _UUID_RE.sub(_repl, text)
+    out = text
+    # 1) 알려진 후보 id 직접 치환(긴 것부터 — 조 청크 id가 base id를 포함). 파일명 공백·::제N조 정확.
+    for c in sorted(cands, key=lambda c: -len(str(c["id"]))):
+        cid = str(c["id"])
+        if cid and cid in out:
+            out = out.replace(cid, f"「{c['title']}」")
+    out = _DANGLING_SEC_RE.sub(r"\1", out)         # base만 치환 후 남은 ::제N조 정리
+    # 2) 후보 밖 stray 합성 docs id 제거(#41). 3) UUID(#33).
+    out = _SYNTH_ID_RE.sub(lambda m: _title_for(m.group(0)), out)
+    out = _UUID_RE.sub(lambda m: _title_for(m.group(0)), out)
     if out == text:
         return text
     # 치환/제거 후 군더더기 정리: 빈 꺾쇠, 연속 공백, 매달린 '및'/구두점 앞 공백

@@ -3065,6 +3065,19 @@ def render_negotiation_brief(jd):
     if has_exc:
         p.append('<div style="font-size:13px;color:#475569;">· 입증책임 = 우리 측</div>')
 
+    # #41 결정론 백스톱: relevance 게이트 통과 버킷 대표(_doc_bucket_reps)를 내부문서 칸(계약/사규/
+    # 약정)에 보장 — LLM 인용이 1/3 흔들려도 약정 칸이 매번 채워지게. 무관(게이트 미통과)은 reps에
+    # 아예 없어 주입 안 됨(억지 표시 금지). 이미 brief에 있으면(title 중복) 스킵. 법률 칸은 미개입.
+    for _rep in (jd.get("_doc_bucket_reps") or {}).values():
+        _cat = _rep.get("kind")
+        _title = (_rep.get("title") or "").strip()
+        if _cat not in groups or not _title:
+            continue
+        if any(_title in (lv.get("point") or "") for lv in groups[_cat]):
+            continue  # LLM이 이미 인용함 — 중복 방지
+        groups[_cat].append({"source": _cat, "point": f"「{_title}」",
+                             "provenance_ok": True, "has_exception": False})
+
     # [판단 근거] — 분류별(법률/계약/사규/약정·행정규칙). 조문 전문 아닌 한 줄 요약.
     p.append('<div style="font-size:13px;font-weight:700;color:#3D3C38;margin-top:10px;">판단 근거 '
              '<span style="font-weight:400;color:#999;">※ 법률 / 계약 / 사규 / 약정·행정규칙</span></div>')
@@ -4870,6 +4883,9 @@ def main():
                         _doc_cands = _internal_candidates(safe_query)
                         if _doc_cands:
                             json_data = grounding_util.apply_grounding(json_data, _doc_cands)
+                            # #41 약정 칸 결정론: relevance 게이트 통과 버킷 top-1을 협상 브리프 패널에
+                            # 보장(LLM 인용 비결정과 분리). 무관(게이트 미통과)은 미주입. prose 무수정.
+                            json_data["_doc_bucket_reps"] = grounding_util.relevant_bucket_reps(_doc_cands, safe_query)
                         else:
                             json_data = _validate_saryu_names(json_data)
 
