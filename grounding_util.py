@@ -20,8 +20,9 @@ def _rec_cat(rec):
 
 
 def make_candidate(rec):
-    """소스 레코드(docs row/nexus row) → 후보 {id, cat, kind, title, snippet}.
-    안정 id·깨끗한 title은 레코드에서(LLM 아님). id나 title 없으면 None(grounding 불가 → 배제)."""
+    """소스 레코드(docs row/nexus row) → 후보 {id, cat, kind, title, snippet, text}.
+    안정 id·깨끗한 title은 레코드에서(LLM 아님). id나 title 없으면 None(grounding 불가 → 배제).
+    text=전문(발췌 정밀화 원천, #43), snippet=프롬프트용 발췌(text[:240])."""
     if not isinstance(rec, dict):
         return None
     rid = rec.get("id")
@@ -38,6 +39,7 @@ def make_candidate(rec):
         "kind": _CAT_LABEL.get(cat, "문서"),
         "title": title,
         "snippet": text[:240],
+        "text": text,            # 전문 — 패널 발췌 정밀화(#43)가 항/호 단위로 핵심 조항 선별
     }
 
 
@@ -104,7 +106,7 @@ def expand_doc_sections(rec, query="", large_chars=_LARGE_DOC_CHARS, max_section
             continue
         seen.add(sid)
         out.append({"id": sid, "cat": base["cat"], "kind": base["kind"],
-                    "title": base["title"], "snippet": seg[:240]})
+                    "title": base["title"], "snippet": seg[:240], "text": seg})
     return out
 
 
@@ -125,6 +127,66 @@ def make_candidates(records, cats=INTERNAL_CATS, expand_large=False, query=""):
 
 _KIND_OF_CAT = {"contract": "계약", "yakjeong": "약정", "saryu": "사규"}
 
+# ── 판단근거 핵심 조항 발췌 (#43) ─────────────────────────────
+# #42가 머리말 truncate(text[:240])라 보일러플레이트(목적·정의·당사자·보존)만 노출.
+# 해법: 조 본문을 항(①②③…)/문장 단위로 쪼개 쟁점 키워드로 스코어 → 판단근거 항만 발췌(원문 그대로).
+_HANG_MARK = re.compile(r"[①-⑮]")   # ①(2460)~⑮(246e)
+_CLAUSE_BOILERPLATE = ("목적", "정의", "당사자", "보존", "관리부서", "사규코드", "카테고리", "용어의")
+_CLAUSE_KEYWORDS = ("분담", "판촉", "100분의", "초과", "자발", "차별화", "예외", "상한", "부담", "비율", "50", "60")
+# 정량 규칙 신호 — 보일러플레이트 문장이라도 이게 있으면 판단근거(목적·정의여도 수치 기준이면 살림).
+_CLAUSE_STRONG = ("100분의", "초과", "상한", "분담비율", "50%", "50", "60")
+
+
+def _split_clauses(text):
+    """본문을 항(①②③…) 단위로, 마커 없으면 문장 단위로 분할 → [unit, …](원문 그대로)."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    if _HANG_MARK.search(text):
+        parts = _HANG_MARK.split(text)
+        marks = _HANG_MARK.findall(text)
+        units = [parts[0].strip()] if parts[0].strip() else []   # 머리말(첫 항 앞)
+        units += [(mk + seg).strip() for mk, seg in zip(marks, parts[1:]) if (mk + seg).strip()]
+        return units
+    return [s.strip() for s in re.split(r"(?<=[.。])\s+|\n+", text) if s.strip()]
+
+
+def extract_key_clause(text, query, max_units=2, budget=220):
+    """판단근거 핵심 조항 발췌(원문 그대로) — 쟁점 키워드 스코어 상위 항(들). 보일러플레이트 제외.
+    머리말 truncate(#42 결함) 대신 키워드 매치 항을 고른다. 매치 0이면 첫 비-보일러플레이트 문장.
+    선택만 할 뿐 텍스트 변형 0(반환 = 원본 부분문자열들). 쟁점1=50%·쟁점2=예외 항이 함께 뜨게 상위 N."""
+    units = _split_clauses(text)
+    if not units:
+        return (text or "")[:budget]
+    # 항 마커가 있으면 첫 unit(조 머리말 '제N조 [제목]')은 헤딩으로 분리 — 항만 스코어(머리말이 항
+    # 자리를 뺏지 않게). 헤딩은 prefix로 보존(예 '제12조 [판촉비용 분담] ③… ④…').
+    heading = ""
+    if _HANG_MARK.search(text) and units and not _HANG_MARK.match(units[0]):
+        if re.match(r"제\s*\d+\s*조", units[0]):
+            heading = units[0]
+        units = units[1:]
+    qtoks = [t for t in re.split(r"[\s,./\[\]()]+", query or "") if len(t) >= 2]
+    keys = list(dict.fromkeys(qtoks + list(_CLAUSE_KEYWORDS)))
+    scored = []
+    for i, u in enumerate(units):
+        is_boiler = any(b in u for b in _CLAUSE_BOILERPLATE)
+        if is_boiler and not any(s in u for s in _CLAUSE_STRONG):
+            continue                                 # 목적·정의·당사자·보존 = 제외(정량 규칙 없으면)
+        kw = sum(u.count(k) for k in keys)
+        if kw > 0:
+            scored.append((kw, i, u))
+    if not scored:
+        for u in units:                              # 폴백: 첫 비-보일러플레이트(머리말 truncate 금지)
+            if not any(b in u for b in _CLAUSE_BOILERPLATE):
+                return (f"{heading} {u}".strip())[:budget]
+        return (f"{heading} {units[0]}".strip())[:budget] if units else heading[:budget]
+    top = sorted(scored, key=lambda x: (-x[0], x[1]))[:max_units]
+    top = sorted(top, key=lambda x: x[1])            # 원문 순서 복원(쟁점1→쟁점2)
+    out = " ".join(u for _, _, u in top)
+    if heading:
+        out = f"{heading} {out}"
+    return out if len(out) <= budget else out[:budget].rstrip() + "…"
+
 
 def relevant_bucket_reps(candidates, query, cats=("contract", "yakjeong", "saryu")):
     """버킷(kind)별 relevance 게이트 통과 top-1 후보 — LLM 인용과 무관한 결정론 대표(#41).
@@ -135,27 +197,31 @@ def relevant_bucket_reps(candidates, query, cats=("contract", "yakjeong", "saryu
     ⚠️ 부스트(판촉/분담)는 *질의-조건부*(#41 교차주제 가드): query에 해당 단어가 있을 때만 활성.
     무조건 부스트면 공동판촉 약정서(판촉·분담 항상 보유)가 #37 병렬 약정 경로로 모조품 등 비-판촉
     질의에도 과주입돼 'MD에 틀린 근거' 노출 → 부스트는 질의가 그 도메인일 때만 게이트를 돕는다.
-    스코어는 snippet(원문)에 가중 — 조항 보유 청크가 대표로 뽑혀 패널에 고유 원문이 뜨게(#42)."""
+    스코어는 전문(text)에 가중 — 조항 보유 문서가 대표로(#42). snippet은 extract_key_clause로
+    판단근거 핵심 항만 발췌(#43, 머리말 truncate 아님)."""
     want = {_KIND_OF_CAT[c] for c in cats if c in _KIND_OF_CAT}
     qtoks = [t for t in re.split(r"[\s,./\[\]()]+", query or "") if len(t) >= 2]
     active_boost = [kw for kw in _SECTION_BOOST if kw in (query or "")]  # 질의-조건부 부스트
     toks = list(dict.fromkeys(qtoks + active_boost))
-    best = {}  # kind -> (score, candidate)
+    best = {}  # kind -> (sortkey, candidate)
     for c in (candidates or []):
         k = c.get("kind")
         if k not in want:
             continue
-        snip = c.get("snippet", "")
+        body = c.get("text") or c.get("snippet", "")   # 전문 스코어(#43 — 240자 밖 조항도 반영)
         title = c.get("title", "")
-        # snippet(원문) 가중 ×2 + title — 조항 보유 청크가 전문(preamble)·title보다 우선(#42).
-        score = 2 * sum(snip.count(t) for t in toks) + sum(title.count(t) for t in toks)
+        score = 2 * sum(body.count(t) for t in toks) + sum(title.count(t) for t in toks)
         if score <= 0:
             continue  # relevance 게이트 — 질의와 무관하면 결정론 주입 안 함
+        # 섹션(::, 포커스된 조) 우선 — 전문(base) 전체에서 발췌하면 머리말이 섞임(#43). 그 다음 점수.
+        is_section = "::" in str(c.get("id", ""))
+        key = (is_section, score)
         cur = best.get(k)
-        if cur is None or score > cur[0]:
-            best[k] = (score, c)
-    return {k: {"id": v["id"], "kind": k, "title": v["title"], "snippet": v.get("snippet", "")}
-            for k, (s, v) in best.items()}
+        if cur is None or key > cur[0]:
+            best[k] = (key, c)
+    return {k: {"id": v["id"], "kind": k, "title": v["title"],
+                "snippet": extract_key_clause(v.get("text") or v.get("snippet", ""), query)}
+            for k, (key, v) in best.items()}
 
 
 

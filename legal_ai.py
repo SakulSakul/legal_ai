@@ -27,7 +27,7 @@ from triage_util import (
     enrich_triage_fields, evidence_grade_for, EVIDENCE_BADGES,
     FRESHNESS_BADGES, FRESHNESS_COPY, freshness_badge_for,
 )
-from negotiation_util import build_brief
+from negotiation_util import build_brief, _expand_legal_refs
 import grounding_util
 import nexus_adapter
 
@@ -3078,9 +3078,8 @@ def render_negotiation_brief(jd):
         _label = "약정·행정규칙" if cat == "약정" else cat
         rep = _reps.get(cat) if cat != "법률" else None   # 법률은 LLM leverage 유지
         if rep:
-            # 결정론: 그 문서 원문 스니펫(닫힌집합 그대로 — 환각 0). 길면 발췌 + …(전체는 detail).
+            # 결정론: 그 문서 판단근거 핵심 조항 원문(#43 extract_key_clause — 머리말 아님, 변형 0).
             _snip = " ".join((rep.get("snippet") or "").split())
-            _snip = (_snip[:160] + "…") if len(_snip) > 160 else _snip
             _body = f'「{rep["title"]}」 {_snip}' if _snip else f'「{rep["title"]}」'
             p.append(f'<div style="font-size:13px;line-height:1.5;color:#3D3C38;">· <b>{_label}</b>&nbsp;&nbsp;{_body}</div>')
         elif items:
@@ -3104,7 +3103,8 @@ def render_negotiation_brief(jd):
     if actions:
         p.append('<div style="font-size:13px;font-weight:700;color:#3D3C38;margin-top:10px;">권장 행동</div>')
         for a in actions:
-            p.append(f'<div style="font-size:13px;line-height:1.5;color:#3D3C38;">· {a}</div>')
+            # #43 원기호/§약어 풀어쓰기(MD 가독성) — 권장행동만(법률 칸 §11④🛡⑤🃏는 무회귀).
+            p.append(f'<div style="font-size:13px;line-height:1.5;color:#3D3C38;">· {_expand_legal_refs(a)}</div>')
 
     p.append('</div>')
     st.markdown("".join(p), unsafe_allow_html=True)
