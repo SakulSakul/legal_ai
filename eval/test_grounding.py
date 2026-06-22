@@ -288,6 +288,26 @@ def test_bucket_reps_empty_when_no_relevant():
     assert "약정" not in reps          # 무관 → 미주입
 
 
+def test_bucket_reps_cross_topic_no_overinjection():
+    """#41 교차주제 가드: 비-판촉 질의(모조품)엔 공동판촉 약정서 과주입 금지.
+    부스트(판촉/분담)가 무조건이면 공동판촉이 모든 질의에 score>0 → #37 병렬 약정으로 오주입."""
+    cands = G.make_candidates(_bucket_docs(), cats=("contract", "yakjeong"),
+                              expand_large=True, query="모조품 짝퉁 상표권 침해")
+    reps = G.relevant_bucket_reps(cands, "모조품 짝퉁 상표권 침해")
+    assert "약정" not in reps        # 판촉 약정이 모조품 질의에 안 끌려옴
+    assert "계약" not in reps        # 특약매입 계약도 모조품과 무관 → 미주입
+
+
+def test_bucket_reps_boost_is_query_conditional():
+    """부스트는 질의가 그 도메인일 때만 게이트를 돕는다(무조건 아님)."""
+    docs = [{"id": "yg", "cat": "yakjeong", "label": "공동 판촉행사 약정서",
+             "text": "제1조 공동 판촉행사 비용분담 50%."}]
+    on = G.make_candidates(docs, cats=("yakjeong",), expand_large=True, query="판촉비 분담")
+    off = G.make_candidates(docs, cats=("yakjeong",), expand_large=True, query="개인정보 제3자 제공")
+    assert G.relevant_bucket_reps(on, "판촉비 분담").get("약정", {}).get("title") == "공동 판촉행사 약정서"
+    assert "약정" not in G.relevant_bucket_reps(off, "개인정보 제3자 제공")   # 부스트 비활성 → 미주입
+
+
 def test_bucket_reps_top1_per_bucket():
     """버킷당 최대 1건(top-1) — 같은 버킷 여러 후보여도 최상위만."""
     cands = G.make_candidates(_bucket_docs(), cats=("contract", "yakjeong"),

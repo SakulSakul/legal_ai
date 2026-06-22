@@ -128,12 +128,16 @@ _KIND_OF_CAT = {"contract": "계약", "yakjeong": "약정", "saryu": "사규"}
 
 def relevant_bucket_reps(candidates, query, cats=("contract", "yakjeong", "saryu")):
     """버킷(kind)별 relevance 게이트 통과 top-1 후보 — LLM 인용과 무관한 결정론 대표(#41).
-    게이트 = 질의 토큰(+판촉/분담 도메인) 점수>0. 무관(점수 0: 매장이동·인테리어·협력사원 등)은
-    포함하지 않음(억지 표시 금지 = 닫힌집합 드롭 정신). 같은 문서 조 청크는 title로 묶여 top-1.
-    반환 {kind: {id, kind, title}} — 패널이 LLM 인용 비결정과 무관하게 버킷을 채우게."""
+    게이트 = 질의 관련 점수>0. 무관(매장이동·인테리어·협력사원 등)은 미포함(억지 표시 금지).
+    같은 문서 조 청크는 title로 묶여 top-1. 반환 {kind: {id, kind, title}}.
+
+    ⚠️ 부스트(판촉/분담)는 *질의-조건부*(#41 교차주제 가드): query에 해당 단어가 있을 때만 활성.
+    무조건 부스트면 공동판촉 약정서(판촉·분담 항상 보유)가 #37 병렬 약정 경로로 모조품 등 비-판촉
+    질의에도 과주입돼 'MD에 틀린 근거' 노출 → 부스트는 질의가 그 도메인일 때만 게이트를 돕는다."""
     want = {_KIND_OF_CAT[c] for c in cats if c in _KIND_OF_CAT}
-    toks = [t for t in re.split(r"[\s,./\[\]()]+", query or "") if len(t) >= 2]
-    toks = list(dict.fromkeys(toks + list(_SECTION_BOOST)))
+    qtoks = [t for t in re.split(r"[\s,./\[\]()]+", query or "") if len(t) >= 2]
+    active_boost = [kw for kw in _SECTION_BOOST if kw in (query or "")]  # 질의-조건부 부스트
+    toks = list(dict.fromkeys(qtoks + active_boost))
     best = {}  # kind -> (score, candidate)
     for c in (candidates or []):
         k = c.get("kind")
@@ -142,7 +146,7 @@ def relevant_bucket_reps(candidates, query, cats=("contract", "yakjeong", "saryu
         hay = f"{c.get('title','')} {c.get('snippet','')}"
         score = sum(hay.count(t) for t in toks)
         if score <= 0:
-            continue  # relevance 게이트 — 무관 문서는 결정론 주입 대상 아님
+            continue  # relevance 게이트 — 질의와 무관하면 결정론 주입 안 함
         cur = best.get(k)
         if cur is None or score > cur[0]:
             best[k] = (score, c)
