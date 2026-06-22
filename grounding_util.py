@@ -129,11 +129,13 @@ _KIND_OF_CAT = {"contract": "계약", "yakjeong": "약정", "saryu": "사규"}
 def relevant_bucket_reps(candidates, query, cats=("contract", "yakjeong", "saryu")):
     """버킷(kind)별 relevance 게이트 통과 top-1 후보 — LLM 인용과 무관한 결정론 대표(#41).
     게이트 = 질의 관련 점수>0. 무관(매장이동·인테리어·협력사원 등)은 미포함(억지 표시 금지).
-    같은 문서 조 청크는 title로 묶여 top-1. 반환 {kind: {id, kind, title}}.
+    같은 문서 조 청크는 title로 묶여 top-1. 반환 {kind: {id, kind, title, snippet}}.
+    snippet = 그 문서의 원문 발췌(#42 패널이 LLM 공통 분석 대신 문서 고유 원문을 표시하게).
 
     ⚠️ 부스트(판촉/분담)는 *질의-조건부*(#41 교차주제 가드): query에 해당 단어가 있을 때만 활성.
     무조건 부스트면 공동판촉 약정서(판촉·분담 항상 보유)가 #37 병렬 약정 경로로 모조품 등 비-판촉
-    질의에도 과주입돼 'MD에 틀린 근거' 노출 → 부스트는 질의가 그 도메인일 때만 게이트를 돕는다."""
+    질의에도 과주입돼 'MD에 틀린 근거' 노출 → 부스트는 질의가 그 도메인일 때만 게이트를 돕는다.
+    스코어는 snippet(원문)에 가중 — 조항 보유 청크가 대표로 뽑혀 패널에 고유 원문이 뜨게(#42)."""
     want = {_KIND_OF_CAT[c] for c in cats if c in _KIND_OF_CAT}
     qtoks = [t for t in re.split(r"[\s,./\[\]()]+", query or "") if len(t) >= 2]
     active_boost = [kw for kw in _SECTION_BOOST if kw in (query or "")]  # 질의-조건부 부스트
@@ -143,14 +145,18 @@ def relevant_bucket_reps(candidates, query, cats=("contract", "yakjeong", "saryu
         k = c.get("kind")
         if k not in want:
             continue
-        hay = f"{c.get('title','')} {c.get('snippet','')}"
-        score = sum(hay.count(t) for t in toks)
+        snip = c.get("snippet", "")
+        title = c.get("title", "")
+        # snippet(원문) 가중 ×2 + title — 조항 보유 청크가 전문(preamble)·title보다 우선(#42).
+        score = 2 * sum(snip.count(t) for t in toks) + sum(title.count(t) for t in toks)
         if score <= 0:
             continue  # relevance 게이트 — 질의와 무관하면 결정론 주입 안 함
         cur = best.get(k)
         if cur is None or score > cur[0]:
             best[k] = (score, c)
-    return {k: {"id": v["id"], "kind": k, "title": v["title"]} for k, (s, v) in best.items()}
+    return {k: {"id": v["id"], "kind": k, "title": v["title"], "snippet": v.get("snippet", "")}
+            for k, (s, v) in best.items()}
+
 
 
 def candidates_prompt_block(candidates):
