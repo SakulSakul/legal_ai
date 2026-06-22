@@ -49,6 +49,10 @@ def make_candidate(rec):
 #       각 조 후보의 title은 부모 문서명(렌더는 「특약매입 계약서」로 — 조 단위 노출 아님).
 _ARTICLE_MARK = re.compile(r"(제\s*\d+\s*조(?:의\s*\d+)?)")
 _LARGE_DOC_CHARS = 800  # 이보다 길면 조 단위 분할(작은 약정서 ~수백자와 동등 경쟁 보장)
+# #40: 대형 docs를 *전체 조*로 풀면(특약매입 13조) 후보를 잠식 → 단일 약정서 crowd out.
+# 질의 관련 상위 조만 후보로(flooding 차단). 도메인 부스트 키워드 + 질의 토큰으로 랭킹.
+_SECTION_BOOST = ("판촉", "분담")     # 판촉비 도메인 on-point 조 부스트(예 제11조 [판촉행사])
+_MAX_SECTIONS = 2                      # 대형 docs당 조 청크 상한(약정서 등 타 버킷 보호)
 
 
 def _split_articles(text):
@@ -66,9 +70,24 @@ def _split_articles(text):
     return sections
 
 
-def expand_doc_sections(rec, large_chars=_LARGE_DOC_CHARS):
+def _rank_sections(sections, query):
+    """조 후보를 질의 관련도로 랭킹 → on-point 상위만(노이즈·flooding 차단).
+    점수 = 질의 토큰(+판촉/분담 도메인 키워드) 출현 합. score>0인 조만, 동점은 본문 앞 조 우선."""
+    toks = [t for t in re.split(r"[\s,./\[\]()]+", query or "") if len(t) >= 2]
+    toks = list(dict.fromkeys(toks + list(_SECTION_BOOST)))
+    scored = []
+    for idx, (head, seg) in enumerate(sections):
+        score = sum(seg.count(t) for t in toks)
+        if score > 0:
+            scored.append((score, -idx, head, seg))
+    scored.sort(reverse=True)
+    return [(head, seg) for _, _, head, seg in scored]
+
+
+def expand_doc_sections(rec, query="", large_chars=_LARGE_DOC_CHARS, max_sections=_MAX_SECTIONS):
     """큰 docs 레코드를 제N조 단위 후보로 확장(런타임). 작거나 조 마커 없으면 원 레코드 1건.
-    부모(전문) 후보는 실 id로 유지(인용 호환) + 각 조는 합성 id, title=부모 문서명."""
+    부모(전문) 후보는 실 id로 유지(인용 호환) + 질의 관련 상위 max_sections개 조만 합성 후보로
+    (#40: 전체 조 flooding 차단 — 단일 약정서가 계약서 조 청크에 밀리지 않게). title=부모 문서명."""
     base = make_candidate(rec)
     if not base:
         return []
@@ -79,7 +98,7 @@ def expand_doc_sections(rec, large_chars=_LARGE_DOC_CHARS):
     if not sections:
         return [base]
     out, seen = [base], {base["id"]}
-    for head, seg in sections:
+    for head, seg in _rank_sections(sections, query)[:max_sections]:  # on-point 상위만
         sid = f"{base['id']}::{head.replace(' ', '')}"
         if sid in seen:
             continue
@@ -89,14 +108,14 @@ def expand_doc_sections(rec, large_chars=_LARGE_DOC_CHARS):
     return out
 
 
-def make_candidates(records, cats=INTERNAL_CATS, expand_large=False):
+def make_candidates(records, cats=INTERNAL_CATS, expand_large=False, query=""):
     """레코드 목록 → 후보집합(닫힌 집합). cats로 도메인 필터. id 중복 제거.
-    expand_large=True면 큰 docs를 제N조 단위 후보로 확장(#39 2B — on-point 조 가시화)."""
+    expand_large=True면 큰 docs를 질의 관련 상위 조 후보로 확장(#39 가시화 + #40 flooding 차단)."""
     out, seen = [], set()
     for rec in (records or []):
         if cats is not None and _rec_cat(rec) not in cats:
             continue
-        items = expand_doc_sections(rec) if expand_large else [make_candidate(rec)]
+        items = expand_doc_sections(rec, query=query) if expand_large else [make_candidate(rec)]
         for c in items:
             if c and c["id"] not in seen:
                 seen.add(c["id"])
@@ -113,6 +132,11 @@ def candidates_prompt_block(candidates):
     lines = ["[내부문서 후보 — 인용은 반드시 아래 id로만. 목록에 없는 문서명을 새로 지어내지 마라]"]
     for c in candidates:
         lines.append(f"- id={c['id']} [{c['kind']}] {c['title']} :: {c['snippet'][:120]}")
+    # #40 2B: 유형(사규/계약/약정)별 대표 보장 — 한 유형(계약서 조 청크)에 쏠려 다른 유형(약정서)을
+    # 누락하지 않게. 단 관련성 우선(무관 문서 억지 인용 금지).
+    lines.append("· 위 후보 중 질의에 관련된 문서는 유형(사규·계약·약정)별로 대표 1건 이상을 "
+                 "cited_source_ids에 포함하라. 같은 문서의 여러 조보다 다른 유형의 관련 문서를 빠뜨리지 "
+                 "마라. 단 질의와 무관한 문서를 채우려 억지로 인용하지는 마라(관련성 우선).")
     return "\n".join(lines)
 
 
